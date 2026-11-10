@@ -10,6 +10,7 @@ layout(std140) uniform GooFrame {
     vec4 GooSky;       // rgb: colour of the sky overhead, a: seconds, for things that drift
     vec4 GooHorizon;   // rgb: colour of the sky at the horizon, a: daylight, 0..1
     vec4 GooLight;     // rgb: colour and strength of the sun's (moon's) light, a: distance between neighbouring particles
+    vec4 GooShade;     // the patch of ground the goo's shade is kept for, seen from above: xy its least corner (x, z, in the particles' coordinates), zw one over its size
 };
 
 // The surface texture holds, in red, minus the distance of the nearest goo along the view axis.

@@ -5,7 +5,8 @@
 // the scene it works out the surface (from the smoothed nearest-surface texture), bends the line of
 // sight through it and takes the scene from there, lets the goo swallow light by its thickness
 // (honey: blue first, then green; slime: red and blue), adds the light scattered inside it, mirrors
-// the sky by the angle of view and puts the sun's glint on top.
+// the sky by the angle of view and puts the sun's glint on top. Everywhere else it only lays the
+// goo's shade on the world: what lies under goo gets less light, and light of the goo's colour.
 
 #include <minecraft:projection.glsl>
 #include <physicsbruhh:goo_frame.glsl>
@@ -14,21 +15,27 @@ uniform sampler2D SceneSampler;        // the frame so far (a copy of it)
 uniform sampler2D SceneDepthSampler;   // and its depth
 uniform sampler2D FluidSampler;        // nearest goo surface per pixel, smoothed: r minus its distance along the view axis, g how much "goo here"
 uniform sampler2D ThickSampler;        // r: honey along the line of sight, g: slime, b / a: the same weighted by block / sky light
+uniform sampler2D ShadeSampler;        // seen from above: r honey, g slime hanging over each spot of the ground, a: minus the height of the lowest of it
 
 layout(location = 0) in vec2 texCoord;
 
 layout(location = 0) out vec4 fragColor;
 
-// how fast light of each colour dies away per block of goo
-const vec3 HONEY_ABSORB = vec3(1.0, 4.4, 16.0);
-const vec3 SLIME_ABSORB = vec3(5.0, 0.75, 6.2);
-// and how soon the goo's own colour takes over from what is behind it
-const float HONEY_CLOUD = 4.6;
-const float SLIME_CLOUD = 3.8;
+// Honey is a clear liquid: it hardly scatters light, it swallows it, blue first, then green, next
+// to no red (per block of honey). A film of it is pale gold, a finger's width amber, a block deep orange.
+const vec3 HONEY_ABSORB = vec3(0.26, 1.45, 5.6);
+// the little that is scattered on the way and comes back out warm (per block)
+const float HONEY_CLOUD = 1.4;
+// Slime is cloudy: light that goes in is thrown about and comes out green, and a finger's width of
+// it hides what is behind. How soon it does that (per block), and what it does to light that passes straight through:
+const float SLIME_CLOUD = 9.0;
+const vec3 SLIME_ABSORB = vec3(4.5, 0.5, 6.0);
 // how much of the smoothed "goo here" makes the outline
 const float OUTLINE_LEVEL = 0.74;
 // the least goo a line of sight through it meets, in blocks
 const float DROP = 0.085;
+// how much of the light under goo comes through the goo rather than from all around
+const float SHADE = 0.78;
 
 float hash21(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -76,37 +83,66 @@ vec3 skyLight(vec3 dir, vec3 sun) {
     float n = 0.5 * vnoise(p) + 0.25 * vnoise(p * 2.03 + vec2(17.1, 9.2)) + 0.125 * vnoise(p * 4.12 + vec2(51.7, 27.6));
     c = mix(c, vec3(0.95, 0.96, 1.0) * (0.25 + 0.75 * day), smoothstep(0.47, 0.66, n) * smoothstep(0.01, 0.15, dir.y) * 0.9);
     float towards = max(dot(dir, sun), 0.0);
-    c += GooLight.rgb * (pow(towards, 6.0) * 0.10 + pow(towards, 48.0) * 0.28 + smoothstep(0.9990, 0.9996, towards) * 5.0);
+    c += GooLight.rgb * (pow(towards, 6.0) * 0.10 + pow(towards, 48.0) * 0.22);
     return c;
+}
+
+// How much light reaches a place in the world (camera space) past the goo hanging over it.
+vec3 shadeAt(vec3 P) {
+    vec3 place = transpose(mat3(GooView)) * P - GooOffset.xyz;
+    vec2 uv = (place.xz - GooShade.xy) * GooShade.zw;
+    if (!(uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0)) {
+        return vec3(1.0);
+    }
+    vec4 over = texture(ShadeSampler, uv);
+    float above = -over.a - place.y;   // how far over this place the lowest goo is
+    if (!(above > -0.12)) {
+        return vec3(1.0);
+    }
+    // the further up the goo, the more light gets in from the sides
+    float reach = 1.0 / (1.0 + 0.6 * max(above, 0.0));
+    // through honey the light comes out golden; slime mostly keeps it
+    vec3 tint = exp(-(HONEY_ABSORB * over.r * 2.0 + SLIME_ABSORB * over.g * 0.6));
+    float dark = 1.0 - 0.30 * (1.0 - exp(-over.r * 6.0)) - 0.62 * (1.0 - exp(-over.g * SLIME_CLOUD));
+    return mix(vec3(1.0), tint * max(dark, 0.2), SHADE * reach);
 }
 
 void main() {
     ivec2 here = ivec2(gl_FragCoord.xy);
     vec2 surface = texelFetch(FluidSampler, here, 0).rg;
     float along = -surface.r;
-    if (along > GOO_NONE) {
-        discard;
-    }
-    ivec2 last = textureSize(FluidSampler, 0) - 1;
-
-    // neighbours, for the slope of the surface
-    float left = -texelFetch(FluidSampler, max(here - ivec2(1, 0), ivec2(0)), 0).r;
-    float right = -texelFetch(FluidSampler, min(here + ivec2(1, 0), last), 0).r;
-    float below = -texelFetch(FluidSampler, max(here - ivec2(0, 1), ivec2(0)), 0).r;
-    float above = -texelFetch(FluidSampler, min(here + ivec2(0, 1), last), 0).r;
+    mat4 unproject = inverse(ProjMat);
+    vec2 ndc = texCoord * 2.0 - 1.0;
+    float sceneHere = sceneAlong(unproject, texCoord);
 
     // the outline: where the smoothed "goo here" falls below a level; one pixel soft
     float present = surface.g;
     vec2 outward = -vec2(dFdx(present), dFdy(present));
     float steep = max(abs(outward.x) + abs(outward.y), 1.0e-5);
-    float cover = clamp((present - OUTLINE_LEVEL) / steep + 0.5, 0.0, 1.0);
+    float cover = along > GOO_NONE ? 0.0 : clamp((present - OUTLINE_LEVEL) / steep + 0.5, 0.0, 1.0);
+    cover *= 1.0 - smoothstep(sceneHere + 0.01, sceneHere + 0.05, along);
+    vec4 amount = texture(ThickSampler, texCoord);
+    cover *= smoothstep(0.004, 0.008, amount.r + amount.g);
 
-    mat4 unproject = inverse(ProjMat);
-    vec2 ndc = texCoord * 2.0 - 1.0;
+    // the world as it was, in the goo's shade where there is goo over it
+    vec3 shaded = pow(texture(SceneSampler, texCoord).rgb, vec3(2.2));
+    vec3 shade = sceneHere < 2000.0 ? shadeAt(viewAt(unproject, ndc, sceneHere)) : vec3(1.0);
+    if (cover < 0.004) {
+        if (min(shade.r, min(shade.g, shade.b)) > 0.995) {
+            discard;
+        }
+        fragColor = vec4(pow(shaded * shade, vec3(1.0 / 2.2)), 1.0);
+        return;
+    }
+
+    ivec2 last = textureSize(FluidSampler, 0) - 1;
+    // neighbours, for the slope of the surface
+    float left = -texelFetch(FluidSampler, max(here - ivec2(1, 0), ivec2(0)), 0).r;
+    float right = -texelFetch(FluidSampler, min(here + ivec2(1, 0), last), 0).r;
+    float below = -texelFetch(FluidSampler, max(here - ivec2(0, 1), ivec2(0)), 0).r;
+    float above = -texelFetch(FluidSampler, min(here + ivec2(0, 1), last), 0).r;
     // one pixel to the right / one row on, in clip space (rows may run up or down the screen)
     vec2 pixelStep = vec2(dFdx(ndc.x), dFdy(ndc.y));
-    float sceneHere = sceneAlong(unproject, texCoord);
-    cover *= 1.0 - smoothstep(sceneHere + 0.01, sceneHere + 0.05, along);
 
     // the surface: its place and which way it faces (camera space)
     vec3 P = viewAt(unproject, ndc, along);
@@ -133,7 +169,6 @@ void main() {
     vec3 V = normalize(-P);
 
     // how much goo the line of sight goes through
-    vec4 amount = texture(ThickSampler, texCoord);
     float honey = amount.r, slime = amount.g, thick = honey + slime;
     float slimeShare = slime / max(thick, 1.0e-5);
     // goo is never thinner than a drop of it: the splatted amounts thin out towards the outline
@@ -142,10 +177,6 @@ void main() {
     slime += lift * slimeShare;
     float amountSeen = thick;
     thick += lift;
-    cover *= smoothstep(0.004, 0.008, amountSeen);
-    if (cover < 0.004) {
-        discard;
-    }
     float blockLight = clamp(amount.b / max(amountSeen, 1.0e-5), 0.0, 1.0);
     float skyShare = clamp(amount.a / max(amountSeen, 1.0e-5), 0.0, 1.0);
 
@@ -156,30 +187,51 @@ void main() {
     if (sceneAlong(unproject, from) < along - 0.06) {
         from = texCoord;   // that is something in front of the goo: it cannot be seen through it
     }
+    float sceneFrom = sceneAlong(unproject, from);
     vec3 behind = pow(texture(SceneSampler, from).rgb, vec3(2.2));
+    // what is seen through the goo lies in its shade too (less so: the way back to the eye is counted below)
+    if (sceneFrom < 2000.0) {
+        behind *= mix(vec3(1.0), shadeAt(viewAt(unproject, from * 2.0 - 1.0, sceneFrom)), 0.45);
+    }
 
-    // light swallowed on the way through, light scattered inside
-    float film = 0.05 * smoothstep(0.010, 0.06, thick);   // even the thinnest film has its colour
-    vec3 through = exp(-(HONEY_ABSORB * (honey + film * (1.0 - slimeShare)) + SLIME_ABSORB * (slime + film * slimeShare)));
     mat3 toWorld = transpose(mat3(GooView));
     vec3 nW = toWorld * n, VW = toWorld * V;
     vec3 sun = GooSun.xyz;
-    float facing = max(dot(nW, sun), 0.0);
-    float shining = pow(max(dot(-VW, sun), 0.0), 3.0);   // looking towards the sun through the goo
-    vec3 skyAmbient = pow(GooSky.rgb, vec3(2.2)) * 0.35 + vec3(0.03);
-    vec3 lamp = vec3(1.0, 0.72, 0.42) * blockLight * blockLight * 1.1;
-    vec3 light = skyShare * (GooLight.rgb * (0.42 + 0.40 * facing + 0.55 * shining) + skyAmbient) + lamp + vec3(0.012);
-    vec3 honeyGlow = mix(vec3(1.0, 0.63, 0.09), vec3(0.95, 0.40, 0.025), smoothstep(0.15, 1.0, thick)) * (1.0 - exp(-thick * HONEY_CLOUD));
-    vec3 slimeGlow = mix(vec3(0.42, 0.90, 0.24), vec3(0.16, 0.62, 0.11), smoothstep(0.15, 1.0, thick)) * (1.0 - exp(-thick * SLIME_CLOUD));
-    vec3 colour = behind * through + mix(honeyGlow, slimeGlow, slimeShare) * light * 0.92;
-
-    // the sky in the surface, more of it at a glancing angle; the sun's glint
-    vec3 mirrored = skyLight(reflect(-VW, nW), sun) * max(skyShare, 0.04) + lamp * 0.15;
     float nv = max(dot(n, V), 0.0);
-    float fresnel = (0.05 + 0.90 * pow(1.0 - nv, 5.0)) * (0.3 + 0.7 * smoothstep(0.02, 0.10, thick));
+
+    // Light swallowed on the way through. Where the surface is seen at a slant (and at the rim, where
+    // it curves away) the line of sight is bent sideways and has further to go: that is the dark,
+    // saturated outline every drop of honey has.
+    float slant = (1.0 - nv) * (1.0 - nv);
+    // (a finger's width of honey already has its full amber: a thread or a thin stream of it is not pale)
+    float honeyWay = honey + 0.25 * (1.0 - exp(-honey * 12.0)) + (1.0 - slimeShare) * 0.30 * slant;
+    vec3 through = exp(-(HONEY_ABSORB * honeyWay + SLIME_ABSORB * (slime + slimeShare * (0.02 + 0.10 * slant))));
+    // just inside the rim the curved edge gathers light into a brighter band
+    float band = smoothstep(0.10, 0.40, rim) * (1.0 - smoothstep(0.45, 0.85, rim));
+    behind *= 1.0 + 0.45 * band * (1.0 - slimeShare);
+
+    float around = 0.5 + 0.5 * dot(nW, sun);              // soft light all round a cloudy body
+    float shining = pow(max(dot(-VW, sun), 0.0), 3.0);    // looking towards the sun through the goo
+    vec3 lamp = vec3(1.0, 0.72, 0.42) * blockLight * blockLight * 1.1;
+    vec3 sunLight = GooLight.rgb * skyShare;
+    vec3 skyAndLamps = skyShare * (pow(GooSky.rgb, vec3(2.2)) * 0.45 + vec3(0.04)) + lamp + vec3(0.012);
+
+    // honey: clear; only a little warm light comes back out of it, more when the sun stands behind it
+    vec3 honeyGlow = vec3(1.0, 0.52, 0.05) * (1.0 - exp(-honey * HONEY_CLOUD)) * (sunLight * (0.28 + 0.55 * shining) + skyAndLamps * 0.5);
+    // slime: a cloudy body of its own colour, pale and letting light through where thin, deep where thick
+    float clouded = (1.0 - exp(-slime * SLIME_CLOUD)) * slimeShare;
+    vec3 slimeBody = mix(vec3(0.40, 0.86, 0.18), vec3(0.07, 0.44, 0.035), smoothstep(0.08, 0.75, slime));
+    vec3 slimeLit = slimeBody * (sunLight * (0.10 + 0.74 * around * around + 0.35 * shining * exp(-slime * 2.5)) + skyAndLamps * 0.9);
+    vec3 colour = behind * through * (1.0 - clouded) + honeyGlow * (1.0 - slimeShare) + slimeLit * clouded;
+
+    // the sky in the surface: little of it seen straight on, all of it at a glancing angle; and the sun's glint, small and sharp
+    vec3 mirrored = skyLight(reflect(-VW, nW), sun) * max(skyShare, 0.04) + lamp * 0.15;
+    float fresnel = (0.04 + 0.96 * pow(1.0 - nv, 5.0)) * (0.25 + 0.75 * smoothstep(0.02, 0.10, thick));
     colour = mix(colour, mirrored, clamp(fresnel, 0.0, 1.0));
     float ndh = max(dot(nW, normalize(sun + VW)), 0.0);
-    colour += GooLight.rgb * skyShare * (pow(ndh, 1400.0) * 4.0 + pow(ndh, 180.0) * 0.30);
+    colour += sunLight * (pow(ndh, 2600.0) * 7.0 + pow(ndh, 320.0) * 0.14);
 
-    fragColor = vec4(pow(clamp(colour, 0.0, 1.0), vec3(1.0 / 2.2)), cover);
+    // the outline is one pixel soft: there the goo is mixed with the (shaded) world beside it by hand, the pixel is replaced
+    colour = mix(shaded * shade, clamp(colour, 0.0, 1.0), cover);
+    fragColor = vec4(pow(colour, vec3(1.0 / 2.2)), 1.0);
 }

@@ -9,7 +9,10 @@ import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.BlendEquation;
+import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.renderpearl.api.pipeline.BlendFunction;
+import com.mojang.renderpearl.api.pipeline.BlendOp;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.CompareOp;
 import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
@@ -53,8 +56,9 @@ import physicsbruhh.PhysicsBruhh;
  *   <li>the picture so far is copied aside (it is what will be seen through the goo);</li>
  *   <li>discs into a "nearest surface" texture, tested against the world's depth, keeping the nearest;</li>
  *   <li>discs into an "amount of goo" texture, adding up;</li>
+ *   <li>the same particles seen from straight above, for the shade the goo throws on what is under it;</li>
  *   <li>three rounds of an edge-keeping blur over the surface, two smoothing passes over the amounts;</li>
- *   <li>one pass over the screen that puts the goo into the picture.</li>
+ *   <li>one pass over the screen that puts the goo, and its shade, into the picture.</li>
  * </ol>
  *
  * <p>If anything here fails (a shader that does not compile on some driver, a texture format that is
@@ -68,7 +72,12 @@ final class GooFluid {
     private static final float RADIUS = 1.5F;
     /** "No goo here" in the surface texture: red is minus the distance, green is whether there is goo. */
     private static final Vector4f NOTHING = new Vector4f(-1.0e5F, 0.0F, 0.0F, 0.0F), ZERO = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
-    private static final int FRAME_BYTES = 144;
+    /** "No goo over this spot" in the shade texture: no amounts, and the lowest goo infinitely far down (alpha is minus its height). */
+    private static final Vector4f NO_SHADE = new Vector4f(0.0F, 0.0F, 0.0F, -6.0e4F);
+    private static final int FRAME_BYTES = 160;
+    /** Size of the texture the goo's shade is kept in, and the margin around the goo it covers (blocks). */
+    private static final int SHADE_SIZE = 1024;
+    private static final float SHADE_MARGIN = 0.6F;
 
     private static final BindGroupLayout FRAME = BindGroupLayout.builder().withUniform("GooFrame", UniformType.UNIFORM_BUFFER).build();
     private static final BindGroupLayout PARTICLES = BindGroupLayout.builder().withUniform("GooParticles", UniformType.TEXEL_BUFFER, GpuFormat.RGBA32_FLOAT).build();
@@ -81,6 +90,7 @@ final class GooFluid {
             .withUniform("SceneDepthSampler", UniformType.COMBINED_IMAGE_SAMPLER)
             .withUniform("FluidSampler", UniformType.COMBINED_IMAGE_SAMPLER)
             .withUniform("ThickSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+            .withUniform("ShadeSampler", UniformType.COMBINED_IMAGE_SAMPLER)
             .build();
 
     private static Identifier id(String path) {
@@ -114,6 +124,19 @@ final class GooFluid {
             .withColorTargetState(new ColorTargetState(Optional.of(BlendFunction.MAX), GpuFormat.RG32_FLOAT, ColorTargetState.WRITE_ALL)).build();
     private static final RenderPipeline AMOUNT = splat("goo_thick").withFragmentShader(id("core/goo_thick"))
             .withColorTargetState(new ColorTargetState(Optional.of(BlendFunction.ADDITIVE), GpuFormat.RGBA16_FLOAT, ColorTargetState.WRITE_ALL)).build();
+    /** Seen from above: the amounts add up, alpha keeps the greatest value (minus the height of the goo's underside). */
+    private static final RenderPipeline SHADE = RenderPipeline.builder()
+            .withLocation(id("pipeline/goo_shade"))
+            .withVertexShader(id("core/goo_shade"))
+            .withFragmentShader(id("core/goo_shade"))
+            .withBindGroupLayout(FRAME)
+            .withBindGroupLayout(PARTICLES)
+            .withPrimitiveTopology(PrimitiveTopology.QUADS)
+            .withCull(false)
+            .withColorTargetState(new ColorTargetState(Optional.of(new BlendFunction(
+                    new BlendEquation(BlendFactor.ONE, BlendFactor.ONE, BlendOp.ADD), new BlendEquation(BlendFactor.ONE, BlendFactor.ONE, BlendOp.MAX))),
+                    GpuFormat.RGBA16_FLOAT, ColorTargetState.WRITE_ALL))
+            .build();
     /** Rounds of the surface blur: reach in particle spacings, from wide to narrow; the last one also rounds the outline. */
     private static final float[] REACH = { 3.0F, 2.0F, 1.2F };
     private static final RenderPipeline[] BLUR = new RenderPipeline[REACH.length * 2];
@@ -159,6 +182,7 @@ final class GooFluid {
         // optional: if one of them does not compile on some driver the game still starts, and the surface look is used
         event.registerOptionalPipeline(SURFACE);
         event.registerOptionalPipeline(AMOUNT);
+        event.registerOptionalPipeline(SHADE);
         for (RenderPipeline pipeline : BLUR) event.registerOptionalPipeline(pipeline);
         for (RenderPipeline pipeline : SMOOTH) event.registerOptionalPipeline(pipeline);
         event.registerOptionalPipeline(PICTURE);
@@ -166,7 +190,9 @@ final class GooFluid {
 
     // ------------------------------------------------------------------ per frame
 
-    private static TextureTarget scene, surfaceA, surfaceB, amountA, amountB;
+    private static TextureTarget scene, surfaceA, surfaceB, amountA, amountB, shadeTarget;
+    /** The patch of ground the shade texture covers: least x and z (in the particles' coordinates) and its size. */
+    private static float shadeX, shadeZ, shadeWidth = 1.0F, shadeDepth = 1.0F;
     private static MappableRingBuffer frameBuffer, particleBuffer;
     private static int particleCapacity;
     private static float[] staged = new float[0];
@@ -208,12 +234,13 @@ final class GooFluid {
         final int count = stagedCount;
         if (count == 0) return;
 
-        CompiledRenderPipeline surface = compiled(SURFACE), amount = compiled(AMOUNT), picture = compiled(PICTURE);
+        CompiledRenderPipeline surface = compiled(SURFACE), amount = compiled(AMOUNT), shade = compiled(SHADE), picture = compiled(PICTURE);
         CompiledRenderPipeline[] blur = new CompiledRenderPipeline[BLUR.length], smooth = new CompiledRenderPipeline[SMOOTH.length];
         for (int i = 0; i < BLUR.length; i++) blur[i] = compiled(BLUR[i]);
         for (int i = 0; i < SMOOTH.length; i++) smooth[i] = compiled(SMOOTH[i]);
 
         if (scene == null || scene.width != main.width || scene.height != main.height) targets(main.width, main.height);
+        if (shadeTarget == null) shadeTarget = new TextureTarget("Goo: shade on the ground", SHADE_SIZE, SHADE_SIZE, GpuFormat.RGBA16_FLOAT, null);
         if (fresh || particleBuffer == null) upload(level, count);
         writeFrame(event);
 
@@ -236,6 +263,14 @@ final class GooFluid {
         try (RenderPass pass = encoder.createRenderPass(() -> "Goo amount", amountA.getColorTextureView(), Optional.of(ZERO), mainDepth, OptionalDouble.empty())) {
             pass.setPipeline(amount);
             pass.setUniform("Projection", projection);
+            pass.setUniform("GooFrame", frame);
+            pass.setUniform("GooParticles", particles);
+            pass.setVertexBuffer(0, null);
+            pass.setIndexBuffer(indexBuffer, indices.type());
+            pass.drawIndexed(count * 6, 1, 0, 0, 0);
+        }
+        try (RenderPass pass = encoder.createRenderPass(() -> "Goo shade", shadeTarget.getColorTextureView(), Optional.of(NO_SHADE))) {
+            pass.setPipeline(shade);
             pass.setUniform("GooFrame", frame);
             pass.setUniform("GooParticles", particles);
             pass.setVertexBuffer(0, null);
@@ -271,6 +306,7 @@ final class GooFluid {
             pass.setUniform("SceneDepthSampler", mainDepth, nearest);
             pass.setUniform("FluidSampler", surfaceA.getColorTextureView(), nearest);
             pass.setUniform("ThickSampler", amountA.getColorTextureView(), linear);
+            pass.setUniform("ShadeSampler", shadeTarget.getColorTextureView(), linear);
             pass.draw(3, 1, 0, 0);
         }
         drawnParticles = count;
@@ -314,12 +350,17 @@ final class GooFluid {
         LIGHT.clear();
         LIGHT.defaultReturnValue(-1);
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        float minX = Float.MAX_VALUE, minZ = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
         particleBuffer.rotate();
         try (GpuBufferSlice.MappedView view = particleBuffer.currentBuffer().map(0L, (long) count * 16L, false, true)) {
             FloatBuffer out = view.data().order(ByteOrder.nativeOrder()).asFloatBuffer();
             float[] p = staged;
             for (int i = 0; i < count; i++) {
                 int k = i * 4;
+                if (p[k] < minX) minX = p[k];
+                if (p[k] > maxX) maxX = p[k];
+                if (p[k + 2] < minZ) minZ = p[k + 2];
+                if (p[k + 2] > maxZ) maxZ = p[k + 2];
                 float w = p[k + 3];
                 // what the simulation says: size 0..1, +2 for slime, +4 for a filler between particles pulled far apart
                 int kind = (int) w;
@@ -336,6 +377,9 @@ final class GooFluid {
                 out.put(k, p[k]).put(k + 1, p[k + 1]).put(k + 2, p[k + 2]).put(k + 3, (float) bits);
             }
         }
+        // the patch of ground under all of it, for the shade
+        shadeX = minX - SHADE_MARGIN; shadeZ = minZ - SHADE_MARGIN;
+        shadeWidth = Math.max(1.0F, maxX - minX + 2.0F * SHADE_MARGIN); shadeDepth = Math.max(1.0F, maxZ - minZ + 2.0F * SHADE_MARGIN);
     }
 
     /** What the shaders are told about this frame (the {@code GooFrame} block, see {@code include/goo_frame.glsl}). */
@@ -380,6 +424,7 @@ final class GooFluid {
             out.put(24, skyR).put(25, skyG).put(26, skyB).put(27, (float) (System.nanoTime() / 1.0e9 % 3600.0));
             out.put(28, skyR * 0.55F + haze).put(29, skyG * 0.55F + haze).put(30, skyB * 0.55F + haze).put(31, day);
             out.put(32, red).put(33, green).put(34, blue).put(35, SPACING);
+            out.put(36, shadeX).put(37, shadeZ).put(38, 1.0F / shadeWidth).put(39, 1.0F / shadeDepth);
         }
     }
 

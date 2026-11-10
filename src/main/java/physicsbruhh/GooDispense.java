@@ -84,8 +84,7 @@ public final class GooDispense {
                 Vec3 from = source.center().add(step(facing, 0.66));
                 // honey does not shoot out, it pours: a slow push out of the front, a little upwards unless it is poured straight down
                 Vec3 velocity = step(facing, 2.3).add(0.0, facing.getAxis() == Direction.Axis.Y ? 0.0 : 0.5, 0.0);
-                Vec3 target = source.center().add(step(facing, 1.6));
-                if (GooEvents.pour(level, GooSim.HONEY, from, velocity, target, GooSim.BOTTLE, false) == 0) return stack;
+                if (GooEvents.pour(level, GooSim.HONEY, from, velocity, GooEvents.landing(level, null, from, velocity), GooSim.BOTTLE, false) == 0) return stack;
                 level.playSound(null, source.pos(), SoundEvents.HONEY_BLOCK_SLIDE, SoundSource.BLOCKS, 0.8F, 0.9F);
                 return leave(source, stack, new ItemStack(Items.GLASS_BOTTLE));
             }

@@ -35,8 +35,83 @@ final class ClientSelfTest {
     private static boolean sawHoney, sawSlime, sawClear, waded, bounced, removedOne;
     private static int bouncesBefore;
     private static boolean liquidExpected, bottleFilled, pouredBack, thrown;
-    private static int liquidFrames, honeyPoured = -1, slimeShot = -1, honeyAfterBottle = -1, honeyAfterPour = -1;
+    private static int liquidFrames, honeyPoured = -1, slimeShot = -1, honeyAfterBottle = -1, honeyAfterPour = -1, honeySimulated = -1;
     private static volatile int emptyBottles = -1;
+    /** The hands part runs by what has happened, not by the clock: how far it is, since when, where the player should stand, and what it got stuck on. */
+    private static int step, stepTick;
+    private static double[] spot = { 19.0, 11.0 };
+    private static String stuck;
+
+    private static void step(int next) {
+        step = next;
+        stepTick = tick;
+    }
+
+    /** How much honey the markers around the dispensers' puddle say there is. */
+    private static int honeyMarkers() {
+        GooEntity honey = GooClient.gooNear(GooSim.HONEY, 20.5, 11.0);
+        return honey == null ? 0 : honey.amount();
+    }
+
+    private static boolean standsAt(Minecraft mc, double x, double z) {
+        return Math.abs(mc.player.getX() - x) < 0.3 && Math.abs(mc.player.getZ() - z) < 0.3;
+    }
+
+    /**
+     * The player's hands on goo: fill a bottle from the puddle, pour it out again while sneaking,
+     * throw a slime ball. Every step waits for what it needs (the server's answer may take any
+     * number of client ticks when frames are slow) and gives up after ten seconds' worth of ticks.
+     */
+    private static void hands(Minecraft mc, MinecraftServer server) {
+        var held = mc.player.getMainHandItem();
+        boolean late = tick > stepTick + 200;
+        switch (step) {
+            case 1 -> { // by the puddle with an empty bottle: use it on the honey
+                if (tick > stepTick + 5 && held.is(Items.GLASS_BOTTLE) && standsAt(mc, spot[0], spot[1]) && useOnGoo(mc)) step(2);
+                else if (late) { stuck = "the player never got to use an empty bottle on the honey puddle"; step(8); }
+            }
+            case 2 -> { // the bottle comes back full, and the puddle is a bottle short
+                if (held.is(Items.HONEY_BOTTLE) && honeyMarkers() == GooSim.BOTTLE) {
+                    bottleFilled = true;
+                    honeyAfterBottle = honeyMarkers();
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST bottle filled from the puddle (the markers now say {} particles)", honeyAfterBottle);
+                    stage("hands: the honey bottle poured out while sneaking");
+                    mc.options.keyShift.setDown(true);
+                    step(3);
+                } else if (late) { honeyAfterBottle = honeyMarkers(); bottleFilled = held.is(Items.HONEY_BOTTLE); stuck = "an empty bottle used on the honey puddle was not filled, or took no honey (in hand: " + held + ", markers: " + honeyAfterBottle + ")"; step(8); }
+            }
+            case 3 -> { // sneaking by now: use the honey bottle
+                if (tick >= stepTick + 8) { mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND); step(4); }
+            }
+            case 4 -> { // the bottle is empty again and the honey is back
+                if (held.is(Items.GLASS_BOTTLE) && honeyMarkers() == 2 * GooSim.BOTTLE) {
+                    pouredBack = true;
+                    honeyAfterPour = honeyMarkers();
+                    mc.options.keyShift.setDown(false);
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST honey bottle poured out (the markers now say {} particles)", honeyAfterPour);
+                    stage("hands: a slime ball thrown");
+                    commands(server, "tp @a 18.0 200 12.5 -135 5", "item replace entity @a weapon.mainhand with minecraft:slime_ball 2");
+                    step(5);
+                } else if (late) { mc.options.keyShift.setDown(false); honeyAfterPour = honeyMarkers(); stuck = "a honey bottle used while sneaking was not poured out (in hand: " + held + ", markers: " + honeyAfterPour + ")"; step(8); }
+            }
+            case 5 -> { // back at the edge with two slime balls: throw one
+                if (tick > stepTick + 5 && held.is(Items.SLIME_BALL) && held.getCount() == 2 && standsAt(mc, 18.0, 12.5)) { mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND); step(6); }
+                else if (late) { stuck = "the player never got to throw a slime ball"; step(8); }
+            }
+            case 6 -> {
+                if (held.is(Items.SLIME_BALL) && held.getCount() == 1) { thrown = true; step(7); }
+                else if (late) { stuck = "a slime ball was not thrown (in hand: " + held + ")"; step(8); }
+            }
+            case 7 -> { // let it fly and land, and the poured honey arrive in the simulation
+                if (tick >= stepTick + 50) {
+                    honeySimulated = GooClient.amountNear(GooSim.HONEY, 20.5, 11.0);
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST slime ball thrown; simulated honey by the dispensers: {} particles ({})", honeySimulated, GooClient.describe());
+                    step(8);
+                }
+            }
+            default -> step(9);
+        }
+    }
 
     /** Right click with the main hand on whatever goo the player is looking at, the way the use key does it. */
     private static boolean useOnGoo(Minecraft mc) {
@@ -166,64 +241,48 @@ final class ClientSelfTest {
                 GooClient.watchAmounts = true;
                 commands(server, "kill @e[type=minecraft:pig]", "goo clear", "gamemode survival @a", "clear @a",
                         "fill 20 200 8 23 203 12 minecraft:air",
-                        "setblock 22 200 10 minecraft:oak_planks",
-                        "setblock 22 201 10 minecraft:dispenser[facing=west]{Items:[{Slot:0b,id:\"minecraft:honey_bottle\",count:2}]}",
+                        // two dispensers with one honey bottle each (a dispenser picks a slot at random, and the empty bottle it keeps is a slot too)
+                        "fill 22 200 10 22 200 11 minecraft:oak_planks",
+                        "setblock 22 201 10 minecraft:dispenser[facing=west]{Items:[{Slot:0b,id:\"minecraft:honey_bottle\",count:1}]}",
+                        "setblock 22 201 11 minecraft:dispenser[facing=west]{Items:[{Slot:0b,id:\"minecraft:honey_bottle\",count:1}]}",
                         "setblock 22 200 8 minecraft:dispenser[facing=west]{Items:[{Slot:0b,id:\"minecraft:slime_ball\",count:3}]}",
                         "tp @a 18.0 200 12.5 -135 11");
             } else if (tick == 515) {
                 commands(server, "setblock 23 201 10 minecraft:redstone_block", "setblock 23 200 8 minecraft:redstone_block");
             } else if (tick == 535) {
-                commands(server, "setblock 23 200 8 minecraft:air", "setblock 23 201 10 minecraft:air");
-            } else if (tick == 540) {
-                commands(server, "setblock 23 200 8 minecraft:redstone_block", "setblock 23 201 10 minecraft:redstone_block");
-            } else if (tick == 580) {
-                // by now the bottle has run out and both lumps have landed
-                honeyPoured = GooClient.amountNear(GooSim.HONEY, 20.5, 10.5);
+                commands(server, "setblock 23 200 8 minecraft:air");
+            } else if (tick == 545) {
+                commands(server, "setblock 23 200 8 minecraft:redstone_block", "setblock 23 201 11 minecraft:redstone_block");
+            } else if (tick == 600) {
+                // by now both bottles have run out and both lumps have landed
+                honeyPoured = GooClient.amountNear(GooSim.HONEY, 20.5, 11.0);
                 slimeShot = GooClient.amountNear(GooSim.SLIME, 18.5, 8.5);
-                GooEntity honey = GooClient.gooNear(GooSim.HONEY, 20.5, 10.5);
                 // (a server level only hands out its block entities on its own thread)
                 server.execute(() -> {
                     int bottles = 0;
-                    if (server.overworld().getBlockEntity(new BlockPos(22, 201, 10)) instanceof net.minecraft.world.Container c) {
+                    for (int z = 10; z <= 11; z++) {
+                        if (!(server.overworld().getBlockEntity(new BlockPos(22, 201, z)) instanceof net.minecraft.world.Container c)) continue;
                         for (int i = 0; i < c.getContainerSize(); i++) if (c.getItem(i).is(Items.GLASS_BOTTLE)) bottles += c.getItem(i).getCount();
                     }
                     emptyBottles = bottles;
                 });
-                PhysicsBruhh.LOGGER.info("CLIENTTEST dispensers: honey {} particles (marker says {}), slime {} particles", honeyPoured, honey == null ? -1 : honey.amount(), slimeShot);
+                PhysicsBruhh.LOGGER.info("CLIENTTEST dispensers: honey {} particles (markers say {}), slime {} particles", honeyPoured, honeyMarkers(), slimeShot);
                 stage("hands: an empty bottle on the honey");
-                double[] puddle = GooClient.centreNear(GooSim.HONEY, 20.5, 10.5);
+                double[] puddle = GooClient.centreNear(GooSim.HONEY, 20.5, 11.0);
                 // stand next to the puddle and look down at its middle
-                if (puddle != null) commands(server, "tp @a " + String.format(java.util.Locale.ROOT, "%.2f 200 %.2f", puddle[0] - 1.3, puddle[2]) + " -90 48",
+                spot = puddle == null ? new double[] { 19.0, 11.0 } : new double[] { puddle[0] - 1.3, puddle[2] };
+                commands(server, "tp @a " + String.format(java.util.Locale.ROOT, "%.2f 200 %.2f", spot[0], spot[1]) + " -90 48",
                         "item replace entity @a weapon.mainhand with minecraft:glass_bottle");
-            } else if (tick == 596) {
-                bottleFilled = useOnGoo(mc);
-            } else if (tick == 606) {
-                bottleFilled = bottleFilled && mc.player.getMainHandItem().is(Items.HONEY_BOTTLE);
-                honeyAfterBottle = GooClient.amountNear(GooSim.HONEY, 20.5, 10.5);
-                PhysicsBruhh.LOGGER.info("CLIENTTEST bottle filled from the puddle: {} (the puddle now holds {} particles)", bottleFilled, honeyAfterBottle);
-                stage("hands: the honey bottle poured out while sneaking");
-                mc.options.keyShift.setDown(true);
-            } else if (tick == 614) {
-                mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-            } else if (tick == 618) {
-                mc.options.keyShift.setDown(false);
-            } else if (tick == 640) {
-                pouredBack = mc.player.getMainHandItem().is(Items.GLASS_BOTTLE);
-                honeyAfterPour = GooClient.amountNear(GooSim.HONEY, 20.5, 10.5);
-                PhysicsBruhh.LOGGER.info("CLIENTTEST honey bottle poured out: {} (honey there now: {} particles)", pouredBack, honeyAfterPour);
-                stage("hands: a slime ball thrown");
-                commands(server, "tp @a 18.0 200 12.5 -135 5", "item replace entity @a weapon.mainhand with minecraft:slime_ball 2");
-            } else if (tick == 650) {
-                mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-            } else if (tick == 690) {
-                thrown = mc.player.getMainHandItem().getCount() == 1;
-                PhysicsBruhh.LOGGER.info("CLIENTTEST slime ball thrown: {} ({})", thrown, GooClient.describe());
+                step(1);
+            } else if (step > 0 && step < 9) {
+                hands(mc, server);
+            } else if (step == 9 && tick == stepTick + 5) {
                 stage("everything is cleared away");
                 commands(server, "gamemode creative @a", "tp @a 14.5 202 9.5 180 30", "goo clear");
-            } else if (tick > 0 && tick < 730 && tick % 20 == 0) {
+            } else if (tick > 0 && tick % 20 == 0 && step < 9) {
                 PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} band={} clear={} shader={} drawCalls={} liquid={} frames={} particles={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.shader, GooRenderer.drawCalls,
                         GooFluid.inUse(), GooFluid.frames, GooClient.particleCount());
-            } else if (tick == 730) {
+            } else if (step == 9 && tick == stepTick + 45) {
                 String state = GooClient.describe() + " restingWidth=" + restingWidth + " band=" + bandLeft + ".." + bandRight + " shader=" + GooRenderer.shader + " drawCalls=" + GooRenderer.drawCalls
                         + " liquid=" + GooFluid.inUse() + " liquidFrames=" + GooFluid.frames + " uses=" + GooTouch.uses;
                 String problem = null;
@@ -241,11 +300,13 @@ final class ClientSelfTest {
                 else if (GooFluid.broken) problem = "the liquid look failed (see the log)";
                 else if (liquidExpected && liquidFrames == 0) problem = "clear goo was never drawn as liquid";
                 else if (honeyPoured < 2 * GooSim.BOTTLE - 60 || honeyPoured > 2 * GooSim.BOTTLE) problem = "the two dispensed honey bottles did not arrive as honey (" + honeyPoured + " particles of " + 2 * GooSim.BOTTLE + ")";
-                else if (emptyBottles != 2) problem = "the dispenser did not keep the empty bottles (" + emptyBottles + ")";
+                else if (emptyBottles != 2) problem = "the dispensers did not keep their empty bottles (" + emptyBottles + ")";
+                else if (stuck != null) problem = stuck;
                 else if (slimeShot < 2 * GooSim.BALL - 30 || slimeShot > 2 * GooSim.BALL) problem = "the two dispensed slime balls did not arrive as slime (" + slimeShot + " particles of " + 2 * GooSim.BALL + ")";
                 else if (!bottleFilled) problem = "an empty bottle used on the honey puddle was not filled";
-                else if (honeyAfterBottle > honeyPoured - GooSim.BOTTLE / 2) problem = "filling a bottle took no honey out of the puddle (" + honeyPoured + " -> " + honeyAfterBottle + ")";
-                else if (!pouredBack || honeyAfterPour < honeyAfterBottle + GooSim.BOTTLE - 60) problem = "a honey bottle used while sneaking was not poured out (" + honeyAfterBottle + " -> " + honeyAfterPour + ")";
+                else if (honeyAfterBottle != GooSim.BOTTLE) problem = "filling a bottle did not take a bottle's worth of honey out of the puddle (" + 2 * GooSim.BOTTLE + " -> " + honeyAfterBottle + ")";
+                else if (!pouredBack || honeyAfterPour != 2 * GooSim.BOTTLE) problem = "a honey bottle used while sneaking was not poured out (" + honeyAfterBottle + " -> " + honeyAfterPour + ")";
+                else if (Math.abs(honeySimulated - honeyAfterPour) > 60) problem = "the simulated honey did not follow the markers (" + honeySimulated + " particles, the markers say " + honeyAfterPour + ")";
                 else if (!thrown) problem = "a slime ball was not thrown";
                 else if (GooClient.quadCount(0) != 0 || GooClient.quadCount(1) != 0 || GooClient.particleCount() != 0) problem = "goo is still drawn after /goo clear (" + GooClient.quadCount(0) + " + " + GooClient.quadCount(1) + " quads, " + GooClient.particleCount() + " particles)";
                 PhysicsBruhh.LOGGER.info("CLIENTTEST final {}", state);
