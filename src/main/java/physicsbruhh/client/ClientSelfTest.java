@@ -49,7 +49,7 @@ final class ClientSelfTest {
         MinecraftServer server = mc.getSingleplayerServer();
         if (mc.level == null || mc.player == null || server == null) {
             if (System.nanoTime() - firstTick > 240_000_000_000L) {
-                finish(mc, "no world after four minutes, screen=" + (mc.screen == null ? "none" : mc.screen.getClass().getName()));
+                finish(mc, "no world after four minutes");
             }
             return;
         }
