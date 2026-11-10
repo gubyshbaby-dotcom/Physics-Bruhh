@@ -128,6 +128,14 @@ public final class JavaSim implements GooSim {
         return Math.min(honey, 32767) | Math.min(slime, 32767) << 16;
     }
 
+    @Override
+    public int count(int what, int arg) {
+        int n = 0;
+        if (what == 0) { for (int i = 0; i < maxp; i++) if (alive[i] != 0 && ancKind[i] == 2 && ancId[i] == arg) n++; }
+        else if (what == 1 && arg >= 0 && arg < slots) { for (int i = arg * nb; i < (arg + 1) * nb; i++) if (alive[i] != 0 && ancKind[i] == 1) n++; }
+        return n;
+    }
+
     @Override public String backend() { return "java"; }
     @Override public void close() { }
     @Override public void setKillY(float y) { killY = y; }
@@ -277,6 +285,15 @@ public final class JavaSim implements GooSim {
             b.front = Math.max(0, Math.min(6, (int) data.get(o + 11)));
             KBox prev = null; for (KBox kb : kin) if (kb.id == b.id) { prev = kb; break; }
             for (int a = 0; a < 3; a++) { b.pmin[a] = prev != null ? prev.min[a] : b.min[a]; b.pmax[a] = prev != null ? prev.max[a] : b.max[a]; }
+            // a box that has just turned up, or is not where it was, is news to anything sleeping next to it
+            boolean news = prev == null;
+            if (prev != null) for (int a = 0; a < 3; a++) if (Math.abs(prev.min[a] - b.min[a]) > 1e-3f || Math.abs(prev.max[a] - b.max[a]) > 1e-3f) news = true;
+            if (news) for (Body bd : bodies) {
+                if (bd.state != 1 || bd.awake) continue;
+                boolean near = true;
+                for (int a = 0; a < 3; a++) if (!(b.max[a] > bd.bb[a] - 0.6f && b.min[a] < bd.bb[a + 3] + 0.6f)) { near = false; break; }
+                if (near) { bd.awake = true; bd.calm = 0; }
+            }
             next[k] = b;
         }
         for (int i = 0; i < maxp; i++) {
@@ -297,7 +314,10 @@ public final class JavaSim implements GooSim {
     private final float[] tq = new float[3], tp = new float[3];
 
     /** Returns the face axis that pushed the particle out, or 3 if the box was not touched. */
-    private int resolveBox(float[] bq, float[] bp, float n0, float n1, float n2, float x0, float x1, float x2, float pn0, float pn1, float pn2, float px0, float px1, float px2, int front, boolean lead) {
+    /** What a box is, as far as pushing goo out of it goes: a block; a piston part (carries goo on its leading face); a creature (never presses goo downwards). */
+    private static final int BLOCK = 0, PISTON = 1, CREATURE = 2;
+
+    private int resolveBox(float[] bq, float[] bp, float n0, float n1, float n2, float x0, float x1, float x2, float pn0, float pn1, float pn2, float px0, float px1, float px2, int front, int kind) {
         float best = Float.MAX_VALUE; int ba = 3; boolean hi = false;
         for (int a = 0; a < 3; a++) {
             int b = (a + 1) % 3, c = (a + 2) % 3;
@@ -305,7 +325,7 @@ public final class JavaSim implements GooSim {
             if (!(bq[b] > minB - rc && bq[b] < maxB + rc && bq[c] > minC - rc && bq[c] < maxC + rc)) continue;
             float minA = a == 0 ? n0 : a == 1 ? n1 : n2, maxA = a == 0 ? x0 : a == 1 ? x1 : x2, pminA = a == 0 ? pn0 : a == 1 ? pn1 : pn2, pmaxA = a == 0 ? px0 : a == 1 ? px1 : px2;
             if (bp[a] >= pmaxA + rc - 1e-4f && bq[a] < maxA + rc) { float pen = maxA + rc - bq[a]; if (pen < best) { best = pen; ba = a; hi = true; } }
-            if (bp[a] <= pminA - rc + 1e-4f && bq[a] > minA - rc) { float pen = bq[a] - (minA - rc); if (pen < best) { best = pen; ba = a; hi = false; } }
+            if (bp[a] <= pminA - rc + 1e-4f && bq[a] > minA - rc && !(kind == CREATURE && a == 1)) { float pen = bq[a] - (minA - rc); if (pen < best) { best = pen; ba = a; hi = false; } }
         }
         if (ba < 3) { float mn = ba == 0 ? n0 : ba == 1 ? n1 : n2, mx = ba == 0 ? x0 : ba == 1 ? x1 : x2; bq[ba] = hi ? mx + rc : mn - rc; return ba; }
         if (bq[0] <= n0 - rc || bq[0] >= x0 + rc || bq[1] <= n1 - rc || bq[1] >= x1 + rc || bq[2] <= n2 - rc || bq[2] >= x2 + rc) return 3;
@@ -315,7 +335,7 @@ public final class JavaSim implements GooSim {
             ba = (front - 1) / 2; hi = (front & 1) == 1;
         } else {
             float moved = 0f;
-            if (lead) {
+            if (kind == PISTON) {
                 float d0 = n0 - pn0, d1 = n1 - pn1, d2 = n2 - pn2;
                 if (Math.abs(d0) > moved) { moved = Math.abs(d0); ba = 0; hi = d0 > 0f; }
                 if (Math.abs(d1) > moved) { moved = Math.abs(d1); ba = 1; hi = d1 > 0f; }
@@ -325,7 +345,7 @@ public final class JavaSim implements GooSim {
                 // nothing says which way: the nearest face
                 for (int a = 0; a < 3; a++) {
                     float mn = a == 0 ? n0 : a == 1 ? n1 : n2, mx = a == 0 ? x0 : a == 1 ? x1 : x2;
-                    float penLo = bq[a] - (mn - rc); if (penLo < best) { best = penLo; ba = a; hi = false; }
+                    float penLo = bq[a] - (mn - rc); if (penLo < best && !(kind == CREATURE && a == 1)) { best = penLo; ba = a; hi = false; }
                     float penHi = (mx + rc) - bq[a]; if (penHi < best) { best = penHi; ba = a; hi = true; }
                 }
             } // else: a block being pushed carries it along on its leading face
@@ -348,14 +368,14 @@ public final class JavaSim implements GooSim {
                     int ci = x + stDim[0] * (y + stDim[1] * z);
                     for (int k = stStart[ci]; k < stStart[ci + 1]; k++) {
                         int b = stItems[k] * 7;
-                        int ax = resolveBox(tq, tp, st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], 0, false);
+                        int ax = resolveBox(tq, tp, st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], 0, BLOCK);
                         if (ax < 3) { hit = 1; hitStick = st[b + 6]; hitAxis = ax; }
                     }
                 }
             }
         }
         for (KBox b : kin) {
-            int ax = resolveBox(tq, tp, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2], b.pmin[0], b.pmin[1], b.pmin[2], b.pmax[0], b.pmax[1], b.pmax[2], b.front, b.id > 0);
+            int ax = resolveBox(tq, tp, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2], b.pmin[0], b.pmin[1], b.pmin[2], b.pmax[0], b.pmax[1], b.pmax[2], b.front, b.id > 0 ? PISTON : CREATURE);
             if (ax < 3) { hit = 2; hitId = b.id; hitStick = b.stick; hm0 = b.min[0]; hm1 = b.min[1]; hm2 = b.min[2]; hitAxis = ax; }
         }
         q[o] = tq[0]; q[o + 1] = tq[1]; q[o + 2] = tq[2];
@@ -631,7 +651,10 @@ public final class JavaSim implements GooSim {
             for (int a = 0; a < nAct; a++) { int i = act[a], o = i * 3; v[o] += dpx[i]; v[o + 1] += dpy[i]; v[o + 2] += dpz[i]; }
         }
         float[] vsum = new float[slots];
-        for (Body bd : bodies) if (bd.awake) { bd.bb[0] = bd.bb[1] = bd.bb[2] = Float.MAX_VALUE; bd.bb[3] = bd.bb[4] = bd.bb[5] = -Float.MAX_VALUE; bd.anchored = 0; }
+        // only bodies that were simulated this step get their bounds rebuilt; one that is shrinking away keeps its own
+        float[][] oldBb = new float[slots][];
+        for (int b = 0; b < slots; b++) oldBb[b] = bodies[b].bb.clone();
+        for (Body bd : bodies) if (bd.state == 1 && bd.awake) { bd.bb[0] = bd.bb[1] = bd.bb[2] = Float.MAX_VALUE; bd.bb[3] = bd.bb[4] = bd.bb[5] = -Float.MAX_VALUE; bd.anchored = 0; }
         for (int a = 0; a < nAct; a++) {
             int i = act[a], o = i * 3, b = i / nb;
             float sp = 0f;
@@ -642,6 +665,8 @@ public final class JavaSim implements GooSim {
             for (int c = 0; c < 3; c++) { bd.bb[c] = Math.min(bd.bb[c], p[o + c]); bd.bb[c + 3] = Math.max(bd.bb[c + 3], p[o + c]); }
             if (ancKind[i] != 0) bd.anchored++;
         }
+        // a body that lost its last particle this step is freed on the next one; until then its bounds stay real numbers
+        for (int b = 0; b < slots; b++) if (bodies[b].bb[0] > bodies[b].bb[3]) System.arraycopy(oldBb[b], 0, bodies[b].bb, 0, 6);
         // ---- sleep / wake ----
         for (int b = 0; b < slots; b++) {
             Body bd = bodies[b];

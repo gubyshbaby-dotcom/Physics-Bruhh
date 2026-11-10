@@ -71,15 +71,15 @@ public final class SimCheck {
             float[] b0 = body(s, 0);
             check("slime keeps its shape", b0[6] > 0.75f && b0[6] < 1.05f, "top " + b0[6]);
             float c0 = (b0[2] + b0[5]) * 0.5f;
-            for (int k = 0; k < 6; k++) { s.setKinematic(plates(plate(1, -1f + k / 6f, 1, 10, 3)), 1); s.step(1f / 60f + 1e-6f); }
-            for (int k = 0; k < 90; k++) { s.setKinematic(plates(plate(1, 0, 1, 0, 3)), 1); s.step(1f / 60f + 1e-6f); }
+            for (int k = 0; k < 6; k++) { s.setKinematic(plates(plate(1, -1f + k / 6f, 1, 10, 8)), 1); s.step(1f / 60f + 1e-6f); }
+            for (int k = 0; k < 90; k++) { s.setKinematic(plates(plate(1, 0, 1, 0, 8)), 1); s.step(1f / 60f + 1e-6f); }
             float[] b1 = body(s, 0); float c1 = (b1[2] + b1[5]) * 0.5f;
             check("piston pushes slime about a block", c1 - c0 > 0.5f && c1 - c0 < 1.5f, "moved " + (c1 - c0));
             check("slime not launched", b1[5] < 2.4f, "max x " + b1[5]);
-            for (int k = 0; k < 6; k++) { s.setKinematic(plates(plate(1, -k / 6f, 1, -10, 3)), 1); s.step(1f / 60f + 1e-6f); }
+            for (int k = 0; k < 6; k++) { s.setKinematic(plates(plate(1, -k / 6f, 1, -10, 8)), 1); s.step(1f / 60f + 1e-6f); }
             ByteBuffer m = buf(1 << 20);
             int stretched = s.mesh(GooSim.SLIME, m);
-            for (int k = 0; k < 120; k++) { s.setKinematic(plates(plate(1, -1, 1, 0, 3)), 1); s.step(1f / 60f + 1e-6f); }
+            for (int k = 0; k < 120; k++) { s.setKinematic(plates(plate(1, -1, 1, 0, 8)), 1); s.step(1f / 60f + 1e-6f); }
             float[] b2 = body(s, 0); float c2 = (b2[2] + b2[5]) * 0.5f;
             check("sticky piston drags slime back", c1 - c2 > 0.4f, "moved back " + (c1 - c2));
             int relaxed = s.mesh(GooSim.SLIME, m);

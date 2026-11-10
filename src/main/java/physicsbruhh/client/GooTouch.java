@@ -26,9 +26,10 @@ import physicsbruhh.sim.GooSim;
  * Fall damage is the server's business (see {@code GooEvents.onFall}). All sounds are the game's own.
  */
 final class GooTouch {
-    /** Particles of goo inside the player's box from which it counts as touching, and at which the full effect is reached. */
-    private static final int TOUCH = 10, DEEP_HONEY = 110, DEEP_SLIME = 90;
+    /** Particles of goo pressed against the player's box from which it counts as touching, and at which the full effect is reached. */
+    private static final int TOUCH = 12, DEEP_HONEY = 150, DEEP_SLIME = 120;
     private static boolean wasOnGround;
+    private static double lastFall;
     private static int bounceWait, stepWait, slideWait;
     private static double walked;
     /** For the smoke test: what the last tick decided. */
@@ -50,9 +51,11 @@ final class GooTouch {
         if (slideWait > 0) slideWait--;
         Vec3 v = player.getDeltaMovement();
         if (inSlime) {
-            if (v.y < -0.25 && bounceWait == 0 && !player.isSuppressingBounce()) {
+            // falling through it, or having just hit the ground under it at speed (goo is not solid: a fast fall goes straight through)
+            double fall = v.y < -0.25 ? v.y : player.onGround() && !wasOnGround && lastFall < -0.25 ? lastFall : 0.0;
+            if (fall < 0.0 && bounceWait == 0 && !player.isSuppressingBounce()) {
                 // SlimeBlock.updateEntityMovementAfterFallOn
-                player.setDeltaMovement(v.x, -v.y, v.z);
+                player.setDeltaMovement(v.x, -fall, v.z);
                 player.resetFallDistance();
                 bounceWait = 5;
                 bounces++;
@@ -88,6 +91,7 @@ final class GooTouch {
             walked = 0.0;
         }
         wasOnGround = player.onGround();
+        lastFall = player.getDeltaMovement().y;
 
         // pistons that start to move with goo in front of them
         for (BlockPos head : GooClient.strokes) {

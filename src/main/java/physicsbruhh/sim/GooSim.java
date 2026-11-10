@@ -44,6 +44,9 @@ public interface GooSim extends AutoCloseable {
      */
     int probe(float minX, float minY, float minZ, float maxX, float maxY, float maxZ);
 
+    /** Diagnostics: {@code what} 0 = particles stuck to the moving box with id {@code arg}, 1 = particles of body {@code arg} stuck to blocks. */
+    int count(int what, int arg);
+
     String backend();
 
     @Override

@@ -151,11 +151,19 @@ const HX: [i32; 14] = [0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1];
 const HY: [i32; 14] = [0, 0, 1, 1, 1, -1, -1, -1, 0, 0, 0, 1, 1, 1];
 const HZ: [i32; 14] = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
 
+/// What a box is, as far as pushing goo out of it goes.
+const BLOCK: u8 = 0;
+/// A piston part or a block in transit: goo caught inside is carried along on the leading face.
+const PISTON: u8 = 1;
+/// A creature: it never presses goo downwards (that would be into the ground it stands on); goo
+/// under its feet is squeezed out sideways instead.
+const CREATURE: u8 = 2;
+
 /// Push `q` out of the box if it is inside (box grown by `rc`). The exit face is the one the
 /// particle came from last step when that is known, so fast pistons shove goo ahead of them
 /// instead of letting it tunnel out the back.
 #[inline]
-fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3], pmin: &[f32; 3], pmax: &[f32; 3], rc: f32, front: u8, lead: bool) -> u8 {
+fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3], pmin: &[f32; 3], pmax: &[f32; 3], rc: f32, front: u8, kind: u8) -> u8 {
     // swept part: a particle that started beyond a face may not end up behind that face while it
     // is within the box's cross-section, however far a spring or anchor tried to drag it. When
     // several faces qualify (e.g. sagging a hair below a floor while crossing a block seam) the
@@ -166,7 +174,7 @@ fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3],
         let within = q[b] > bmin[b] - rc && q[b] < bmax[b] + rc && q[c] > bmin[c] - rc && q[c] < bmax[c] + rc;
         if !within { continue; }
         if p[a] >= pmax[a] + rc - 1e-4 && q[a] < bmax[a] + rc { let pen = bmax[a] + rc - q[a]; if pen < best { best = pen; ba = a; hi = true; } }
-        if p[a] <= pmin[a] - rc + 1e-4 && q[a] > bmin[a] - rc { let pen = q[a] - (bmin[a] - rc); if pen < best { best = pen; ba = a; hi = false; } }
+        if p[a] <= pmin[a] - rc + 1e-4 && q[a] > bmin[a] - rc && !(kind == CREATURE && a == 1) { let pen = q[a] - (bmin[a] - rc); if pen < best { best = pen; ba = a; hi = false; } }
     }
     if ba < 3 { q[ba] = if hi { bmax[ba] + rc } else { bmin[ba] - rc }; return ba as u8; }
     // started inside (spawned there, squeezed in, or the box jumped onto it)
@@ -177,11 +185,11 @@ fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3],
         ba = (front as usize - 1) / 2; hi = front & 1 == 1;
     } else {
         let mut moved = 0.0f32;
-        if lead { for a in 0..3 { let d = bmin[a] - pmin[a]; if d.abs() > moved { moved = d.abs(); ba = a; hi = d > 0.0; } } }
+        if kind == PISTON { for a in 0..3 { let d = bmin[a] - pmin[a]; if d.abs() > moved { moved = d.abs(); ba = a; hi = d > 0.0; } } }
         if moved < 1e-6 {
             // nothing says which way: the nearest face
             for a in 0..3 {
-                let pen_lo = q[a] - (bmin[a] - rc); if pen_lo < best { best = pen_lo; ba = a; hi = false; }
+                let pen_lo = q[a] - (bmin[a] - rc); if pen_lo < best && !(kind == CREATURE && a == 1) { best = pen_lo; ba = a; hi = false; }
                 let pen_hi = (bmax[a] + rc) - q[a]; if pen_hi < best { best = pen_hi; ba = a; hi = true; }
             }
         } // else: a block being pushed carries it along on its leading face
@@ -256,14 +264,14 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
                 let ci = (x + w.st_dim[0] * (y + w.st_dim[1] * z)) as usize;
                 for k in w.st_start[ci]..w.st_start[ci + 1] {
                     let b = &w.st[w.st_items[k as usize] as usize];
-                    let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, false);
+                    let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, BLOCK);
                     if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; }
                 }
             } } }
         }
     }
     for b in w.kin {
-        let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc, b.front, b.id > 0);
+        let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc, b.front, if b.id > 0 { PISTON } else { CREATURE });
         if ax < 3 { hit = 2; hit_id = b.id; hit_stick = b.stick; hit_min = b.min; hit_axis = ax; }
     }
     *qs.at(o) = q[0]; *qs.at(o + 1) = q[1]; *qs.at(o + 2) = q[2];
@@ -412,6 +420,17 @@ impl World {
         (a, k, sp)
     }
 
+    /// How many particles are stuck to the moving box with this id (diagnostics and tests).
+    pub fn anchors_on(&self, id: i32) -> u32 {
+        (0..self.maxp).filter(|&i| self.alive[i] != 0 && self.anc_kind[i] == 2 && self.anc_id[i] == id).count() as u32
+    }
+
+    /// How many particles of body `b` are stuck to blocks (diagnostics and tests).
+    pub fn anchors_of(&self, b: usize) -> u32 {
+        if b >= self.slots { return 0; }
+        (b * self.nb..(b + 1) * self.nb).filter(|&i| self.alive[i] != 0 && self.anc_kind[i] == 1).count() as u32
+    }
+
     /// End points of springs longer than `min_len` (diagnostics).
     pub fn long_springs(&self, min_len: f32) -> Vec<([f32; 3], [f32; 3])> {
         let mut v = Vec::new();
@@ -502,6 +521,7 @@ impl World {
     /// Kinematic colliders: `count` boxes of [`KIN_FLOATS`] floats (id, min xyz, max xyz, velocity xyz, stick, front).
     /// Positive ids are piston parts and blocks in transit, negative ids are creatures.
     /// Boxes missing from a new list are dropped; goo anchored to them stays where it was.
+    /// A box that is new or has moved since the last list wakes sleeping goo next to it.
     pub fn set_kinematic(&mut self, data: &[f32], count: usize) {
         let count = count.min(data.len() / KIN_FLOATS);
         let mut next: Vec<KBox> = Vec::with_capacity(count);
@@ -511,6 +531,13 @@ impl World {
             let (min, max) = ([d[1], d[2], d[3]], [d[4], d[5], d[6]]);
             let prev = self.kin.iter().find(|b| b.id == id);
             let (pmin, pmax) = match prev { Some(b) => (b.min, b.max), None => (min, max) };
+            // a box that has just turned up, or is not where it was, is news to anything sleeping next to it
+            // (a creature that appears inside resting goo and then stands still never counts as "moving")
+            if prev.map_or(true, |b| (0..3).any(|a| (b.min[a] - min[a]).abs() > 1e-3 || (b.max[a] - max[a]).abs() > 1e-3)) {
+                for bd in self.bodies.iter_mut() {
+                    if bd.state == 1 && !bd.awake && (0..3).all(|a| max[a] > bd.bb[a] - 0.6 && min[a] < bd.bb[a + 3] + 0.6) { bd.awake = true; bd.calm = 0; }
+                }
+            }
             next.push(KBox { id, min, max, pmin, pmax, vel: [d[7], d[8], d[9]], stick: d[10], t: 0.0, front: (d[11] as i32).clamp(0, 6) as u8 });
         }
         for i in 0..self.maxp {
@@ -943,7 +970,9 @@ impl World {
         }
         let kill_y = self.kill_y;
         let mut vsum = vec![0.0f32; slots];
-        for b in 0..slots { if self.bodies[b].awake { self.bodies[b].bb = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]; self.bodies[b].anchored = 0; } }
+        // only bodies that were simulated this step get their bounds rebuilt; one that is shrinking away keeps its own
+        let old_bb: Vec<[f32; 6]> = self.bodies.iter().map(|b| b.bb).collect();
+        for b in 0..slots { if self.bodies[b].state == 1 && self.bodies[b].awake { self.bodies[b].bb = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]; self.bodies[b].anchored = 0; } }
         for a in 0..n_act {
             let i = self.act[a] as usize; let o = i * 3; let b = i / nb;
             let mut sp = 0.0;
@@ -954,6 +983,8 @@ impl World {
             for c in 0..3 { bd.bb[c] = bd.bb[c].min(self.p[o + c]); bd.bb[c + 3] = bd.bb[c + 3].max(self.p[o + c]); }
             if self.anc_kind[i] != 0 { bd.anchored += 1; }
         }
+        // a body that lost its last particle this step is freed on the next one; until then its bounds stay real numbers
+        for b in 0..slots { if self.bodies[b].bb[0] > self.bodies[b].bb[3] { self.bodies[b].bb = old_bb[b]; } }
 
         self.prof[5] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
         // ---- sleep / wake ----

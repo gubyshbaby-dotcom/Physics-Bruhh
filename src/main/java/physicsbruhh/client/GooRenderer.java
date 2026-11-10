@@ -86,39 +86,42 @@ public final class GooRenderer {
         final float camX = (float) (camera.x - origin.getX()), camY = (float) (camera.y - origin.getY()), camZ = (float) (camera.z - origin.getZ());
         PoseStack stack = event.getPoseStack();
         stack.pushPose();
-        stack.translate(origin.getX() - camera.x, origin.getY() - camera.y, origin.getZ() - camera.z);
-        for (int mat = 0; mat < 2; mat++) {
-            final int count = quads[mat];
-            if (count == 0) continue;
-            final float[] data = local[mat];
-            final int alpha = ALPHA[mat];
-            final boolean clear = GooClient.clearLook;
-            final int material = mat;
-            if (shader) {
-                event.getSubmitNodeCollector().submitCustomGeometry(stack, GooPipelines.type(TEXTURES[mat]), (pose, consumer) -> {
-                    drawCalls++; drawnQuads += count;
-                    shaderQuads(pose, consumer, level, origin, data, count, material, clear);
-                });
-                continue;
-            }
-            RenderType type = NeoForgeRenderTypes.getEntityUnlitTranslucent(clear ? WHITE : TEXTURES[mat]);
-            event.getSubmitNodeCollector().submitCustomGeometry(stack, type, (pose, consumer) -> {
-                drawCalls++; drawnQuads += count;
-                Long2FloatOpenHashMap lightCache = new Long2FloatOpenHashMap();
-                lightCache.defaultReturnValue(-1.0F);
-                BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-                for (int q = 0; q < count; q++) {
-                    int o = q * GooSim.FLOATS_PER_QUAD;
-                    // light of the block under the quad's first corner, cached per block
-                    pos.set(origin.getX() + (int) Math.floor(data[o]), origin.getY() + (int) Math.floor(data[o + 1] + 0.05F), origin.getZ() + (int) Math.floor(data[o + 2]));
-                    float light = lightCache.get(pos.asLong());
-                    if (light < 0.0F) { light = 0.22F + 0.78F * level.getMaxLocalRawBrightness(pos) / 15.0F; lightCache.put(pos.asLong(), light); }
-                    if (clear) clearQuad(pose, consumer, data, o, light, camX, camY, camZ, material);
-                    else blockyQuad(pose, consumer, data, o, light, alpha);
+        try {
+            stack.translate(origin.getX() - camera.x, origin.getY() - camera.y, origin.getZ() - camera.z);
+            for (int mat = 0; mat < 2; mat++) {
+                final int count = quads[mat];
+                if (count == 0) continue;
+                final float[] data = local[mat];
+                final int alpha = ALPHA[mat];
+                final boolean clear = GooClient.clearLook;
+                final int material = mat;
+                if (shader) {
+                    event.getSubmitNodeCollector().submitCustomGeometry(stack, GooPipelines.type(TEXTURES[mat]), (pose, consumer) -> {
+                        drawCalls++; drawnQuads += count;
+                        shaderQuads(pose, consumer, level, origin, data, count, material, clear);
+                    });
+                    continue;
                 }
-            });
+                RenderType type = NeoForgeRenderTypes.getEntityUnlitTranslucent(clear ? WHITE : TEXTURES[mat]);
+                event.getSubmitNodeCollector().submitCustomGeometry(stack, type, (pose, consumer) -> {
+                    drawCalls++; drawnQuads += count;
+                    Long2FloatOpenHashMap lightCache = new Long2FloatOpenHashMap();
+                    lightCache.defaultReturnValue(-1.0F);
+                    BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                    for (int q = 0; q < count; q++) {
+                        int o = q * GooSim.FLOATS_PER_QUAD;
+                        // light of the block under the quad's first corner, cached per block
+                        pos.set(origin.getX() + (int) Math.floor(data[o]), origin.getY() + (int) Math.floor(data[o + 1] + 0.05F), origin.getZ() + (int) Math.floor(data[o + 2]));
+                        float light = lightCache.get(pos.asLong());
+                        if (light < 0.0F) { light = 0.22F + 0.78F * level.getMaxLocalRawBrightness(pos) / 15.0F; lightCache.put(pos.asLong(), light); }
+                        if (clear) clearQuad(pose, consumer, data, o, light, camX, camY, camZ, material);
+                        else blockyQuad(pose, consumer, data, o, light, alpha);
+                    }
+                });
+            }
+        } finally {
+            stack.popPose();
         }
-        stack.popPose();
     }
 
     /**

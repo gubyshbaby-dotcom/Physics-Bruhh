@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 2;
+pub const ABI_VERSION: jint = 3;
 const ERR: jint = -9999;
 
 struct Handle { world: World, mesh: Vec<f32> }
@@ -58,6 +58,15 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nWake(_env: JNIEnv, _c: J
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nProbe(_env: JNIEnv, _c: JClass, h: jlong, x0: jfloat, y0: jfloat, z0: jfloat, x1: jfloat, y1: jfloat, z1: jfloat) -> jint {
     guard(|| match unsafe { handle(h) } {
         Some(hd) => { let (honey, slime) = hd.world.probe([x0, y0, z0], [x1, y1, z1]); (honey.min(32767) | slime.min(32767) << 16) as jint }
+        None => ERR,
+    })
+}
+
+/// Diagnostics: `what` 0 = particles stuck to the moving box with id `arg`, 1 = particles of body `arg` stuck to blocks.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCount(_env: JNIEnv, _c: JClass, h: jlong, what: jint, arg: jint) -> jint {
+    guard(|| match unsafe { handle(h) } {
+        Some(hd) => match what { 0 => hd.world.anchors_on(arg) as jint, 1 => hd.world.anchors_of(arg.max(0) as usize) as jint, _ => 0 },
         None => ERR,
     })
 }

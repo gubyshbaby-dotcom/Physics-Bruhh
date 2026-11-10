@@ -46,6 +46,11 @@ public final class GooClient {
     private static final int PARTICLES_PER_EDGE = 12;
     private static final int MAX_BODIES = 24;
     private static final int MAX_STATIC = 4096, MAX_KINEMATIC = 64;
+    /**
+     * How strongly goo clings to a sticky piston's head (1 = an ordinary block). High enough that slime
+     * stretched to three blocks between two of them never peels off; at 3 it did so about every other time.
+     */
+    private static final float STICKY_HEAD = 8.0F;
 
     /** What the client thread hands to the simulation each tick. */
     private record Colliders(float[] statics, int staticCount, float[] kinematics, int kinematicCount) {}
@@ -71,9 +76,11 @@ public final class GooClient {
     static volatile boolean clearLook;
     /** Cells of bodies added this tick: their surroundings are scanned at once, so they never spend a tick without a floor. */
     private static final List<BlockPos> NEW_CELLS = new ArrayList<>();
-    /** The local player's box (relative to {@link #origin}) and how much goo is inside it: honey in the low 16 bits, slime above. */
+    /** The local player's box, widened a little (relative to {@link #origin}), and how much goo is in it: honey in the low 16 bits, slime above. */
     private static volatile float[] probeBox;
     private static volatile int probeResult;
+    /** How far around the player's box goo counts as touching them. */
+    static final double PROBE_REACH = 0.22;
 
     /**
      * Test mode ({@code -Dphysicsbruhh.lockstep=true}): exactly three simulation steps per client
@@ -109,7 +116,7 @@ public final class GooClient {
         sim = null;
         if (s != null) s.close();
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
-        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false; NEW_CELLS.clear(); probeBox = null; probeResult = 0;
+        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false; NEW_CELLS.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         PART_IDS.clear(); HEADS.clear();
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
@@ -133,7 +140,22 @@ public final class GooClient {
         thread.start();
     }
 
+    /** Errors in {@link #tick} so far in this world; after three the goo stays switched off until the world is left. */
+    static volatile int failures;
+
+    /** One client tick. Whatever goes wrong in here must not take the game down: the goo is dropped and the reason logged. */
     static void tick() {
+        if (failures >= 3) return;
+        try {
+            tickUnguarded();
+        } catch (Throwable t) {
+            failures++;
+            PhysicsBruhh.LOGGER.error("Goo simulation hit an error and was reset ({} of 3 before it stays off in this world)", failures, t);
+            try { reset(); } catch (Throwable again) { PhysicsBruhh.LOGGER.error("... and could not be reset", again); }
+        }
+    }
+
+    private static void tickUnguarded() {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null) { if (sim != null) reset(); return; }
@@ -169,8 +191,10 @@ public final class GooClient {
             if (c != null) COLLIDERS.set(c);
             NEW_CELLS.clear();
             BlockPos o = origin;
+            if (traceRow != null) noteTrace(c, o);
             if (mc.player != null && !mc.player.isSpectator()) {
-                AABB box = mc.player.getBoundingBox();
+                // the player's box shoves goo out of itself, so what tells how deep they stand in it is the goo pressed against the box
+                AABB box = mc.player.getBoundingBox().inflate(PROBE_REACH, 0.0, PROBE_REACH).expandTowards(0.0, -0.12, 0.0);
                 probeBox = new float[] { (float) (box.minX - o.getX()), (float) (box.minY - o.getY()), (float) (box.minZ - o.getZ()), (float) (box.maxX - o.getX()), (float) (box.maxY - o.getY()), (float) (box.maxZ - o.getZ()) };
             } else {
                 probeBox = null; probeResult = 0;
@@ -205,10 +229,10 @@ public final class GooClient {
         scanTick++;
         for (int b = 0; b + 8 <= info.length && b / 8 < MAX_BODIES; b += 8) {
             final int slot = b / 8;
-            if (info[b] == 0.0F) { SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0; continue; }
+            // free slots, bodies that are shrinking away (they collide with nothing), and anything whose bounds are not sane numbers
+            if (info[b] != 1.0F || !saneBounds(info, b)) { SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0; continue; }
             int x0 = (int) Math.floor(info[b + 2] - 1.0F) + o.getX(), y0 = (int) Math.floor(info[b + 3] - 1.0F) + o.getY(), z0 = (int) Math.floor(info[b + 4] - 1.0F) + o.getZ();
             int x1 = (int) Math.floor(info[b + 5] + 1.0F) + o.getX(), y1 = (int) Math.floor(info[b + 6] + 1.0F) + o.getY(), z1 = (int) Math.floor(info[b + 7] + 1.0F) + o.getZ();
-            if (x1 - x0 > 24 || y1 - y0 > 24 || z1 - z0 > 24) continue; // something flew off; ignore it
             if (info[b + 1] != 0.0F) {
                 SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0;
             } else {
@@ -280,6 +304,15 @@ public final class GooClient {
         }
         nk = moveHeads(level, o, kin, nk);
         return any ? new Colliders(st, ns, kin, nk) : null; // nothing awake: leave the simulation's colliders alone
+    }
+
+    /** A body's bounds as reported by the simulation: real numbers, the right way round, not absurdly large or far away. */
+    private static boolean saneBounds(float[] info, int b) {
+        for (int a = 0; a < 3; a++) {
+            float lo = info[b + 2 + a], hi = info[b + 5 + a];
+            if (!(lo <= hi) || !(hi - lo <= 24.0F) || !(Math.abs(lo) < 1.0e6F) || !(Math.abs(hi) < 1.0e6F)) return false; // also false for NaN
+        }
+        return true;
     }
 
     /** How strongly goo clings to a surface (1 = ordinary block). */
@@ -426,7 +459,7 @@ public final class GooClient {
                 float v = -(next - head.shown) * 20.0F;
                 // only a sticky head holds on to goo; a plain one just pushes
                 nk = addBoxes(shape, headPos, head.base, -f.getStepX() * head.shown, -f.getStepY() * head.shown, -f.getStepZ() * head.shown,
-                        f.getStepX() * v, f.getStepY() * v, f.getStepZ() * v, head.sticky ? 3.0F : 0.0F, f, o, kin, nk);
+                        f.getStepX() * v, f.getStepY() * v, f.getStepZ() * v, head.sticky ? STICKY_HEAD : 0.0F, f, o, kin, nk);
                 if (next != head.shown && (head.shown == 0.0F || head.shown == 1.0F)) strokes.add(headPos);
             }
             head.shown = next;
@@ -489,7 +522,7 @@ public final class GooClient {
         double bestDistance = limit;
         for (GooEntity goo : LIVE.values()) {
             Integer slot = SLOT_OF_ENTITY.get(goo.getId());
-            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F) continue;
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
             int b = slot * 8;
             AABB box = new AABB(info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ()).inflate(0.05);
             double distance = box.contains(from) ? 0.0 : box.clip(from, to).map(hit -> hit.distanceTo(from)).orElse(Double.MAX_VALUE);
@@ -512,18 +545,100 @@ public final class GooClient {
         return -1;
     }
 
-    /** World x range of the slime body that is widest along x (smoke test: is the band between two pistons where it should be?). */
-    static float[] widestSlime() {
+    /** World x range of the widest slime body lying across the line {@code z} (smoke test: is the band between two pistons where it should be?). */
+    static float[] slimeSpan(double z) {
         float[] info = bodyInfo;
+        BlockPos o = origin;
         float[] span = { 0.0F, 0.0F };
         for (GooEntity goo : LIVE.values()) {
             if (goo.material() != GooSim.SLIME) continue;
             Integer slot = SLOT_OF_ENTITY.get(goo.getId());
-            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] == 0.0F) continue;
-            float lo = info[slot * 8 + 2] + origin.getX(), hi = info[slot * 8 + 5] + origin.getX();
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
+            int b = slot * 8;
+            if (info[b + 4] + o.getZ() > z || info[b + 7] + o.getZ() < z) continue;
+            float lo = info[b + 2] + o.getX(), hi = info[b + 5] + o.getX();
             if (hi - lo > span[1] - span[0]) { span[0] = lo; span[1] = hi; }
         }
         return span;
+    }
+
+    /** Middle of the bounds (x, bottom y, z) of the goo of this material nearest to (x, z), or null (smoke test: where did that puddle end up?). */
+    static double[] centreNear(int material, double x, double z) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        double[] best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != material) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
+            int b = slot * 8;
+            double cx = (info[b + 2] + info[b + 5]) * 0.5 + o.getX(), cz = (info[b + 4] + info[b + 7]) * 0.5 + o.getZ();
+            double d = (cx - x) * (cx - x) + (cz - z) * (cz - z);
+            if (d < bestDistance) { bestDistance = d; best = new double[] { cx, info[b + 3] + o.getY(), cz }; }
+        }
+        return best;
+    }
+
+    // ---- tracing one row of blocks (smoke test only): what the simulation was told and what it holds on to
+
+    /** Block row (y, z) to trace, or null. Set by the smoke test. */
+    static volatile int[] traceRow;
+    private static volatile int[] traceIds = new int[0], traceCounts = new int[0], traceStuck = new int[0];
+    private static volatile String traceColliders = "";
+
+    private static void noteTrace(Colliders c, BlockPos o) {
+        int[] row = traceRow;
+        if (row == null) return;
+        StringBuilder sb = new StringBuilder();
+        List<Integer> ids = new ArrayList<>();
+        for (Head head : HEADS.values()) {
+            if (head.base.getY() != row[0] || head.base.getZ() != row[1]) continue;
+            sb.append(" head@").append(head.base.getX()).append(head.sticky ? "s" : "p").append(" shown=").append(head.shown).append(" target=").append(head.target).append(head.exact ? " exact" : "").append(" base=").append(Minecraft.getInstance().level.getBlockState(head.base).getBlock().getName().getString());
+            ids.add(-head.base.getX() - 1000); // marks the start of a head's ids
+            for (int i = 0; i < 3; i++) ids.add(partId(head.base, i));
+        }
+        if (c != null) {
+            float y = row[0] - o.getY(), z = row[1] - o.getZ();
+            sb.append(" | static:");
+            for (int k = 0; k < c.staticCount(); k++) {
+                int i = k * GooSim.STATIC_FLOATS;
+                if (c.statics()[i + 1] >= y - 0.01F && c.statics()[i + 1] < y + 1.0F && c.statics()[i + 2] < z + 1.0F && c.statics()[i + 5] > z) sb.append(String.format(java.util.Locale.ROOT, " %.2f..%.2f", c.statics()[i] + o.getX(), c.statics()[i + 3] + o.getX()));
+            }
+            sb.append(" | moving:");
+            for (int k = 0; k < c.kinematicCount(); k++) {
+                int i = k * GooSim.KINEMATIC_FLOATS;
+                if (c.kinematics()[i + 2] < y + 1.0F && c.kinematics()[i + 5] > y && c.kinematics()[i + 3] < z + 1.0F && c.kinematics()[i + 6] > z) sb.append(String.format(java.util.Locale.ROOT, " #%d %.2f..%.2f v=%.1f", (int) c.kinematics()[i], c.kinematics()[i + 1] + o.getX(), c.kinematics()[i + 4] + o.getX(), c.kinematics()[i + 7]));
+            }
+        } else {
+            sb.append(" | nothing sent");
+        }
+        traceColliders = sb.toString();
+        traceIds = ids.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /** One line about the traced row: bodies lying in it, piston heads, what was sent to the simulation and how many particles hold on to what. */
+    static String trace() {
+        int[] row = traceRow;
+        if (row == null) return "";
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        StringBuilder sb = new StringBuilder();
+        for (GooEntity goo : LIVE.values()) {
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] == 0.0F) continue;
+            int b = slot * 8;
+            if (info[b + 4] + o.getZ() > row[1] + 0.5 || info[b + 7] + o.getZ() < row[1] + 0.5) continue;
+            int[] stuck = traceStuck;
+            sb.append(String.format(java.util.Locale.ROOT, " body%d(%s%s) x=%.2f..%.2f on blocks=%d", slot, goo.material() == GooSim.SLIME ? "slime" : "honey", info[b + 1] != 0.0F ? "" : ",asleep", info[b + 2] + o.getX(), info[b + 5] + o.getX(), slot < stuck.length ? stuck[slot] : -1));
+        }
+        int[] ids = traceIds, counts = traceCounts;
+        sb.append(" | held:");
+        for (int i = 0; i < ids.length && i < counts.length; i++) {
+            if (ids[i] < 0) sb.append(" @").append(-ids[i] - 1000).append(':');
+            else sb.append(counts[i]).append(' ');
+        }
+        return sb + " |" + traceColliders;
     }
 
     static int quadCount(int material) { synchronized (MESH_LOCK) { return meshQuads[material]; } }
@@ -565,6 +680,14 @@ public final class GooClient {
                 bodyInfo = info;
                 float[] probe = probeBox;
                 if (probe != null) probeResult = Math.max(0, s.probe(probe[0], probe[1], probe[2], probe[3], probe[4], probe[5]));
+                if (traceRow != null) {
+                    int[] ids = traceIds, counts = new int[ids.length];
+                    for (int i = 0; i < ids.length; i++) counts[i] = ids[i] > 0 ? s.count(0, ids[i]) : 0;
+                    traceCounts = counts;
+                    int[] stuck = new int[MAX_BODIES];
+                    for (int b = 0; b < MAX_BODIES; b++) stuck[b] = s.count(1, b);
+                    traceStuck = stuck;
+                }
                 // once more after the last moving body has stopped or gone, or its final state would never be shown
                 boolean changed = awake > 0 || dirty || hadAwake;
                 hadAwake = awake > 0;

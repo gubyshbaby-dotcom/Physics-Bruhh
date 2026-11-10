@@ -9,6 +9,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+import net.neoforged.neoforge.client.event.InputEvent;
 import net.neoforged.neoforge.client.event.SubmitCustomGeometryEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
@@ -32,12 +33,31 @@ public class PhysicsBruhhClient {
             if (e.getLevel().isClientSide() && e.getEntity() instanceof GooEntity goo) GooClient.leave(goo);
         });
         modBus.addListener(GooPipelines::register);
-        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { GooClient.tick(); GooTouch.tick(Minecraft.getInstance()); });
-        NeoForge.EVENT_BUS.addListener(GooTouch::onClick);
+        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); });
+        NeoForge.EVENT_BUS.addListener((InputEvent.InteractionKeyMappingTriggered e) -> guarded(1, "click", () -> GooTouch.onClick(e)));
         NeoForge.EVENT_BUS.addListener(GooLook::registerCommand);
         GooLook.load();
-        NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> GooClient.reset());
-        NeoForge.EVENT_BUS.addListener((SubmitCustomGeometryEvent e) -> GooRenderer.submit(e));
+        NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> { GooClient.reset(); GooClient.failures = 0; java.util.Arrays.fill(FAILED, 0); });
+        NeoForge.EVENT_BUS.addListener((SubmitCustomGeometryEvent e) -> guarded(2, "drawing", () -> GooRenderer.submit(e)));
         ClientSelfTest.register();
+    }
+
+    private static final int[] FAILED = new int[3];
+    /** Errors caught by {@link #guarded} since the game started (the smoke test wants none). */
+    static volatile int errors;
+
+    /**
+     * Runs one of the mod's per-tick or per-frame jobs. The goo is decoration: if one of them throws,
+     * that is logged and, after three times, the job stays off until the world is left. The game goes on.
+     */
+    private static void guarded(int job, String what, Runnable body) {
+        if (FAILED[job] >= 3) return;
+        try {
+            body.run();
+        } catch (Throwable t) {
+            errors++;
+            FAILED[job]++;
+            PhysicsBruhh.LOGGER.error("Goo {} failed ({} of 3 before it stays off in this world)", what, FAILED[job], t);
+        }
     }
 }

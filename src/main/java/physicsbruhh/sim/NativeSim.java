@@ -9,7 +9,7 @@ import java.util.Locale;
 
 /** Rust core through JNI. Use {@link #available()} before constructing. */
 public final class NativeSim implements GooSim {
-    public static final int ABI_VERSION = 2;
+    public static final int ABI_VERSION = 3;
     private static final int ERR = -9999;
     private static Boolean loaded;
     private static String loadMessage = "not tried";
@@ -70,6 +70,7 @@ public final class NativeSim implements GooSim {
     @Override public int mesh(int material, ByteBuffer out) { return check(nMesh(handle, material, out)); }
     @Override public int bodies(ByteBuffer out) { return check(nBodies(handle, out)); }
     @Override public int probe(float x0, float y0, float z0, float x1, float y1, float z1) { return check(nProbe(handle, x0, y0, z0, x1, y1, z1)); }
+    @Override public int count(int what, int arg) { return check(nCount(handle, what, arg)); }
     @Override public String backend() { return "rust"; }
     @Override public void close() { if (handle != 0) { nDestroy(handle); handle = 0; } }
 
@@ -86,4 +87,5 @@ public final class NativeSim implements GooSim {
     private static native int nMesh(long h, int mat, ByteBuffer buf);
     private static native int nBodies(long h, ByteBuffer buf);
     private static native int nProbe(long h, float x0, float y0, float z0, float x1, float y1, float z1);
+    private static native int nCount(long h, int what, int arg);
 }

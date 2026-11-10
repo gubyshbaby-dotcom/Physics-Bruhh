@@ -115,6 +115,8 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
      */
     private void touch(ServerLevel level) {
         boolean slime = material() == GooSim.SLIME;
+        // players feel the goo on their own client; here only their fall is forgotten, as landing on a slime block would do
+        if (slime) for (Player player : level.getEntitiesOfClass(Player.class, reach(), p -> !p.isSpectator() && !p.isSuppressingBounce())) player.resetFallDistance();
         for (Entity e : level.getEntities(this, reach(), other -> !(other instanceof GooEntity) && !(other instanceof Player) && !other.isSpectator() && other.isAlive())) {
             Vec3 v = e.getDeltaMovement();
             if (slime) {
