@@ -44,7 +44,10 @@ the `physicsbruhh-jar` artifact:
 2. checks that the Java and Rust simulations agree,
 3. builds the mod against NeoForge,
 4. boots a dedicated server and runs real piston contraptions against the hooks,
-5. opens the world in a real client (software rendering) and plays a piston scene, saving screenshots.
+5. opens the world in a real client (software rendering), runs pistons against honey and slime in
+   both looks, checks that the slime ends up stretched between the retracted sticky pistons, and
+   saves screenshots (artifact `clienttest`; a commit message containing `[shots]` also prints
+   them into the log as text).
 
 Locally: JDK 25 and a Rust toolchain, then `./gradlew build`. The jar lands in `build/libs/`.
 Without Rust the build still works; that jar only has the Java simulation.
@@ -54,7 +57,7 @@ Looking at the simulation without the game:
 ```
 cd native
 cargo test --release
-cargo run --release --example viz -- pull_slime out.ppm   # honey, slime, slime_push, honey_push, pull, pull_slime
+cargo run --release --example viz -- game_pull_slime out.ppm   # honey, slime, slime_push, honey_push, pull, pull_slime, game_pull, game_pull_slime
 ```
 
 ## Limits
@@ -66,8 +69,9 @@ cargo run --release --example viz -- pull_slime out.ppm   # honey, slime, slime_
   different puddles, and players, mobs and items pass through it.
 - At most 24 pieces of goo are simulated around a player at once; beyond that the oldest resting
   ones are dropped from view.
-- Vanilla pistons move a block in a tenth of a second. Honey cannot follow that and tears: the
-  stretch shows as strings that last about a second. Slime holds on as a band.
+- Vanilla pistons move a block in a tenth of a second. Slime holds on and stays stretched between
+  two sticky pistons as a band. Honey cannot follow that fast: it tears into strings, and what is
+  left sags into a strand or a puddle between the pistons.
 - The Rust core is single-threaded and not vectorised yet; it is only moderately faster than the
   Java twin (the mesher about three times, the solver about 20 %).
 
