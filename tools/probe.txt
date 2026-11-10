@@ -1,0 +1,66 @@
+list ^com/mojang/renderpearl/
+list ^com/mojang/blaze3d/
+list ^net/minecraft/client/renderer/[A-Za-z]+\.java
+list ^net/minecraft/client/renderer/(feature|oit|rendertype|state/level|texture|fog)/
+srcdir ^com/mojang/renderpearl/api/
+src com/mojang/blaze3d/pipeline/RenderTarget.java
+src com/mojang/blaze3d/pipeline/MainTarget.java
+src com/mojang/blaze3d/pipeline/TextureTarget.java
+src com/mojang/blaze3d/systems/RenderSystem.java
+srcdir ^net/minecraft/client/renderer/rendertype/(RenderSetup|RenderType|OutputTarget|TextureTransform|LayeringTransform)\.java
+src net/minecraft/client/renderer/LevelRenderer.java
+grepsrc net/minecraft/client/renderer/GameRenderer.java mainRenderTarget|renderLevel|useImprovedTransparency|projection|Projection|fov|Fov
+srcdir ^net/minecraft/client/renderer/oit/
+srcdir ^net/minecraft/client/renderer/feature/(FeatureRenderDispatcher|CustomFeatureRenderer|FeatureFrame|FeatureRenderer)\.java
+src net/minecraft/client/renderer/PostChain.java
+src net/minecraft/client/renderer/PostPass.java
+src net/minecraft/client/renderer/LevelTargetBundle.java
+src net/minecraft/client/renderer/DynamicGpuData.java
+src net/minecraft/client/renderer/DynamicUniforms.java
+src net/minecraft/client/renderer/GlobalSettingsUniform.java
+src net/minecraft/client/renderer/PerspectiveProjectionMatrixBuffer.java
+src net/minecraft/client/renderer/Projection.java
+src net/minecraft/client/renderer/SkyRenderer.java
+src net/minecraft/client/renderer/state/level/SkyRenderState.java
+src net/minecraft/client/renderer/texture/AbstractTexture.java
+src net/minecraft/client/renderer/texture/DynamicTexture.java
+grepsrc net/minecraft/client/renderer/texture/TextureManager.java public
+src com/mojang/blaze3d/vertex/DefaultVertexFormat.java
+src com/mojang/blaze3d/vertex/BufferBuilder.java
+src com/mojang/blaze3d/vertex/MeshData.java
+src com/mojang/blaze3d/vertex/Tesselator.java
+src com/mojang/blaze3d/vertex/ByteBufferBuilder.java
+alist ^assets/minecraft/shaders/
+alist ^assets/minecraft/post_effect/
+assetdir ^assets/minecraft/shaders/include/
+asset assets/minecraft/shaders/core/entity.vsh
+asset assets/minecraft/shaders/core/entity.fsh
+asset assets/minecraft/shaders/core/sky.fsh
+asset assets/minecraft/shaders/core/sky.vsh
+asset assets/minecraft/shaders/core/blit_screen.fsh
+asset assets/minecraft/shaders/core/blit_screen.vsh
+asset assets/minecraft/shaders/core/screenquad.vsh
+asset assets/minecraft/post_effect/transparency.json
+asset assets/minecraft/post_effect/blur.json
+asset assets/minecraft/shaders/post/transparency.fsh
+asset assets/minecraft/shaders/post/blit.fsh
+asset assets/minecraft/shaders/post/blit.vsh
+src net/minecraft/world/level/block/DispenserBlock.java
+src net/minecraft/core/dispenser/DispenseItemBehavior.java
+src net/minecraft/core/dispenser/DefaultDispenseItemBehavior.java
+src net/minecraft/core/dispenser/OptionalDispenseItemBehavior.java
+src net/minecraft/core/dispenser/BlockSource.java
+grepsrc net/minecraft/world/level/block/entity/DispenserBlockEntity.java public
+grepsrc net/minecraft/world/item/Items.java HONEY_BOTTLE|SLIME_BALL|GLASS_BOTTLE|HONEY_BLOCK|SLIME_BLOCK|HONEYCOMB
+src net/minecraft/world/item/BottleItem.java
+src net/minecraft/world/item/ItemUtils.java
+src net/minecraft/world/entity/Interaction.java
+grepsrc net/minecraft/world/entity/Entity.java interact|InteractionResult|isPickable|hurtServer|getPickResult|defineSynchedData|onSyncedDataUpdated|getPistonPushReaction|public .* pick\(|isAttackable|skipAttackInteraction
+src net/minecraft/network/syncher/EntityDataSerializers.java
+src net/minecraft/client/multiplayer/MultiPlayerGameMode.java
+src net/minecraft/world/InteractionResult.java
+grepsrc net/minecraft/world/entity/player/Player.java getItemInHand|getInventory|addItem|hasInfiniteMaterials|isCreative|getAbilities|setItemInHand|awardStat
+grepsrc net/minecraft/world/entity/player/Inventory.java public
+grepsrc net/minecraft/client/Minecraft.java startUseItem|startAttack|continueAttack|hitResult|pick\(
+grepsrc net/minecraft/world/level/Level.java getSunAngle|getTimeOfDay|getDayTime|getSkyDarken|isRaining|getRainLevel|dimensionType
+grepsrc net/minecraft/client/multiplayer/ClientLevel.java getSkyColor|getSunAngle|getStarBrightness|getSkyFlashTime|getCloudColor|environmentAttributes|getSkyDarken

@@ -2,6 +2,7 @@ name: Build
 
 on:
   push:
+    branches-ignore: [probe]
   workflow_dispatch:
 
 concurrency:
