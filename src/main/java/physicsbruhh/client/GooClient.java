@@ -191,7 +191,7 @@ public final class GooClient {
                 SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0;
             } else {
                 long hash = 1L;
-                for (int y = y0; y <= y1; y++) for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) {
+                for (int y = y0 - 1; y <= y1 + 1; y++) for (int z = z0 - 1; z <= z1 + 1; z++) for (int x = x0 - 1; x <= x1 + 1; x++) {
                     pos.set(x, y, z);
                     BlockState state = level.getBlockState(pos);
                     hash = hash * 31L + System.identityHashCode(state);
@@ -206,15 +206,19 @@ public final class GooClient {
                 if (WAKING[slot] > 0) WAKING[slot]--; else continue;
             }
             any = true;
-            for (int y = y0; y <= y1; y++) for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) {
+            // piston parts are looked for one block further out than ordinary blocks: a retracting head
+            // is drawn (and collides) in front of its base, but the moving block itself sits on the base
+            for (int y = y0 - 1; y <= y1 + 1; y++) for (int z = z0 - 1; z <= z1 + 1; z++) for (int x = x0 - 1; x <= x1 + 1; x++) {
                 pos.set(x, y, z);
-                if (!seen.add(pos.asLong())) continue;
+                boolean inner = x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1;
+                if (inner && !seen.add(pos.asLong())) continue;
                 BlockState state = level.getBlockState(pos);
                 if (state.isAir()) continue;
                 if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) {
                     if (seenParts.add(pos.asLong())) nk = addPistonPart(level, state, pos, o, kin, nk);
                     continue;
                 }
+                if (!inner) continue;
                 VoxelShape shape = state.getCollisionShape(level, pos);
                 if (shape.isEmpty()) continue;
                 float stick = stickiness(state);
