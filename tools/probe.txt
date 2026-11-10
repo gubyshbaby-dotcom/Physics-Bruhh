@@ -1,12 +1,4 @@
-src net/minecraft/client/renderer/state/level/LevelRenderState.java
-grepsrc net/minecraft/world/food/FoodData.java public
-grepsrc net/minecraft/world/entity/Entity.java interact|onSyncedDataUpdated|getLookAngle|getEyePosition|distanceToSqr|isSecondaryUseActive|isShiftKeyDown
-grepsrc net/minecraft/world/level/Level.java clip|playSound|levelEvent|explode
-src net/minecraft/world/level/ClipContext.java
-src net/minecraft/world/phys/EntityHitResult.java
-grepsrc net/minecraft/sounds/SoundEvents.java BOTTLE_|HONEY_|SLIME_BLOCK|SNOWBALL
-grepsrc net/minecraft/client/renderer/GameRenderer.java AfterLevel|setProjectionMatrix|mainRenderTarget|renderItemInHand|levelRenderer.render|bobView|bobHurt|getProjectionMatrix|levelProjection
-grepsrc net/minecraft/world/level/block/state/BlockBehaviour.java canBeReplaced
-src net/minecraft/client/renderer/fog/FogData.java
-grepsrc net/minecraft/world/level/storage/ValueInput.java getBooleanOr|getIntOr
-grepsrc net/minecraft/world/level/storage/ValueOutput.java putBoolean|putInt
+grepsrc net/minecraft/client/KeyMapping.java public
+grepsrc net/minecraft/client/Options.java keyShift|keyUse
+grepsrc net/minecraft/server/network/ServerGamePacketListenerImpl.java handleInteract|canInteractWithEntity|handleUseItem|handlePlayerInput|setShiftKeyDown
+grepsrc net/minecraft/world/level/Level.java getBlockEntity|Thread
