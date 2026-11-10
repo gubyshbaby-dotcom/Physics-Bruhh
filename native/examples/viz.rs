@@ -128,6 +128,12 @@ fn main() {
         t += DT;
     }
     println!("avg {:.2} ms/step, max {:.2}", ms_sum / steps as f64, ms_max);
+    // VIZ_MESH=file dumps the final surface (24 floats per quad, little endian) for an outside renderer
+    if let Ok(path) = std::env::var("VIZ_MESH") {
+        mesh_buf.clear(); mesh::build(&w, HONEY, &mut mesh_buf); mesh::build(&w, SLIME, &mut mesh_buf);
+        let mut bytes = Vec::with_capacity(mesh_buf.len() * 4); for v in &mesh_buf { bytes.extend_from_slice(&v.to_le_bytes()); }
+        std::fs::write(path, bytes).unwrap();
+    }
     let mut f = std::fs::File::create(&out).unwrap();
     write!(f, "P6\n{} {}\n255\n", sh.w, sh.h).unwrap(); f.write_all(&sh.px).unwrap();
 }

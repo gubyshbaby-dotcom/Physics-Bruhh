@@ -645,6 +645,27 @@ public final class JavaSim implements GooSim {
     private static final int[][] CO = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 }, { 1, 1, 1 } };
     private static final int[][] ED = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
 
+    // bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to
+    // between BRIDGE_FROM and BRIDGE_UPTO spacings, get extra samples of this weight along them
+    private static final float BRIDGE_REST = 1.2f, BRIDGE_FROM = 1.6f, BRIDGE_UPTO = 6.5f, BRIDGE_WEIGHT = 0.7f;
+
+    private static void splat(float[] accm, float px, float py, float pz, float sc, float rk, float c, float o0, float o1, float o2, int nx, int ny, int nz) {
+        float ic = 1f / c, irk2 = 1f / (rk * rk);
+        int x0 = Math.max(0, (int) Math.ceil((px - rk - o0) * ic)), x1 = Math.min(nx - 1, (int) Math.floor((px + rk - o0) * ic));
+        int y0 = Math.max(0, (int) Math.ceil((py - rk - o1) * ic)), y1 = Math.min(ny - 1, (int) Math.floor((py + rk - o1) * ic));
+        int z0 = Math.max(0, (int) Math.ceil((pz - rk - o2) * ic)), z1 = Math.min(nz - 1, (int) Math.floor((pz + rk - o2) * ic));
+        for (int z = z0; z <= z1; z++) { float dz = o2 + z * c - pz;
+            for (int y = y0; y <= y1; y++) { float dy = o1 + y * c - py;
+                for (int x = x0; x <= x1; x++) { float dx = o0 + x * c - px;
+                    float t = 1f - (dx * dx + dy * dy + dz * dz) * irk2;
+                    if (t <= 0f) continue;
+                    float wgt = t * t * t * sc; int o = (x + nx * (y + ny * z)) * 4;
+                    accm[o] += wgt; accm[o + 1] += wgt * px; accm[o + 2] += wgt * py; accm[o + 3] += wgt * pz;
+                }
+            }
+        }
+    }
+
     private void meshCluster(int[] members, int nm) {
         float rk = 2.2f * s, rad = 0.92f * s;
         float[] lo = { Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE }, hi = { -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE };
@@ -663,22 +684,26 @@ public final class JavaSim implements GooSim {
         float ic = 1f / c, irk2 = 1f / (rk * rk);
         for (int mi = 0; mi < nm; mi++) {
             int b = members[mi];
+            // jelly (permanent springs) pulled far apart would come out as separate slices, one per
+            // layer of particles; filling in along its stretched springs keeps it one smooth band
+            boolean bridge = !mats[bodies[b].mat].dynamicSprings;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
                 if (alive[i] == 0) continue;
                 float sc = scale[i]; if (sc <= 0.01f) continue;
                 float px = p[i * 3], py = p[i * 3 + 1], pz = p[i * 3 + 2];
-                int x0 = Math.max(0, (int) Math.ceil((px - rk - o0) * ic)), x1 = Math.min(nx - 1, (int) Math.floor((px + rk - o0) * ic));
-                int y0 = Math.max(0, (int) Math.ceil((py - rk - o1) * ic)), y1 = Math.min(ny - 1, (int) Math.floor((py + rk - o1) * ic));
-                int z0 = Math.max(0, (int) Math.ceil((pz - rk - o2) * ic)), z1 = Math.min(nz - 1, (int) Math.floor((pz + rk - o2) * ic));
-                for (int z = z0; z <= z1; z++) { float dz = o2 + z * c - pz;
-                    for (int y = y0; y <= y1; y++) { float dy = o1 + y * c - py;
-                        for (int x = x0; x <= x1; x++) { float dx = o0 + x * c - px;
-                            float t = 1f - (dx * dx + dy * dy + dz * dz) * irk2;
-                            if (t <= 0f) continue;
-                            float wgt = t * t * t * sc; int o = (x + nx * (y + ny * z)) * 4;
-                            accm[o] += wgt; accm[o + 1] += wgt * px; accm[o + 2] += wgt * py; accm[o + 3] += wgt * pz;
-                        }
-                    }
+                splat(accm, px, py, pz, sc, rk, c, o0, o1, o2, nx, ny, nz);
+                if (!bridge) continue;
+                for (int k = 0; k < sprN[i]; k++) {
+                    int si = i * MAX_SPR + k;
+                    if (sprL[si] > BRIDGE_REST * s) continue; // nearest neighbours only: one bridge per gap is enough
+                    int j = sprJ[si];
+                    if (alive[j] == 0) continue;
+                    float dx = p[j * 3] - px, dy = p[j * 3 + 1] - py, dz = p[j * 3 + 2] - pz;
+                    float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len < BRIDGE_FROM * s || len > BRIDGE_UPTO * s) continue;
+                    int n = Math.min(5, (int) (len / (1.1f * s)));
+                    float wsc = BRIDGE_WEIGHT * Math.min(sc, scale[j]);
+                    for (int m = 1; m <= n; m++) { float t = m / (float) (n + 1); splat(accm, px + dx * t, py + dy * t, pz + dz * t, wsc, rk, c, o0, o1, o2, nx, ny, nz); }
                 }
             }
         }
@@ -749,6 +774,7 @@ public final class JavaSim implements GooSim {
 
     private void threads(int mat) {
         float minLen = 1.9f * s, sag = mats[mat].threadSag;
+        boolean bridged = !mats[mat].dynamicSprings;
         int budget = 6000;
         float[] t = new float[3], u = new float[3], w = new float[3], p0 = new float[3], p1 = new float[3];
         for (int b = 0; b < slots; b++) {
@@ -762,6 +788,7 @@ public final class JavaSim implements GooSim {
                     float dx = bx - ax, dy = by - ay, dz = bz - az;
                     float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
                     if (len < minLen || len > 4f || (len < 2.9f * s && len < 1.3f * sprL[i * MAX_SPR + k])) continue;
+                    if (bridged && len <= BRIDGE_UPTO * s) continue; // drawn as part of the surface instead
                     if (Integer.remainderUnsigned((i * 31) ^ (j * 17), 3) != 0) continue;
                     if (budget < 4) return;
                     budget -= 4;

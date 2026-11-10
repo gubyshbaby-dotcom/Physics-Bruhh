@@ -81,7 +81,7 @@ public final class SimCheck {
             float[] b2 = body(s, 0); float c2 = (b2[2] + b2[5]) * 0.5f;
             check("sticky piston drags slime back", c1 - c2 > 0.4f, "moved back " + (c1 - c2));
             int relaxed = s.mesh(GooSim.SLIME, m);
-            check("stretched slime draws threads", stretched > relaxed + 200, stretched + " vs " + relaxed + " quads");
+            check("stretched slime has more surface", stretched > relaxed + 100, stretched + " vs " + relaxed + " quads");
             sig[2] = c1 - c0; sig[3] = c1 - c2;
         }
         try (GooSim s = f.make(10, 2)) {

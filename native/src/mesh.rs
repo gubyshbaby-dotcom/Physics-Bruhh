@@ -12,6 +12,12 @@ use crate::sim::World;
 /// the vertex in blocks (0 for threads), so the renderer can make thick goo darker than a thin film.
 pub const FLOATS_PER_QUAD: usize = 24;
 const DEPTH_STEPS: usize = 16;
+// bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to
+// between BRIDGE_FROM and BRIDGE_UPTO spacings, get extra samples of this weight along them
+const BRIDGE_REST: f32 = 1.2;
+const BRIDGE_FROM: f32 = 1.6;
+const BRIDGE_UPTO: f32 = 6.5;
+const BRIDGE_WEIGHT: f32 = 0.7;
 
 struct Grid { org: [f32; 3], dim: [usize; 3], c: f32 }
 
@@ -47,6 +53,7 @@ fn threads(w: &World, mat: u8, out: &mut Vec<f32>) {
     let s = w.s;
     let min_len = 1.9 * s;
     let sag = w.mats[mat as usize].thread_sag;
+    let bridged = !w.mats[mat as usize].dynamic_springs;
     let mut budget = 6000usize; // quads
     for b in 0..w.slots {
         if w.bodies[b].state == 0 || w.bodies[b].mat != mat { continue; }
@@ -61,6 +68,7 @@ fn threads(w: &World, mat: u8, out: &mut Vec<f32>) {
                 let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                 // only springs that are both long and taut: relaxed long springs sit inside the goo
                 if len < min_len || len > 4.0 || (len < 2.9 * s && len < 1.3 * w.spr_l[i * crate::sim::MAX_SPR + k]) { continue; }
+                if bridged && len <= BRIDGE_UPTO * s { continue; } // drawn as part of the surface instead
                 if (i.wrapping_mul(31) ^ j.wrapping_mul(17)) % 3 != 0 { continue; } // a third of them is plenty
                 if budget < 4 { return; }
                 budget -= 4;
@@ -110,29 +118,47 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
     let nn = nx * ny * nz;
     let mut acc = vec![0.0f32; nn * 4]; // sum w, sum w*x, sum w*y, sum w*z
     let ic = 1.0 / c; let irk2 = 1.0 / (rk * rk);
+    let mut splat = |p: [f32; 3], sc: f32| {
+        let mut r0 = [0usize; 3]; let mut r1 = [0usize; 3];
+        for k in 0..3 {
+            let a = ((p[k] - rk - g.org[k]) * ic).ceil().max(0.0) as usize;
+            let e = ((p[k] + rk - g.org[k]) * ic).floor();
+            if e < 0.0 { return; }
+            r0[k] = a; r1[k] = (e as usize).min(dim[k] - 1);
+            if r0[k] > r1[k] { return; }
+        }
+        for z in r0[2]..=r1[2] { let dz = g.org[2] + z as f32 * c - p[2];
+            for y in r0[1]..=r1[1] { let dy = g.org[1] + y as f32 * c - p[1];
+                for x in r0[0]..=r1[0] { let dx = g.org[0] + x as f32 * c - p[0];
+                    let t = 1.0 - (dx * dx + dy * dy + dz * dz) * irk2;
+                    if t <= 0.0 { continue; }
+                    let wgt = t * t * t * sc; let o = (x + nx * (y + ny * z)) * 4;
+                    acc[o] += wgt; acc[o + 1] += wgt * p[0]; acc[o + 2] += wgt * p[1]; acc[o + 3] += wgt * p[2];
+                }
+            }
+        }
+    };
     for &b in bodies {
+        // jelly (permanent springs) pulled far apart would come out as separate slices, one per
+        // layer of particles; filling in along its stretched springs keeps it one smooth band
+        let bridge = !w.mats[w.bodies[b].mat as usize].dynamic_springs;
         for i in b * w.nb..(b + 1) * w.nb {
             if w.alive[i] == 0 { continue; }
             let sc = w.scale[i]; if sc <= 0.01 { continue; }
             let p = [w.p[i * 3], w.p[i * 3 + 1], w.p[i * 3 + 2]];
-            let mut r0 = [0usize; 3]; let mut r1 = [0usize; 3]; let mut skip = false;
-            for k in 0..3 {
-                let a = ((p[k] - rk - g.org[k]) * ic).ceil().max(0.0) as usize;
-                let e = ((p[k] + rk - g.org[k]) * ic).floor();
-                if e < 0.0 { skip = true; break; }
-                r0[k] = a; r1[k] = (e as usize).min(dim[k] - 1);
-                if r0[k] > r1[k] { skip = true; break; }
-            }
-            if skip { continue; }
-            for z in r0[2]..=r1[2] { let dz = g.org[2] + z as f32 * c - p[2];
-                for y in r0[1]..=r1[1] { let dy = g.org[1] + y as f32 * c - p[1];
-                    for x in r0[0]..=r1[0] { let dx = g.org[0] + x as f32 * c - p[0];
-                        let t = 1.0 - (dx * dx + dy * dy + dz * dz) * irk2;
-                        if t <= 0.0 { continue; }
-                        let wgt = t * t * t * sc; let o = (x + nx * (y + ny * z)) * 4;
-                        acc[o] += wgt; acc[o + 1] += wgt * p[0]; acc[o + 2] += wgt * p[1]; acc[o + 3] += wgt * p[2];
-                    }
-                }
+            splat(p, sc);
+            if !bridge { continue; }
+            for k in 0..w.spr_n[i] as usize {
+                let si = i * crate::sim::MAX_SPR + k;
+                if w.spr_l[si] > BRIDGE_REST * s { continue; } // nearest neighbours only: one bridge per gap is enough
+                let j = w.spr_j[si] as usize;
+                if w.alive[j] == 0 { continue; }
+                let d = [w.p[j * 3] - p[0], w.p[j * 3 + 1] - p[1], w.p[j * 3 + 2] - p[2]];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if len < BRIDGE_FROM * s || len > BRIDGE_UPTO * s { continue; }
+                let n = ((len / (1.1 * s)) as usize).min(5);
+                let wsc = BRIDGE_WEIGHT * sc.min(w.scale[j]);
+                for m in 1..=n { let t = m as f32 / (n + 1) as f32; splat([p[0] + d[0] * t, p[1] + d[1] * t, p[2] + d[2] * t], wsc); }
             }
         }
     }
@@ -189,7 +215,7 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
         verts.extend_from_slice(&[g.org[0] + vx * c, g.org[1] + vy * c, g.org[2] + vz * c, ux * nl, uy * nl, uz * nl]);
     } } }
     // one quad per sign-changing grid edge
-    let mut quad = |a: u32, b: u32, c2: u32, d: u32, flip: bool, out: &mut Vec<f32>| {
+    let quad = |a: u32, b: u32, c2: u32, d: u32, flip: bool, out: &mut Vec<f32>| {
         if a == u32::MAX || b == u32::MAX || c2 == u32::MAX || d == u32::MAX { return; }
         let order = if flip { [d, c2, b, a] } else { [a, b, c2, d] };
         for v in order { let o = v as usize * 6; out.extend_from_slice(&verts[o..o + 6]); }
