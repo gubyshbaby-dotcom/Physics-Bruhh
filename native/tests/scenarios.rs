@@ -136,14 +136,14 @@ fn old_honey_spawns_as_a_puddle_and_bodies_are_recycled() {
     all_finite_above_floor(&w);
 }
 
-/// The way the game reports a piston head: once per game tick (three steps), where it was at the
+/// The way the mod reports a piston head: once per game tick (three steps), where it was at the
 /// start of the tick plus the velocity that carries it through the tick. At rest the head is still
-/// reported (not moving); one tick after it has retracted it is gone.
+/// reported (not moving); once it has fully retracted it is gone.
 fn game_heads(w: &mut World, step: usize, retract_at: usize) {
     if step % 3 != 0 { return; }
     let tick = step as i32 / 3 - retract_at as i32 / 3;
-    if tick > 2 { w.set_kinematic(&[], 0); return; }
-    let (travel, vel) = match tick { i32::MIN..=-1 => (0.0, 0.0), 0 => (0.0, 10.0), 1 => (0.5, 10.0), _ => (1.0, 0.0) };
+    if tick >= 2 { w.set_kinematic(&[], 0); return; }
+    let (travel, vel) = match tick { i32::MIN..=-1 => (0.0, 0.0), 0 => (0.0, 10.0), _ => (0.5, 10.0) };
     let (l, r) = (0.0 - travel, 1.0 + travel); // faces of the left and right head
     let data = [1.0, l - 0.25, 0.0, 0.0, l, 1.0, 1.0, -vel, 0.0, 0.0, 3.0,
                 2.0, r, 0.0, 0.0, r + 0.25, 1.0, 1.0, vel, 0.0, 0.0, 3.0];

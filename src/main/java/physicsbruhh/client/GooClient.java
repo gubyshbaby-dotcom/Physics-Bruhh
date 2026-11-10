@@ -3,6 +3,7 @@ package physicsbruhh.client;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -19,7 +20,7 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.piston.PistonHeadBlock;
 import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -103,7 +104,7 @@ public final class GooClient {
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
         bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false;
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
-        PART_IDS.clear();
+        PART_IDS.clear(); HEADS.clear();
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
     }
 
@@ -181,6 +182,7 @@ public final class GooClient {
         boolean any = false;
         LongOpenHashSet seen = new LongOpenHashSet(), seenParts = new LongOpenHashSet();
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        scanTick++;
         for (int b = 0; b + 8 <= info.length && b / 8 < MAX_BODIES; b += 8) {
             final int slot = b / 8;
             if (info[b] == 0.0F) { SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0; continue; }
@@ -195,7 +197,7 @@ public final class GooClient {
                     pos.set(x, y, z);
                     BlockState state = level.getBlockState(pos);
                     hash = hash * 31L + System.identityHashCode(state);
-                    if ((state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) && seenParts.add(pos.asLong())) nk = addPistonPart(level, state, pos, o, kin, nk);
+                    if (isPistonPart(state) && seenParts.add(pos.asLong())) nk = notePistonPart(level, state, pos, o, kin, nk);
                 }
                 boolean changed = SLEEP_HASH_VALID[slot] && hash != SLEEP_HASH[slot];
                 SLEEP_HASH[slot] = hash; SLEEP_HASH_VALID[slot] = true;
@@ -214,9 +216,10 @@ public final class GooClient {
                 if (inner && !seen.add(pos.asLong())) continue;
                 BlockState state = level.getBlockState(pos);
                 if (state.isAir()) continue;
-                if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) {
-                    if (seenParts.add(pos.asLong())) nk = addPistonPart(level, state, pos, o, kin, nk);
-                    continue;
+                if (isPistonPart(state)) {
+                    if (seenParts.add(pos.asLong())) nk = notePistonPart(level, state, pos, o, kin, nk);
+                    // heads and blocks in transit only collide as moving parts; a piston's base is also an ordinary block
+                    if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) continue;
                 }
                 if (!inner) continue;
                 VoxelShape shape = state.getCollisionShape(level, pos);
@@ -233,6 +236,7 @@ public final class GooClient {
                 }
             }
         }
+        nk = moveHeads(level, o, kin, nk);
         return any ? new Colliders(st, ns, kin, nk) : null; // nothing awake: leave the simulation's colliders alone
     }
 
@@ -262,48 +266,108 @@ public final class GooClient {
         return Blocks.PISTON_HEAD.defaultBlockState().setValue(PistonHeadBlock.FACING, facing).setValue(PistonHeadBlock.TYPE, sticky ? PistonType.STICKY : PistonType.DEFAULT);
     }
 
+    private static boolean isPistonPart(BlockState state) {
+        return state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON) || state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON);
+    }
+
     /**
-     * A piston head (at rest or sliding) or a block in transit. These are reported as moving boxes
-     * with stable ids: a head keeps the same id while it extends, rests and retracts, so goo that
-     * stuck to it is carried along instead of being left behind when the head starts to move.
-     * The position is where the part was at the start of this tick, the velocity carries it to where
-     * it is at the end, which is what the game draws between the two.
+     * What the goo is told about one piston's head. The game only says where a head is now, and a
+     * head that slides for two ticks can be missed entirely when the client stutters; goo stuck to
+     * it would then be left hanging in the air. So each head near goo is followed here: {@code shown}
+     * is how far it is pulled in (0 = out, 1 = in) as far as the goo knows, and it chases the real
+     * state at piston speed, half a block per tick, whether or not the slide itself was seen.
      */
-    private static int addPistonPart(ClientLevel level, BlockState state, BlockPos pos, BlockPos o, float[] kin, int nk) {
-        BlockState shapeState;
-        BlockPos idPos = pos;
-        float stick;
-        float ox = 0.0F, oy = 0.0F, oz = 0.0F, vx = 0.0F, vy = 0.0F, vz = 0.0F;
+    private static final class Head {
+        final BlockPos base;
+        Direction facing;
+        boolean sticky, exact, fresh = true;
+        float shown, target, start;
+        int seenTick;
+
+        Head(BlockPos base) { this.base = base; }
+    }
+
+    private static final Long2ObjectOpenHashMap<Head> HEADS = new Long2ObjectOpenHashMap<>();
+    private static int scanTick;
+
+    private static void noteHead(BlockPos base, Direction facing, boolean sticky, float start, float target, boolean exact) {
+        long key = base.asLong();
+        Head head = HEADS.get(key);
+        if (head == null) {
+            if (HEADS.size() > 512) HEADS.clear();
+            head = new Head(base.immutable());
+            HEADS.put(key, head);
+        }
+        if (head.seenTick != scanTick) { head.seenTick = scanTick; head.exact = false; }
+        else if (head.exact && !exact) return; // the moving block knows better than the base it belongs to
+        head.facing = facing; head.sticky = sticky; head.start = start; head.target = target; head.exact = exact;
+    }
+
+    /** A piston base, a head, or a block in transit. Heads are only noted here; {@link #moveHeads} reports them. */
+    private static int notePistonPart(ClientLevel level, BlockState state, BlockPos pos, BlockPos o, float[] kin, int nk) {
+        if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
+            float in = state.getValue(PistonBaseBlock.EXTENDED) ? 0.0F : 1.0F;
+            noteHead(pos, state.getValue(PistonBaseBlock.FACING), state.is(Blocks.STICKY_PISTON), in, in, false);
+            return nk;
+        }
         if (state.is(Blocks.PISTON_HEAD)) {
             Direction facing = state.getValue(PistonHeadBlock.FACING);
-            boolean sticky = state.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY;
-            shapeState = headState(facing, sticky);
-            idPos = pos.relative(facing.getOpposite()); // heads are named after their base
-            stick = sticky ? 3.0F : 0.6F;
-        } else {
-            if (!(level.getBlockEntity(pos) instanceof PistonMovingBlockEntity piston)) return nk;
-            BlockState moved = piston.getMovedState();
-            shapeState = moved;
-            stick = stickiness(moved);
-            if (piston.isSourcePiston()) {
-                boolean sticky = moved.is(Blocks.STICKY_PISTON) || (moved.is(Blocks.PISTON_HEAD) && moved.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY);
-                shapeState = headState(piston.getDirection(), sticky);
-                stick = sticky ? 3.0F : 0.6F;
-                // while extending the moving block sits where the head will end up; while retracting, on the base
-                if (piston.isExtending()) idPos = pos.relative(piston.getDirection().getOpposite());
-            }
-            ox = piston.getXOff(0.0F); oy = piston.getYOff(0.0F); oz = piston.getZOff(0.0F);
-            vx = (piston.getXOff(1.0F) - ox) * 20.0F; vy = (piston.getYOff(1.0F) - oy) * 20.0F; vz = (piston.getZOff(1.0F) - oz) * 20.0F;
+            noteHead(pos.relative(facing.getOpposite()), facing, state.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY, 0.0F, 0.0F, false);
+            return nk;
         }
-        VoxelShape shape = shapeState.getCollisionShape(level, pos);
+        if (!(level.getBlockEntity(pos) instanceof PistonMovingBlockEntity piston)) return nk;
+        BlockState moved = piston.getMovedState();
+        if (piston.isSourcePiston()) {
+            boolean sticky = moved.is(Blocks.STICKY_PISTON) || (moved.is(Blocks.PISTON_HEAD) && moved.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY);
+            float before = piston.getProgress(0.0F), after = piston.getProgress(1.0F);
+            // while extending the moving block sits where the head will end up; while retracting, on the base
+            if (piston.isExtending()) noteHead(pos.relative(piston.getDirection().getOpposite()), piston.getDirection(), sticky, 1.0F - before, 1.0F - after, true);
+            else noteHead(pos, piston.getDirection(), sticky, before, after, true);
+            return nk;
+        }
+        // a block being pushed or pulled: where it was at the start of this tick, and the velocity that carries it through the tick
+        VoxelShape shape = moved.getCollisionShape(level, pos);
         if (shape.isEmpty()) return nk;
+        float ox = piston.getXOff(0.0F), oy = piston.getYOff(0.0F), oz = piston.getZOff(0.0F);
+        float vx = (piston.getXOff(1.0F) - ox) * 20.0F, vy = (piston.getYOff(1.0F) - oy) * 20.0F, vz = (piston.getZOff(1.0F) - oz) * 20.0F;
+        return addBoxes(shape, pos, pos, ox, oy, oz, vx, vy, vz, stickiness(moved), o, kin, nk);
+    }
+
+    /** Advances every followed head by one tick and reports the ones that are not fully pulled in. */
+    private static int moveHeads(ClientLevel level, BlockPos o, float[] kin, int nk) {
+        var it = HEADS.values().iterator();
+        while (it.hasNext()) {
+            Head head = it.next();
+            if (head.seenTick != scanTick) {
+                // not near any goo right now: keep it honest by looking at its base
+                BlockState base = level.getBlockState(head.base);
+                if (base.is(Blocks.PISTON) || base.is(Blocks.STICKY_PISTON)) head.target = base.getValue(PistonBaseBlock.EXTENDED) ? 0.0F : 1.0F;
+                else if (!base.is(Blocks.MOVING_PISTON)) { it.remove(); continue; }
+            }
+            if (head.fresh) { head.fresh = false; head.shown = head.start; } // first sighting: no catching up to do
+            float next = head.shown + Math.max(-0.5F, Math.min(0.5F, head.target - head.shown));
+            // a pulled-in head stays known until its base is an ordinary block again, so goo stuck to it has something to hold on to
+            if (head.shown < 1.0F || next < 1.0F || level.getBlockState(head.base).is(Blocks.MOVING_PISTON)) {
+                Direction f = head.facing;
+                BlockPos headPos = head.base.relative(f);
+                VoxelShape shape = headState(f, head.sticky).getCollisionShape(level, headPos);
+                float v = -(next - head.shown) * 20.0F;
+                nk = addBoxes(shape, headPos, head.base, -f.getStepX() * head.shown, -f.getStepY() * head.shown, -f.getStepZ() * head.shown,
+                        f.getStepX() * v, f.getStepY() * v, f.getStepZ() * v, head.sticky ? 3.0F : 0.6F, o, kin, nk);
+            }
+            head.shown = next;
+        }
+        return nk;
+    }
+
+    private static int addBoxes(VoxelShape shape, BlockPos at, BlockPos idPos, float ox, float oy, float oz, float vx, float vy, float vz, float stick, BlockPos o, float[] kin, int nk) {
         int index = 0;
         for (AABB box : shape.toAabbs()) {
             if (nk >= MAX_KINEMATIC) break;
             int i = nk * GooSim.KINEMATIC_FLOATS;
             kin[i] = partId(idPos, index);
-            kin[i + 1] = (float) (box.minX + ox + pos.getX() - o.getX()); kin[i + 2] = (float) (box.minY + oy + pos.getY() - o.getY()); kin[i + 3] = (float) (box.minZ + oz + pos.getZ() - o.getZ());
-            kin[i + 4] = (float) (box.maxX + ox + pos.getX() - o.getX()); kin[i + 5] = (float) (box.maxY + oy + pos.getY() - o.getY()); kin[i + 6] = (float) (box.maxZ + oz + pos.getZ() - o.getZ());
+            kin[i + 1] = (float) (box.minX + ox + at.getX() - o.getX()); kin[i + 2] = (float) (box.minY + oy + at.getY() - o.getY()); kin[i + 3] = (float) (box.minZ + oz + at.getZ() - o.getZ());
+            kin[i + 4] = (float) (box.maxX + ox + at.getX() - o.getX()); kin[i + 5] = (float) (box.maxY + oy + at.getY() - o.getY()); kin[i + 6] = (float) (box.maxZ + oz + at.getZ() - o.getZ());
             kin[i + 7] = vx; kin[i + 8] = vy; kin[i + 9] = vz;
             kin[i + 10] = stick;
             nk++; index++;
@@ -320,7 +384,7 @@ public final class GooClient {
         int honey, slime;
         synchronized (MESH_LOCK) { honey = meshQuads[0]; slime = meshQuads[1]; }
         return "backend=" + (s == null ? "none" : s.backend()) + " running=" + running + " bodies=" + bodies + " awake=" + awake
-                + " honeyQuads=" + honey + " slimeQuads=" + slime + " stepMs=" + String.format(java.util.Locale.ROOT, "%.2f", stepMillis);
+                + " honeyQuads=" + honey + " slimeQuads=" + slime + " heads=" + HEADS.size() + " stepMs=" + String.format(java.util.Locale.ROOT, "%.2f", stepMillis);
     }
 
     static boolean healthy() { return sim != null && running; }
