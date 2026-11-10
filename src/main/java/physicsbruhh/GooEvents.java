@@ -22,6 +22,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.CollisionContext;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.living.LivingFallEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
@@ -102,12 +103,17 @@ public final class GooEvents {
         return best.pour(from, velocity, count, lump);
     }
 
-    /** Where something thrown from {@code from} with a velocity (blocks per second) comes down: followed for three seconds or until it meets a block. */
+    /**
+     * Where something thrown from {@code from} with a velocity (blocks per second) comes down: followed
+     * for three seconds or until it meets a block. {@code thrower} may be null (a dispenser).
+     */
     public static Vec3 landing(ServerLevel level, Entity thrower, Vec3 from, Vec3 velocity) {
         Vec3 p = from, v = velocity.scale(0.05);
         for (int i = 0; i < 60; i++) {
             Vec3 next = p.add(v);
-            BlockHitResult hit = level.clip(new ClipContext(p, next, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, thrower));
+            BlockHitResult hit = level.clip(thrower != null
+                    ? new ClipContext(p, next, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, thrower)
+                    : new ClipContext(p, next, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, CollisionContext.empty()));
             if (hit.getType() != HitResult.Type.MISS) {
                 Direction face = hit.getDirection();
                 return hit.getLocation().add(face.getStepX() * 0.1, face.getStepY() * 0.1, face.getStepZ() * 0.1);

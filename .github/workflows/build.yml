@@ -118,7 +118,11 @@ jobs:
           echo "eula=true" > run/selftest/eula.txt
           printf 'level-type=minecraft\\:flat\nspawn-protection=0\nonline-mode=false\nmax-tick-time=-1\n' > run/selftest/server.properties
           ./gradlew runSelfTest -PskipCargo=true 2>&1 | tee selftest.log | grep -E "SELFTEST|Exception|ERROR|Done \(" || true
-          grep -q "SELFTEST PASS" selftest.log
+          if ! grep -q "SELFTEST PASS" selftest.log; then
+            # say why: the end of the server's own crash report, if it wrote one
+            for f in run/selftest/crash-reports/*.txt; do [ -e "$f" ] && sed -n 1,60p "$f"; done
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
