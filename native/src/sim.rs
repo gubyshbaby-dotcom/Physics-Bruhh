@@ -10,6 +10,9 @@
 //! Particles that touch a collider get anchored to it; anchors creep (honey slides slowly) and
 //! snap when overstretched, which is what makes goo cling to pistons and pull into strands.
 
+use rayon::prelude::*;
+use std::sync::OnceLock;
+
 pub const MAX_SPR: usize = 16;
 pub const HONEY: u8 = 0;
 pub const SLIME: u8 = 1;
@@ -96,7 +99,15 @@ pub struct Body {
 pub struct SBox { pub min: [f32; 3], pub max: [f32; 3], pub stick: f32 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct KBox { pub id: i32, pub min: [f32; 3], pub max: [f32; 3], pub pmin: [f32; 3], pub pmax: [f32; 3], pub vel: [f32; 3], pub stick: f32, pub t: f32 }
+pub struct KBox {
+    pub id: i32, pub min: [f32; 3], pub max: [f32; 3], pub pmin: [f32; 3], pub pmax: [f32; 3], pub vel: [f32; 3], pub stick: f32, pub t: f32,
+    /// Face that goo caught inside the box leaves through: 0 = whichever fits, 1..6 = +x, -x, +y, -y, +z, -z.
+    /// A piston head sets this to its front, so nothing is ever pushed out of its back, towards the piston.
+    pub front: u8,
+}
+
+/// Floats per kinematic box: id, min xyz, max xyz, velocity xyz, stick, front.
+pub const KIN_FLOATS: usize = 12;
 
 pub struct World {
     pub n: usize, pub nb: usize, pub slots: usize, pub maxp: usize,
@@ -107,17 +118,20 @@ pub struct World {
     pub p: Vec<f32>, q: Vec<f32>, v: Vec<f32>, pub alive: Vec<u8>, pub scale: Vec<f32>,
     anc_kind: Vec<u8>, anc_id: Vec<i32>, anc_pt: Vec<f32>, anc_loc: Vec<f32>, anc_stick: Vec<f32>, anc_cool: Vec<f32>, anc_d: Vec<f32>, anc_axis: Vec<u8>,
     pub(crate) spr_n: Vec<u8>, pub(crate) spr_j: Vec<u32>, pub(crate) spr_l: Vec<f32>,
-    rho: Vec<f32>, lam: Vec<f32>, sgx: Vec<f32>, sgy: Vec<f32>, sgz: Vec<f32>, sg2: Vec<f32>,
+    rho: Vec<f32>, lam: Vec<f32>,
     dpx: Vec<f32>, dpy: Vec<f32>, dpz: Vec<f32>, damp: Vec<f32>,
     act: Vec<u32>,
     mask: u32, c_start: Vec<u32>, c_fill: Vec<u32>, sorted: Vec<u32>, pkey: Vec<u32>, pbkt: Vec<u32>, cell: Vec<i32>,
     pi: Vec<u32>, pj: Vec<u32>, pg: Vec<f32>, pw: Vec<f32>,
+    adj_start: Vec<u32>, adj_fill: Vec<u32>, adj: Vec<u32>,
     kp: f32, ks: f32, w0: f32, rho0: f32, wq: f32,
     pub bodies: Vec<Body>,
     st: Vec<SBox>, st_org: [i32; 3], st_dim: [i32; 3], st_start: Vec<u32>, st_items: Vec<u32>,
     pub kin: Vec<KBox>,
     pub clock: f32, acc: f32, seed: u32,
     pub last_pairs: usize,
+    /// Seconds spent in each phase of the step since the world was made (diagnostics).
+    pub prof: [f64; 8],
 }
 
 #[inline] fn smooth(t: f32) -> f32 { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
@@ -134,7 +148,7 @@ const HZ: [i32; 14] = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
 /// particle came from last step when that is known, so fast pistons shove goo ahead of them
 /// instead of letting it tunnel out the back.
 #[inline]
-fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3], pmin: &[f32; 3], pmax: &[f32; 3], rc: f32) -> u8 {
+fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3], pmin: &[f32; 3], pmax: &[f32; 3], rc: f32, front: u8, lead: bool) -> u8 {
     // swept part: a particle that started beyond a face may not end up behind that face while it
     // is within the box's cross-section, however far a spring or anchor tried to drag it. When
     // several faces qualify (e.g. sagging a hair below a floor while crossing a block seam) the
@@ -148,15 +162,109 @@ fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3],
         if p[a] <= pmin[a] - rc + 1e-4 && q[a] > bmin[a] - rc { let pen = q[a] - (bmin[a] - rc); if pen < best { best = pen; ba = a; hi = false; } }
     }
     if ba < 3 { q[ba] = if hi { bmax[ba] + rc } else { bmin[ba] - rc }; return ba as u8; }
-    // started inside (spawned there, or squeezed in): leave through the nearest face
+    // started inside (spawned there, squeezed in, or the box jumped onto it)
     for a in 0..3 { if q[a] <= bmin[a] - rc || q[a] >= bmax[a] + rc { return 3; } }
     let (mut best, mut ba, mut hi) = (f32::MAX, 0usize, false);
-    for a in 0..3 {
-        let pen_lo = q[a] - (bmin[a] - rc); if pen_lo < best { best = pen_lo; ba = a; hi = false; }
-        let pen_hi = (bmax[a] + rc) - q[a]; if pen_hi < best { best = pen_hi; ba = a; hi = true; }
+    if front != 0 {
+        // a box with a front (a piston head) puts everything out in front of it
+        ba = (front as usize - 1) / 2; hi = front & 1 == 1;
+    } else {
+        let mut moved = 0.0f32;
+        if lead { for a in 0..3 { let d = bmin[a] - pmin[a]; if d.abs() > moved { moved = d.abs(); ba = a; hi = d > 0.0; } } }
+        if moved < 1e-6 {
+            // nothing says which way: the nearest face
+            for a in 0..3 {
+                let pen_lo = q[a] - (bmin[a] - rc); if pen_lo < best { best = pen_lo; ba = a; hi = false; }
+                let pen_hi = (bmax[a] + rc) - q[a]; if pen_hi < best { best = pen_hi; ba = a; hi = true; }
+            }
+        } // else: a block being pushed carries it along on its leading face
     }
     q[ba] = if hi { bmax[ba] + rc } else { bmin[ba] - rc };
     ba as u8
+}
+
+/// Particles (or pairs) handed to one thread at a time. Fixed, so the split never depends on the machine.
+const CHUNK: usize = 256;
+/// Seconds a removed body takes to shrink away.
+const FADE_TIME: f32 = 0.45;
+
+/// The core's own worker threads: half the machine's cores (the game needs the rest), six at most.
+/// `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
+fn pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = std::env::var("PHYSICSBRUHH_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 6));
+        rayon::ThreadPoolBuilder::new().num_threads(n.clamp(1, 32)).thread_name(|i| format!("PhysicsBruhh-core-{}", i)).build().ok()
+    }).as_ref()
+}
+
+/// How many threads the solver uses.
+pub fn threads() -> usize { pool().map(|p| p.current_num_threads()).unwrap_or(1) }
+
+/// Runs `f` on the core's thread pool, so parallel loops inside it use those threads.
+pub fn on_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R { match pool() { Some(p) => p.install(f), None => f() } }
+
+/// An array several threads write at once, each to its own particles.
+#[derive(Clone, Copy)]
+struct Shared<T>(*mut T);
+unsafe impl<T> Send for Shared<T> {}
+unsafe impl<T> Sync for Shared<T> {}
+impl<T> Shared<T> {
+    fn of(v: &mut [T]) -> Shared<T> { Shared(v.as_mut_ptr()) }
+    /// Safety: `i` is in bounds and no other thread touches that element during the loop.
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    unsafe fn at(&self, i: usize) -> &mut T { &mut *self.0.add(i) }
+}
+
+/// Everything a particle can bump into.
+struct Walls<'a> { st: &'a [SBox], st_org: [i32; 3], st_dim: [i32; 3], st_start: &'a [u32], st_items: &'a [u32], kin: &'a [KBox], rc: f32, rho_max: f32 }
+
+#[derive(Clone, Copy)]
+struct Anchors { kind: Shared<u8>, id: Shared<i32>, pt: Shared<f32>, loc: Shared<f32>, stick: Shared<f32>, axis: Shared<u8> }
+
+/// Pushes particle `i` out of the colliders and lets it stick to the last one it touched.
+/// Safety: writes only particle `i`'s own position and anchor.
+#[inline]
+unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, cool: f32, i: usize) {
+    let o = i * 3;
+    let mut q = [*qs.at(o), *qs.at(o + 1), *qs.at(o + 2)];
+    let p = [p[o], p[o + 1], p[o + 2]];
+    let rc = w.rc;
+    let mut hit: u8 = 0; let mut hit_id = 0i32; let mut hit_stick = 0.0f32; let mut hit_min = [0.0f32; 3]; let mut hit_axis = 3u8;
+    if !w.st.is_empty() {
+        let mut r = [[0i32; 2]; 3]; let mut inside = true;
+        for a in 0..3 {
+            r[a][0] = (q[a] - rc).floor() as i32 - w.st_org[a]; r[a][1] = (q[a] + rc).floor() as i32 - w.st_org[a];
+            if r[a][1] < 0 || r[a][0] >= w.st_dim[a] { inside = false; }
+            r[a][0] = r[a][0].max(0); r[a][1] = r[a][1].min(w.st_dim[a] - 1);
+        }
+        if inside {
+            for z in r[2][0]..=r[2][1] { for y in r[1][0]..=r[1][1] { for x in r[0][0]..=r[0][1] {
+                let ci = (x + w.st_dim[0] * (y + w.st_dim[1] * z)) as usize;
+                for k in w.st_start[ci]..w.st_start[ci + 1] {
+                    let b = &w.st[w.st_items[k as usize] as usize];
+                    let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, false);
+                    if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; }
+                }
+            } } }
+        }
+    }
+    for b in w.kin {
+        let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc, b.front, b.id > 0);
+        if ax < 3 { hit = 2; hit_id = b.id; hit_stick = b.stick; hit_min = b.min; hit_axis = ax; }
+    }
+    *qs.at(o) = q[0]; *qs.at(o + 1) = q[1]; *qs.at(o + 2) = q[2];
+    if hit != 0 && *an.kind.at(i) == 0 && cool <= 0.0 && hit_stick > 0.0 && rho < w.rho_max {
+        *an.kind.at(i) = hit; *an.id.at(i) = hit_id; *an.stick.at(i) = hit_stick; *an.axis.at(i) = hit_axis;
+        for a in 0..3 { *an.pt.at(o + a) = q[a]; *an.loc.at(o + a) = q[a] - hit_min[a]; }
+    }
+}
+
+fn spring_exists(spr_n: &[u8], spr_j: &[u32], a: usize, b: usize) -> bool {
+    let (na, nb) = (spr_n[a] as usize, spr_n[b] as usize);
+    spr_j[a * MAX_SPR..a * MAX_SPR + na].iter().any(|&j| j as usize == b) || spr_j[b * MAX_SPR..b * MAX_SPR + nb].iter().any(|&j| j as usize == a)
 }
 
 impl World {
@@ -188,16 +296,17 @@ impl World {
             p: vec![0.0; maxp * 3], q: vec![0.0; maxp * 3], v: vec![0.0; maxp * 3], alive: vec![0; maxp], scale: vec![0.0; maxp],
             anc_kind: vec![0; maxp], anc_id: vec![0; maxp], anc_pt: vec![0.0; maxp * 3], anc_loc: vec![0.0; maxp * 3], anc_stick: vec![0.0; maxp], anc_cool: vec![0.0; maxp], anc_d: vec![0.0; maxp * 3], anc_axis: vec![3; maxp],
             spr_n: vec![0; maxp], spr_j: vec![0; maxp * MAX_SPR], spr_l: vec![0.0; maxp * MAX_SPR],
-            rho: vec![0.0; maxp], lam: vec![0.0; maxp], sgx: vec![0.0; maxp], sgy: vec![0.0; maxp], sgz: vec![0.0; maxp], sg2: vec![0.0; maxp],
+            rho: vec![0.0; maxp], lam: vec![0.0; maxp],
             dpx: vec![0.0; maxp], dpy: vec![0.0; maxp], dpz: vec![0.0; maxp], damp: vec![0.0; maxp],
             act: Vec::with_capacity(maxp),
             mask: (table - 1) as u32, c_start: vec![0; table + 1], c_fill: vec![0; table], sorted: vec![0; maxp], pkey: vec![0; maxp], pbkt: vec![0; maxp], cell: vec![0; maxp * 3],
             pi: Vec::new(), pj: Vec::new(), pg: Vec::new(), pw: Vec::new(),
+            adj_start: vec![0; maxp + 1], adj_fill: vec![0; maxp], adj: Vec::new(),
             kp, ks, w0, rho0, wq,
             bodies: vec![Body::default(); slots],
             st: Vec::new(), st_org: [0; 3], st_dim: [0; 3], st_start: vec![0], st_items: Vec::new(),
             kin: Vec::new(),
-            clock: 0.0, acc: 0.0, seed: 0x9E3779B9, last_pairs: 0,
+            clock: 0.0, acc: 0.0, seed: 0x9E3779B9, last_pairs: 0, prof: [0.0; 8],
         }
     }
 
@@ -331,11 +440,12 @@ impl World {
                 }
             }
         }
-        // anchors of awake goo whose surface is gone let go (sleeping goo is outside the scanned region)
+        // anchors of awake goo whose surface is gone let go (sleeping goo is outside the scanned region),
+        // and so do anchors that ended up inside a block: goo dragged in there by a piston must come out again
         for i in 0..self.maxp {
             if self.alive[i] != 0 && self.anc_kind[i] == 1 && self.bodies[i / self.nb].awake {
                 let o = i * 3; let pt = [self.anc_pt[o], self.anc_pt[o + 1], self.anc_pt[o + 2]];
-                if !self.near_static(&pt, self.rc + 0.06) { self.anc_kind[i] = 0; }
+                if !self.near_static(&pt, self.rc + 0.06) || self.near_static(&pt, -0.5 * self.rc) { self.anc_kind[i] = 0; }
             }
         }
     }
@@ -356,18 +466,19 @@ impl World {
         false
     }
 
-    /// Kinematic colliders: `count` boxes of 11 floats (id, min xyz, max xyz, velocity xyz, stick).
+    /// Kinematic colliders: `count` boxes of [`KIN_FLOATS`] floats (id, min xyz, max xyz, velocity xyz, stick, front).
+    /// Positive ids are piston parts and blocks in transit, negative ids are creatures.
     /// Boxes missing from a new list are dropped; goo anchored to them stays where it was.
     pub fn set_kinematic(&mut self, data: &[f32], count: usize) {
-        let count = count.min(data.len() / 11);
+        let count = count.min(data.len() / KIN_FLOATS);
         let mut next: Vec<KBox> = Vec::with_capacity(count);
         for k in 0..count {
-            let d = &data[k * 11..k * 11 + 11];
+            let d = &data[k * KIN_FLOATS..(k + 1) * KIN_FLOATS];
             let id = d[0] as i32;
             let (min, max) = ([d[1], d[2], d[3]], [d[4], d[5], d[6]]);
             let prev = self.kin.iter().find(|b| b.id == id);
             let (pmin, pmax) = match prev { Some(b) => (b.min, b.max), None => (min, max) };
-            next.push(KBox { id, min, max, pmin, pmax, vel: [d[7], d[8], d[9]], stick: d[10], t: 0.0 });
+            next.push(KBox { id, min, max, pmin, pmax, vel: [d[7], d[8], d[9]], stick: d[10], t: 0.0, front: (d[11] as i32).clamp(0, 6) as u8 });
         }
         for i in 0..self.maxp {
             if self.alive[i] != 0 && self.anc_kind[i] == 2 && !next.iter().any(|b| b.id == self.anc_id[i]) {
@@ -386,60 +497,19 @@ impl World {
         self.awake_count()
     }
 
-    fn collide(&mut self, i: usize) {
-        let o = i * 3;
-        let mut q = [self.q[o], self.q[o + 1], self.q[o + 2]];
-        let p = [self.p[o], self.p[o + 1], self.p[o + 2]];
-        let rc = self.rc;
-        let mut hit: u8 = 0; let mut hit_id = 0i32; let mut hit_stick = 0.0f32; let mut hit_min = [0.0f32; 3]; let mut hit_axis = 3u8;
-        if !self.st.is_empty() {
-            let mut r = [[0i32; 2]; 3]; let mut inside = true;
-            for a in 0..3 {
-                r[a][0] = (q[a] - rc).floor() as i32 - self.st_org[a]; r[a][1] = (q[a] + rc).floor() as i32 - self.st_org[a];
-                if r[a][1] < 0 || r[a][0] >= self.st_dim[a] { inside = false; }
-                r[a][0] = r[a][0].max(0); r[a][1] = r[a][1].min(self.st_dim[a] - 1);
-            }
-            if inside {
-                for z in r[2][0]..=r[2][1] { for y in r[1][0]..=r[1][1] { for x in r[0][0]..=r[0][1] {
-                    let ci = (x + self.st_dim[0] * (y + self.st_dim[1] * z)) as usize;
-                    for k in self.st_start[ci]..self.st_start[ci + 1] {
-                        let b = self.st[self.st_items[k as usize] as usize];
-                        let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc);
-                        if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; }
-                    }
-                } } }
-            }
-        }
-        for k in 0..self.kin.len() {
-            let b = self.kin[k];
-            let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc);
-            if ax < 3 { hit = 2; hit_id = b.id; hit_stick = b.stick; hit_min = b.min; hit_axis = ax; }
-        }
-        self.q[o] = q[0]; self.q[o + 1] = q[1]; self.q[o + 2] = q[2];
-        if hit != 0 && self.anc_kind[i] == 0 && self.anc_cool[i] <= 0.0 && hit_stick > 0.0 && self.rho[i] < 1.25 * self.rho0 {
-            self.anc_kind[i] = hit; self.anc_id[i] = hit_id; self.anc_stick[i] = hit_stick; self.anc_axis[i] = hit_axis;
-            for a in 0..3 { self.anc_pt[o + a] = q[a]; self.anc_loc[o + a] = q[a] - hit_min[a]; }
-        }
-    }
-
-    fn spring_exists(&self, a: usize, b: usize) -> bool {
-        let (na, nb) = (self.spr_n[a] as usize, self.spr_n[b] as usize);
-        self.spr_j[a * MAX_SPR..a * MAX_SPR + na].iter().any(|&j| j as usize == b) || self.spr_j[b * MAX_SPR..b * MAX_SPR + nb].iter().any(|&j| j as usize == a)
-    }
-
     fn step_once(&mut self) {
         let dt = DT;
         self.clock += dt;
         let (nb, slots) = (self.nb, self.slots);
 
-        // moving colliders wake anything they come near
+        // moving colliders wake anything they come near; piston parts (positive ids) also stiffen it for a moment
         for k in 0..self.kin.len() {
             let b = self.kin[k];
             if b.vel[0] == 0.0 && b.vel[1] == 0.0 && b.vel[2] == 0.0 { continue; }
             for bd in self.bodies.iter_mut() {
                 if bd.state == 0 { continue; }
                 if !bd.awake && (0..3).all(|a| b.max[a] > bd.bb[a] - 0.6 && b.min[a] < bd.bb[a + 3] + 0.6) { bd.awake = true; bd.calm = 0; }
-                if (0..3).all(|a| b.max[a] > bd.bb[a] - 0.3 && b.min[a] < bd.bb[a + 3] + 0.3) { bd.shock = 1.0; }
+                if b.id > 0 && (0..3).all(|a| b.max[a] > bd.bb[a] - 0.3 && b.min[a] < bd.bb[a + 3] + 0.3) { bd.shock = 1.0; }
             }
         }
 
@@ -447,6 +517,24 @@ impl World {
         self.act.clear();
         for b in 0..slots {
             if self.bodies[b].state == 0 || !self.bodies[b].awake { continue; }
+            if self.bodies[b].state == 2 {
+                // being removed: no physics any more, it just shrinks into the middle of its base and is gone
+                let bd = &mut self.bodies[b];
+                let before = bd.fade;
+                bd.fade -= dt / FADE_TIME;
+                if bd.fade <= 0.0 { self.free_body(b); continue; }
+                let k = bd.fade / before;
+                let c = [(bd.bb[0] + bd.bb[3]) * 0.5, bd.bb[1], (bd.bb[2] + bd.bb[5]) * 0.5];
+                for a in 0..3 { bd.bb[a] = c[a] + (bd.bb[a] - c[a]) * k; bd.bb[a + 3] = c[a] + (bd.bb[a + 3] - c[a]) * k; }
+                let fade = bd.fade;
+                for i in b * nb..(b + 1) * nb {
+                    if self.alive[i] == 0 { continue; }
+                    let o = i * 3;
+                    for a in 0..3 { let x = c[a] + (self.p[o + a] - c[a]) * k; self.p[o + a] = x; self.q[o + a] = x; self.v[o + a] = 0.0; }
+                    self.scale[i] = fade; self.anc_kind[i] = 0;
+                }
+                continue;
+            }
             let m = self.mats[self.bodies[b].mat as usize];
             let bd = &mut self.bodies[b];
             bd.age += dt;
@@ -461,23 +549,18 @@ impl World {
             bd.brk = m.break_strain + (m.shock_break - m.break_strain).max(0.0) * sh;
             bd.max_l = m.spring_max_l + (m.shock_max_l - m.spring_max_l).max(0.0) * sh;
             bd.shock = if sh < 0.01 { 0.0 } else { sh * (-dt / m.shock_decay).exp() };
-            let mut fade_done = false;
-            if bd.state == 2 { bd.fade -= dt / 0.6; if bd.fade <= 0.0 { fade_done = true; } }
-            let (fade, fading, grounded, kd) = (bd.fade, bd.state == 2, bd.anchored > 0 || bd.shock > 0.05, bd.kd);
-            if fade_done { self.free_body(b); continue; }
+            let (grounded, kd) = (bd.anchored > 0 || bd.shock > 0.05, bd.kd);
             let mut cnt = 0u32;
             for i in b * nb..(b + 1) * nb {
                 if self.alive[i] != 0 {
                     self.act.push(i as u32); cnt += 1;
                     self.damp[i] = if grounded { kd } else { 0.15 };
-                    if fading { self.scale[i] = fade; }
                 }
             }
             self.bodies[b].count = cnt;
             if cnt == 0 { self.free_body(b); }
         }
         if self.act.is_empty() { return; }
-        let n_act = self.act.len();
 
         // ---- kinematic colliders move ----
         for b in self.kin.iter_mut() {
@@ -489,19 +572,38 @@ impl World {
             for a in 0..3 { b.min[a] += b.vel[a] * dt; b.max[a] += b.vel[a] * dt; }
         }
 
-        // ---- predict ----
+        match pool() { Some(pool) => pool.install(|| self.solve(dt)), None => self.solve(dt) }
+
+        // step_once ends in solve()
+    }
+
+    /// The particle work of one step. Every loop over particles or pairs here runs on the core's
+    /// thread pool; each is written so that a thread only ever writes its own particles (or pairs),
+    /// and sums are taken in a fixed order, so the result does not depend on how many threads there are.
+    fn solve(&mut self, dt: f32) {
+        let (nb, slots) = (self.nb, self.slots);
+        let n_act = self.act.len();
+        let mut t_prof = std::time::Instant::now();
+
+        // ---- predict, then collide ----
         let g = self.gravity;
-        for a in 0..n_act {
-            let i = self.act[a] as usize; let o = i * 3;
-            let (x, z) = (self.p[o], self.p[o + 2]);
-            let mut k = self.damp[i];
-            if k > 0.5 { k *= 0.72 + 0.34 * ((x * 6.1 + 1.9 * (z * 2.3).sin()).sin() + (z * 3.7 + x * 1.4).sin()); }
-            let f = (-k * dt).exp();
-            self.v[o] *= f; self.v[o + 1] = (self.v[o + 1] - g * dt) * f; self.v[o + 2] *= f;
-            for c in 0..3 { self.q[o + c] = self.p[o + c] + self.v[o + c] * dt; }
-            if self.anc_cool[i] > 0.0 { self.anc_cool[i] -= dt; }
+        {
+            let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, rc: self.rc, rho_max: 1.25 * self.rho0 };
+            let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis) };
+            let (v, q, cool) = (Shared::of(&mut self.v), Shared::of(&mut self.q), Shared::of(&mut self.anc_cool));
+            let (p, damp, rho) = (&self.p[..], &self.damp[..], &self.rho[..]);
+            self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
+                let (x, z) = (p[o], p[o + 2]);
+                let mut k = damp[i];
+                if k > 0.5 { k *= 0.72 + 0.34 * ((x * 6.1 + 1.9 * (z * 2.3).sin()).sin() + (z * 3.7 + x * 1.4).sin()); }
+                let f = (-k * dt).exp();
+                *v.at(o) *= f; *v.at(o + 1) = (*v.at(o + 1) - g * dt) * f; *v.at(o + 2) *= f;
+                for c in 0..3 { *q.at(o + c) = p[o + c] + *v.at(o + c) * dt; }
+                if *cool.at(i) > 0.0 { *cool.at(i) -= dt; }
+                collide(&walls, an, q, p, rho[i], *cool.at(i), i);
+            } } });
         }
-        for a in 0..n_act { let i = self.act[a] as usize; self.collide(i); }
+        self.prof[0] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- neighbour pairs (hash grid, half stencil) ----
         let (h, h2, mask) = (self.h, self.h * self.h, self.mask);
@@ -517,174 +619,287 @@ impl World {
         let table = mask as usize + 1;
         for c in 0..table { self.c_start[c + 1] += self.c_start[c]; self.c_fill[c] = self.c_start[c]; }
         for a in 0..n_act { let i = self.act[a]; let b = self.pbkt[i as usize] as usize; self.sorted[self.c_fill[b] as usize] = i; self.c_fill[b] += 1; }
-        self.pi.clear(); self.pj.clear();
-        for a in 0..n_act {
-            let i = self.act[a] as usize; let o = i * 3;
-            let (x, y, z) = (self.q[o], self.q[o + 1], self.q[o + 2]);
-            let (ix, iy, iz) = (self.cell[o], self.cell[o + 1], self.cell[o + 2]);
-            for c in 0..14 {
-                let (jx, jy, jz) = (ix + HX[c], iy + HY[c], iz + HZ[c]);
-                let key = key3(jx, jy, jz); let bk = hash3(jx, jy, jz, mask) as usize;
-                for k in self.c_start[bk]..self.c_start[bk + 1] {
-                    let j = self.sorted[k as usize] as usize;
-                    if self.pkey[j] != key || (c == 0 && j <= i) { continue; }
-                    let oj = j * 3; let (ex, ey, ez) = (x - self.q[oj], y - self.q[oj + 1], z - self.q[oj + 2]);
-                    if ex * ex + ey * ey + ez * ez < h2 { self.pi.push(i as u32); self.pj.push(j as u32); }
+        let found: Vec<(Vec<u32>, Vec<u32>)> = {
+            let (q, cell, pkey, c_start, sorted) = (&self.q[..], &self.cell[..], &self.pkey[..], &self.c_start[..], &self.sorted[..]);
+            self.act.par_chunks(CHUNK).map(|chunk| {
+                let (mut fi, mut fj) = (Vec::with_capacity(chunk.len() * 24), Vec::with_capacity(chunk.len() * 24));
+                for &iu in chunk {
+                    let i = iu as usize; let o = i * 3;
+                    let (x, y, z) = (q[o], q[o + 1], q[o + 2]);
+                    let (ix, iy, iz) = (cell[o], cell[o + 1], cell[o + 2]);
+                    for c in 0..14 {
+                        let (jx, jy, jz) = (ix + HX[c], iy + HY[c], iz + HZ[c]);
+                        let key = key3(jx, jy, jz); let bk = hash3(jx, jy, jz, mask) as usize;
+                        for k in c_start[bk]..c_start[bk + 1] {
+                            let j = sorted[k as usize] as usize;
+                            if pkey[j] != key || (c == 0 && j <= i) { continue; }
+                            let oj = j * 3; let (ex, ey, ez) = (x - q[oj], y - q[oj + 1], z - q[oj + 2]);
+                            if ex * ex + ey * ey + ez * ez < h2 { fi.push(i as u32); fj.push(j as u32); }
+                        }
+                    }
                 }
-            }
-        }
+                (fi, fj)
+            }).collect()
+        };
+        self.pi.clear(); self.pj.clear();
+        for (fi, fj) in &found { self.pi.extend_from_slice(fi); self.pj.extend_from_slice(fj); }
+        drop(found);
         let n_pair = self.pi.len();
         self.last_pairs = n_pair;
         self.pg.resize(n_pair * 3, 0.0); self.pw.resize(n_pair, 0.0);
+        // each particle's pairs, in pair order: gathering over them adds up in exactly the order a
+        // plain loop over the pairs would, so the threads cannot change the answer
+        for c in self.adj_start.iter_mut() { *c = 0; }
+        for k in 0..n_pair { self.adj_start[self.pi[k] as usize + 1] += 1; self.adj_start[self.pj[k] as usize + 1] += 1; }
+        for i in 0..self.maxp { self.adj_start[i + 1] += self.adj_start[i]; }
+        self.adj.resize(n_pair * 2, 0);
+        self.adj_fill.copy_from_slice(&self.adj_start[..self.maxp]);
+        for k in 0..n_pair {
+            let (i, j) = (self.pi[k] as usize, self.pj[k] as usize);
+            self.adj[self.adj_fill[i] as usize] = (k as u32) << 1; self.adj_fill[i] += 1;
+            self.adj[self.adj_fill[j] as usize] = ((k as u32) << 1) | 1; self.adj_fill[j] += 1;
+        }
+        self.prof[1] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- springs form ----
         let hs2 = (1.5 * self.s) * (1.5 * self.s);
-        for k in 0..n_pair {
+        let wanted: Vec<u32> = {
+            let (pi, pj, q, spr_n, spr_j, bodies, mats) = (&self.pi[..], &self.pj[..], &self.q[..], &self.spr_n[..], &self.spr_j[..], &self.bodies[..], &self.mats);
+            (0..n_pair).into_par_iter().with_min_len(4096).filter(|&k| {
+                let (i, j) = (pi[k] as usize, pj[k] as usize);
+                let (bi, bj) = (i / nb, j / nb);
+                let (mi, mj) = (bodies[bi].mat, bodies[bj].mat);
+                if mi != mj { return false; }
+                if !(mats[mi as usize].dynamic_springs || (bi == bj && bodies[bi].fresh)) { return false; }
+                let (oi, oj) = (i * 3, j * 3);
+                let (ex, ey, ez) = (q[oi] - q[oj], q[oi + 1] - q[oj + 1], q[oi + 2] - q[oj + 2]);
+                if ex * ex + ey * ey + ez * ez > hs2 { return false; }
+                (spr_n[i] as usize).min(spr_n[j] as usize) < MAX_SPR && !spring_exists(spr_n, spr_j, i, j)
+            }).map(|k| k as u32).collect()
+        };
+        for &ku in &wanted {
+            let k = ku as usize;
             let (i, j) = (self.pi[k] as usize, self.pj[k] as usize);
-            let (bi, bj) = (i / nb, j / nb);
-            let (mi, mj) = (self.bodies[bi].mat, self.bodies[bj].mat);
-            if mi != mj { continue; }
-            let m = self.mats[mi as usize];
-            if !(m.dynamic_springs || (bi == bj && self.bodies[bi].fresh)) { continue; }
             let (oi, oj) = (i * 3, j * 3);
             let (ex, ey, ez) = (self.q[oi] - self.q[oj], self.q[oi + 1] - self.q[oj + 1], self.q[oi + 2] - self.q[oj + 2]);
             let r2 = ex * ex + ey * ey + ez * ez;
-            if r2 > hs2 { continue; }
             let (a, b) = if self.spr_n[i] <= self.spr_n[j] { (i, j) } else { (j, i) };
             let na = self.spr_n[a] as usize;
-            if na >= MAX_SPR || self.spring_exists(i, j) { continue; }
+            if na >= MAX_SPR { continue; }
             self.spr_j[a * MAX_SPR + na] = b as u32; self.spr_l[a * MAX_SPR + na] = r2.sqrt().max(0.7 * self.s); self.spr_n[a] += 1;
         }
+        drop(wanted);
         for b in 0..slots { self.bodies[b].fresh = false; }
+        // bodies joined by springs have to be relaxed together and in order; the others can go side by side
+        let live: Vec<bool> = (0..slots).map(|b| self.bodies[b].state == 1 && self.bodies[b].awake).collect();
+        let islands: Vec<Vec<u32>> = {
+            let mut root: Vec<usize> = (0..slots).collect();
+            fn find(r: &mut Vec<usize>, mut a: usize) -> usize { while r[a] != a { r[a] = r[r[a]]; a = r[a]; } a }
+            if slots <= 64 {
+                let (spr_n, spr_j, alive, bodies, mats, live) = (&self.spr_n[..], &self.spr_j[..], &self.alive[..], &self.bodies[..], &self.mats, &live[..]);
+                let joined: Vec<u64> = (0..slots).into_par_iter().map(|b| {
+                    let mut m = 0u64;
+                    if !live[b] || !mats[bodies[b].mat as usize].dynamic_springs { return m; }
+                    for i in b * nb..(b + 1) * nb { if alive[i] == 0 { continue; }
+                        for k in 0..spr_n[i] as usize { let bj = spr_j[i * MAX_SPR + k] as usize / nb; if bj != b && live[bj] { m |= 1 << bj; } } }
+                    m
+                }).collect();
+                for b in 0..slots { for c in 0..slots { if joined[b] >> c & 1 != 0 { let (x, y) = (find(&mut root, b), find(&mut root, c)); if x != y { root[x.max(y)] = x.min(y); } } } }
+            } else {
+                for b in 1..slots { root[b] = 0; }
+            }
+            let mut groups: Vec<Vec<u32>> = vec![Vec::new(); slots];
+            for b in 0..slots { if live[b] && self.bodies[b].count > 0 { let r = find(&mut root, b); groups[r].push(b as u32); } }
+            groups.into_iter().filter(|g| !g.is_empty()).collect()
+        };
+        self.prof[2] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- constraint iterations ----
         let (ir0, eps, kc, iwq, kp, ks, w0) = (1.0 / self.rho0, self.eps, self.k_corr, 1.0 / self.wq, self.kp, self.ks, self.w0);
         let max_d = 0.9 * self.s;
         for it in 0..self.iters {
             let last = it + 1 == self.iters;
-            for a in 0..n_act { let i = self.act[a] as usize; self.rho[i] = w0; self.sgx[i] = 0.0; self.sgy[i] = 0.0; self.sgz[i] = 0.0; self.sg2[i] = 0.0; self.dpx[i] = 0.0; self.dpy[i] = 0.0; self.dpz[i] = 0.0; }
-            for k in 0..n_pair {
-                let (i, j) = (self.pi[k] as usize, self.pj[k] as usize); let (oi, oj) = (i * 3, j * 3);
-                let (ex, ey, ez) = (self.q[oi] - self.q[oj], self.q[oi + 1] - self.q[oj + 1], self.q[oi + 2] - self.q[oj + 2]);
-                let r2 = ex * ex + ey * ey + ez * ez;
-                if r2 >= h2 { self.pw[k] = 0.0; continue; }
-                let r = r2.sqrt() + 1e-7; let t = h2 - r2; let w = kp * t * t * t; let u = h - r; let gm = -ks * u * u / r;
-                let (gx, gy, gz) = (gm * ex, gm * ey, gm * ez); let g2 = gx * gx + gy * gy + gz * gz;
-                self.pw[k] = w; self.pg[k * 3] = gx; self.pg[k * 3 + 1] = gy; self.pg[k * 3 + 2] = gz;
-                self.rho[i] += w; self.rho[j] += w;
-                self.sgx[i] += gx; self.sgy[i] += gy; self.sgz[i] += gz; self.sgx[j] -= gx; self.sgy[j] -= gy; self.sgz[j] -= gz;
-                self.sg2[i] += g2; self.sg2[j] += g2;
+            // kernel value and gradient of every pair at the current positions
+            {
+                let (pi, pj, q) = (&self.pi[..], &self.pj[..], &self.q[..]);
+                self.pw.par_iter_mut().zip(self.pg.par_chunks_mut(3)).enumerate().with_min_len(4096).for_each(|(k, (pw, pg))| {
+                    let (oi, oj) = (pi[k] as usize * 3, pj[k] as usize * 3);
+                    let (ex, ey, ez) = (q[oi] - q[oj], q[oi + 1] - q[oj + 1], q[oi + 2] - q[oj + 2]);
+                    let r2 = ex * ex + ey * ey + ez * ez;
+                    if r2 >= h2 { *pw = 0.0; return; }
+                    let r = r2.sqrt() + 1e-7; let t = h2 - r2; let u = h - r; let gm = -ks * u * u / r;
+                    *pw = kp * t * t * t; pg[0] = gm * ex; pg[1] = gm * ey; pg[2] = gm * ez;
+                });
             }
-            for a in 0..n_act {
-                let i = self.act[a] as usize;
-                let m = &self.mats[self.bodies[i / nb].mat as usize];
-                let mut c = self.rho[i] * ir0 - 1.0;
-                if c < 0.0 { c = c.max(-m.coh_lim) * m.coh_k; }
-                let den = (self.sg2[i] + self.sgx[i] * self.sgx[i] + self.sgy[i] * self.sgy[i] + self.sgz[i] * self.sgz[i]) * ir0 * ir0 + eps;
-                self.lam[i] = -c / den;
+            // density and its multiplier
+            {
+                let (pw, pg, adj, adj_start, bodies, mats) = (&self.pw[..], &self.pg[..], &self.adj[..], &self.adj_start[..], &self.bodies[..], &self.mats);
+                let (rho, lam) = (Shared::of(&mut self.rho), Shared::of(&mut self.lam));
+                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize;
+                    let (mut r, mut sx, mut sy, mut sz, mut s2) = (w0, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    for e in adj_start[i]..adj_start[i + 1] {
+                        let ent = adj[e as usize]; let k = (ent >> 1) as usize;
+                        let w = pw[k]; if w == 0.0 { continue; }
+                        let (gx, gy, gz) = (pg[k * 3], pg[k * 3 + 1], pg[k * 3 + 2]);
+                        r += w; s2 += gx * gx + gy * gy + gz * gz;
+                        if ent & 1 == 0 { sx += gx; sy += gy; sz += gz; } else { sx -= gx; sy -= gy; sz -= gz; }
+                    }
+                    let m = &mats[bodies[i / nb].mat as usize];
+                    let mut c = r * ir0 - 1.0;
+                    if c < 0.0 { c = c.max(-m.coh_lim) * m.coh_k; }
+                    let den = (s2 + sx * sx + sy * sy + sz * sz) * ir0 * ir0 + eps;
+                    unsafe { *rho.at(i) = r; *lam.at(i) = -c / den; }
+                } });
             }
-            for k in 0..n_pair {
-                let w = self.pw[k]; if w == 0.0 { continue; }
-                let (i, j) = (self.pi[k] as usize, self.pj[k] as usize);
-                let mut qq = w * iwq; qq *= qq; qq *= qq;
-                let f = (self.lam[i] + self.lam[j] - kc * qq) * ir0;
-                let (fx, fy, fz) = (f * self.pg[k * 3], f * self.pg[k * 3 + 1], f * self.pg[k * 3 + 2]);
-                self.dpx[i] += fx; self.dpy[i] += fy; self.dpz[i] += fz; self.dpx[j] -= fx; self.dpy[j] -= fy; self.dpz[j] -= fz;
+            // position correction
+            {
+                let (pi, pj, pw, pg, adj, adj_start, lam) = (&self.pi[..], &self.pj[..], &self.pw[..], &self.pg[..], &self.adj[..], &self.adj_start[..], &self.lam[..]);
+                let q = Shared::of(&mut self.q);
+                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3;
+                    let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
+                    for e in adj_start[i]..adj_start[i + 1] {
+                        let ent = adj[e as usize]; let k = (ent >> 1) as usize;
+                        let w = pw[k]; if w == 0.0 { continue; }
+                        let mut qq = w * iwq; qq *= qq; qq *= qq;
+                        let f = (lam[pi[k] as usize] + lam[pj[k] as usize] - kc * qq) * ir0;
+                        let (fx, fy, fz) = (f * pg[k * 3], f * pg[k * 3 + 1], f * pg[k * 3 + 2]);
+                        if ent & 1 == 0 { x += fx; y += fy; z += fz; } else { x -= fx; y -= fy; z -= fz; }
+                    }
+                    let l2 = x * x + y * y + z * z;
+                    if l2 > max_d * max_d { let sc = max_d / l2.sqrt(); x *= sc; y *= sc; z *= sc; }
+                    unsafe { *q.at(o) += x; *q.at(o + 1) += y; *q.at(o + 2) += z; }
+                } });
             }
-            for a in 0..n_act {
-                let i = self.act[a] as usize; let o = i * 3;
-                let (mut x, mut y, mut z) = (self.dpx[i], self.dpy[i], self.dpz[i]);
-                let l2 = x * x + y * y + z * z;
-                if l2 > max_d * max_d { let sc = max_d / l2.sqrt(); x *= sc; y *= sc; z *= sc; }
-                self.q[o] += x; self.q[o + 1] += y; self.q[o + 2] += z;
-            }
-            // springs
-            for a in 0..n_act {
-                let i = self.act[a] as usize; let oi = i * 3;
-                let ksp = self.bodies[i / nb].k_spring;
-                for sidx in 0..self.spr_n[i] as usize {
-                    let j = self.spr_j[i * MAX_SPR + sidx] as usize; let oj = j * 3;
-                    let l = self.spr_l[i * MAX_SPR + sidx];
-                    let fixed = !self.bodies[j / nb].awake;
-                    let (jx, jy, jz) = if fixed { (self.p[oj], self.p[oj + 1], self.p[oj + 2]) } else { (self.q[oj], self.q[oj + 1], self.q[oj + 2]) };
-                    let (ex, ey, ez) = (self.q[oi] - jx, self.q[oi + 1] - jy, self.q[oi + 2] - jz);
-                    let r = (ex * ex + ey * ey + ez * ez).sqrt() + 1e-7;
-                    let c = ksp * (r - l) / r * if fixed { 1.0 } else { 0.5 };
-                    self.q[oi] -= ex * c; self.q[oi + 1] -= ey * c; self.q[oi + 2] -= ez * c;
-                    if !fixed { self.q[oj] += ex * c; self.q[oj + 1] += ey * c; self.q[oj + 2] += ez * c; }
-                }
+            // springs: one island at a time on each thread, in particle order within it
+            {
+                let (p, alive, spr_n, spr_j, spr_l, bodies, live) = (&self.p[..], &self.alive[..], &self.spr_n[..], &self.spr_j[..], &self.spr_l[..], &self.bodies[..], &live[..]);
+                let q = Shared::of(&mut self.q);
+                islands.par_iter().for_each(|island| { for &bu in island { let b = bu as usize;
+                    let ksp = bodies[b].k_spring;
+                    for i in b * nb..(b + 1) * nb {
+                        if alive[i] == 0 { continue; }
+                        let oi = i * 3;
+                        for sidx in 0..spr_n[i] as usize {
+                            let j = spr_j[i * MAX_SPR + sidx] as usize; let oj = j * 3;
+                            let l = spr_l[i * MAX_SPR + sidx];
+                            let fixed = !live[j / nb]; // asleep or on its way out: it does not give way
+                            unsafe {
+                                let (jx, jy, jz) = if fixed { (p[oj], p[oj + 1], p[oj + 2]) } else { (*q.at(oj), *q.at(oj + 1), *q.at(oj + 2)) };
+                                let (ex, ey, ez) = (*q.at(oi) - jx, *q.at(oi + 1) - jy, *q.at(oi + 2) - jz);
+                                let r = (ex * ex + ey * ey + ez * ez).sqrt() + 1e-7;
+                                let c = ksp * (r - l) / r * if fixed { 1.0 } else { 0.5 };
+                                *q.at(oi) -= ex * c; *q.at(oi + 1) -= ey * c; *q.at(oi + 2) -= ez * c;
+                                if !fixed { *q.at(oj) += ex * c; *q.at(oj + 1) += ey * c; *q.at(oj + 2) += ez * c; }
+                            }
+                        }
+                    }
+                } });
             }
             // anchors pull, then colliders push
-            for a in 0..n_act {
-                let i = self.act[a] as usize; let o = i * 3;
-                let kind = self.anc_kind[i];
-                if kind != 0 {
-                    if kind == 2 {
-                        if let Some(b) = self.kin.iter().find(|b| b.id == self.anc_id[i]) { for c in 0..3 { self.anc_pt[o + c] = b.min[c] + self.anc_loc[o + c]; } }
+            {
+                let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, rc: self.rc, rho_max: 1.25 * self.rho0 };
+                let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis) };
+                let (q, anc_d) = (Shared::of(&mut self.q), Shared::of(&mut self.anc_d));
+                let (p, rho, cool, bodies, mats, kin) = (&self.p[..], &self.rho[..], &self.anc_cool[..], &self.bodies[..], &self.mats, &self.kin[..]);
+                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
+                    let kind = *an.kind.at(i);
+                    if kind != 0 {
+                        if kind == 2 {
+                            let id = *an.id.at(i);
+                            if let Some(b) = kin.iter().find(|b| b.id == id) { for c in 0..3 { *an.pt.at(o + c) = b.min[c] + *an.loc.at(o + c); } }
+                        }
+                        let ak = mats[bodies[i / nb].mat as usize].adh_k;
+                        for c in 0..3 {
+                            let d = *q.at(o + c) - *an.pt.at(o + c);
+                            if last { *anc_d.at(o + c) = d; } // how far everything else dragged it this iteration
+                            *q.at(o + c) -= ak * d;
+                        }
                     }
-                    let ak = self.mats[self.bodies[i / nb].mat as usize].adh_k;
-                    for c in 0..3 {
-                        let d = self.q[o + c] - self.anc_pt[o + c];
-                        if last { self.anc_d[o + c] = d; } // how far everything else dragged it this iteration
-                        self.q[o + c] -= ak * d;
-                    }
-                }
-                self.collide(i);
+                    collide(&walls, an, q, p, rho[i], cool[i], i);
+                } } });
             }
         }
+        self.prof[3] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- anchors creep / snap, springs flow / snap ----
-        for a in 0..n_act {
-            let i = self.act[a] as usize; let o = i * 3;
-            let bd = self.bodies[i / nb];
-            let m = self.mats[bd.mat as usize];
-            if self.anc_kind[i] != 0 {
-                let (ex, ey, ez) = (self.anc_d[o], self.anc_d[o + 1], self.anc_d[o + 2]);
-                let d = (ex * ex + ey * ey + ez * ez).sqrt();
-                if d > m.adh_break * self.anc_stick[i] || self.rho[i] > 1.6 * self.rho0 { self.anc_kind[i] = 0; self.anc_cool[i] = 0.35; }
-                else if m.adh_creep > 0.0 {
-                    let cf = 1.0 - (-m.adh_creep * (0.25 + 0.75 * bd.melt) * dt).exp();
-                    let e = [ex, ey, ez]; let ax = self.anc_axis[i] as usize;
-                    for c in 0..3 { if c != ax { self.anc_pt[o + c] += e[c] * cf; self.anc_loc[o + c] += e[c] * cf; } } // slides along the surface only
+        {
+            let (q, alive, rho, anc_d, anc_stick, anc_axis, bodies, mats) = (&self.q[..], &self.alive[..], &self.rho[..], &self.anc_d[..], &self.anc_stick[..], &self.anc_axis[..], &self.bodies[..], &self.mats);
+            let (anc_kind, anc_cool, anc_pt, anc_loc) = (Shared::of(&mut self.anc_kind), Shared::of(&mut self.anc_cool), Shared::of(&mut self.anc_pt), Shared::of(&mut self.anc_loc));
+            let (spr_n, spr_j, spr_l) = (Shared::of(&mut self.spr_n), Shared::of(&mut self.spr_j), Shared::of(&mut self.spr_l));
+            let rho_break = 1.6 * self.rho0;
+            self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
+                let bd = &bodies[i / nb];
+                let m = &mats[bd.mat as usize];
+                if *anc_kind.at(i) != 0 {
+                    let (ex, ey, ez) = (anc_d[o], anc_d[o + 1], anc_d[o + 2]);
+                    let d = (ex * ex + ey * ey + ez * ez).sqrt();
+                    if d > m.adh_break * anc_stick[i] || rho[i] > rho_break { *anc_kind.at(i) = 0; *anc_cool.at(i) = 0.35; }
+                    else if m.adh_creep > 0.0 {
+                        let cf = 1.0 - (-m.adh_creep * (0.25 + 0.75 * bd.melt) * dt).exp();
+                        let e = [ex, ey, ez]; let ax = anc_axis[i] as usize;
+                        for c in 0..3 { if c != ax { *anc_pt.at(o + c) += e[c] * cf; *anc_loc.at(o + c) += e[c] * cf; } } // slides along the surface only
+                    }
                 }
-            }
-            let mut sidx = 0usize;
-            while sidx < self.spr_n[i] as usize {
-                let si = i * MAX_SPR + sidx;
-                let j = self.spr_j[si] as usize; let oj = j * 3;
-                let mut l = self.spr_l[si];
-                let (ex, ey, ez) = (self.q[o] - self.q[oj], self.q[o + 1] - self.q[oj + 1], self.q[o + 2] - self.q[oj + 2]);
-                let r = (ex * ex + ey * ey + ez * ez).sqrt();
-                if bd.plast > 0.0 {
-                    let dl = r - l; let y = m.yield_ * l;
-                    if dl.abs() > y { l += (1.0 - (-bd.plast * dt).exp()) * (dl - y * dl.signum()); self.spr_l[si] = l; }
+                let mut sidx = 0usize;
+                while sidx < *spr_n.at(i) as usize {
+                    let si = i * MAX_SPR + sidx;
+                    let j = *spr_j.at(si) as usize; let oj = j * 3;
+                    let mut l = *spr_l.at(si);
+                    let (ex, ey, ez) = (q[o] - q[oj], q[o + 1] - q[oj + 1], q[o + 2] - q[oj + 2]);
+                    let r = (ex * ex + ey * ey + ez * ez).sqrt();
+                    if bd.plast > 0.0 {
+                        let dl = r - l; let y = m.yield_ * l;
+                        if dl.abs() > y { l += (1.0 - (-bd.plast * dt).exp()) * (dl - y * dl.signum()); *spr_l.at(si) = l; }
+                    }
+                    let gone = alive[j] == 0 || r > bd.brk * l || l > bd.max_l;
+                    if gone { let end = i * MAX_SPR + *spr_n.at(i) as usize - 1; *spr_j.at(si) = *spr_j.at(end); *spr_l.at(si) = *spr_l.at(end); *spr_n.at(i) -= 1; }
+                    else { sidx += 1; }
                 }
-                let gone = self.alive[j] == 0 || r > bd.brk * l || l > bd.max_l;
-                if gone { let last = i * MAX_SPR + self.spr_n[i] as usize - 1; self.spr_j[si] = self.spr_j[last]; self.spr_l[si] = self.spr_l[last]; self.spr_n[i] -= 1; }
-                else { sidx += 1; }
-            }
+            } } });
         }
+        self.prof[4] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- velocities, viscosity, commit ----
         let idt = 1.0 / dt;
         let max_move = 0.3f32; // blocks per step; stops a crushed particle from being shot across the map
-        for a in 0..n_act {
-            let i = self.act[a] as usize; let o = i * 3;
-            let (ex, ey, ez) = (self.q[o] - self.p[o], self.q[o + 1] - self.p[o + 1], self.q[o + 2] - self.p[o + 2]);
-            let d2 = ex * ex + ey * ey + ez * ez;
-            if d2 > max_move * max_move { let sc = max_move / d2.sqrt(); self.q[o] = self.p[o] + ex * sc; self.q[o + 1] = self.p[o + 1] + ey * sc; self.q[o + 2] = self.p[o + 2] + ez * sc; }
-            for c in 0..3 { self.v[o + c] = (self.q[o + c] - self.p[o + c]) * idt; }
+        {
+            let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, rc: self.rc, rho_max: 1.25 * self.rho0 };
+            let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis) };
+            let (p, rho, cool) = (&self.p[..], &self.rho[..], &self.anc_cool[..]);
+            let (q, v) = (Shared::of(&mut self.q), Shared::of(&mut self.v));
+            self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
+                let (ex, ey, ez) = (*q.at(o) - p[o], *q.at(o + 1) - p[o + 1], *q.at(o + 2) - p[o + 2]);
+                let d2 = ex * ex + ey * ey + ez * ez;
+                if d2 > max_move * max_move {
+                    let sc = max_move / d2.sqrt(); *q.at(o) = p[o] + ex * sc; *q.at(o + 1) = p[o + 1] + ey * sc; *q.at(o + 2) = p[o + 2] + ez * sc;
+                    // holding it back must not leave it inside a collider that moved further than that in one
+                    // step (a piston head seen by a simulation that is running behind): out it goes again,
+                    // keeping only the speed limit
+                    collide(&walls, an, q, p, rho[i], cool[i], i);
+                }
+                let (vx, vy, vz) = ((*q.at(o) - p[o]) * idt, (*q.at(o + 1) - p[o + 1]) * idt, (*q.at(o + 2) - p[o + 2]) * idt);
+                let v2 = vx * vx + vy * vy + vz * vz; let vmax = max_move * idt;
+                let sc = if v2 > vmax * vmax { vmax / v2.sqrt() } else { 1.0 };
+                *v.at(o) = vx * sc; *v.at(o + 1) = vy * sc; *v.at(o + 2) = vz * sc;
+            } } });
         }
         for _ in 0..self.visc_iters {
-            for a in 0..n_act { let i = self.act[a] as usize; self.dpx[i] = 0.0; self.dpy[i] = 0.0; self.dpz[i] = 0.0; }
-            for k in 0..n_pair {
-                let w = self.pw[k]; if w == 0.0 { continue; }
-                let (i, j) = (self.pi[k] as usize, self.pj[k] as usize); let (oi, oj) = (i * 3, j * 3);
-                let (ex, ey, ez) = (self.v[oj] - self.v[oi], self.v[oj + 1] - self.v[oi + 1], self.v[oj + 2] - self.v[oi + 2]);
-                let wi = self.mats[self.bodies[i / nb].mat as usize].xsph * w / self.rho[i];
-                let wj = self.mats[self.bodies[j / nb].mat as usize].xsph * w / self.rho[j];
-                self.dpx[i] += ex * wi; self.dpy[i] += ey * wi; self.dpz[i] += ez * wi;
-                self.dpx[j] -= ex * wj; self.dpy[j] -= ey * wj; self.dpz[j] -= ez * wj;
+            {
+                let (pi, pj, pw, adj, adj_start, v, rho, bodies, mats) = (&self.pi[..], &self.pj[..], &self.pw[..], &self.adj[..], &self.adj_start[..], &self.v[..], &self.rho[..], &self.bodies[..], &self.mats);
+                let (dpx, dpy, dpz) = (Shared::of(&mut self.dpx), Shared::of(&mut self.dpy), Shared::of(&mut self.dpz));
+                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize;
+                    let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
+                    let xsph = mats[bodies[i / nb].mat as usize].xsph;
+                    for e in adj_start[i]..adj_start[i + 1] {
+                        let ent = adj[e as usize]; let k = (ent >> 1) as usize;
+                        let w = pw[k]; if w == 0.0 { continue; }
+                        let (oi, oj) = (pi[k] as usize * 3, pj[k] as usize * 3);
+                        let (ex, ey, ez) = (v[oj] - v[oi], v[oj + 1] - v[oi + 1], v[oj + 2] - v[oi + 2]);
+                        let ws = xsph * w / rho[i]; // this particle's share, the same arithmetic a loop over pairs would do
+                        if ent & 1 == 0 { x += ex * ws; y += ey * ws; z += ez * ws; } else { x -= ex * ws; y -= ey * ws; z -= ez * ws; }
+                    }
+                    unsafe { *dpx.at(i) = x; *dpy.at(i) = y; *dpz.at(i) = z; }
+                } });
             }
             for a in 0..n_act { let i = self.act[a] as usize; let o = i * 3; self.v[o] += self.dpx[i]; self.v[o + 1] += self.dpy[i]; self.v[o + 2] += self.dpz[i]; }
         }
@@ -702,6 +917,7 @@ impl World {
             if self.anc_kind[i] != 0 { bd.anchored += 1; }
         }
 
+        self.prof[5] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
         // ---- sleep / wake ----
         for b in 0..slots {
             let m = self.mats[self.bodies[b].mat as usize];
@@ -726,5 +942,6 @@ impl World {
             if moving_kin.iter().any(|k| (0..3).all(|a| k.max[a] > bb[a] - 0.6 && k.min[a] < bb[a + 3] + 0.6)) { may_sleep = false; self.bodies[b].calm = 0; }
             if may_sleep { self.bodies[b].awake = false; let nbv = b * nb * 3; for x in self.v[nbv..nbv + nb * 3].iter_mut() { *x = 0.0; } }
         }
+        self.prof[6] += t_prof.elapsed().as_secs_f64();
     }
 }

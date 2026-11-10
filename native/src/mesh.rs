@@ -7,6 +7,7 @@
 //! per grid edge that changes sign. It needs no lookup tables and yields quads directly.
 
 use crate::sim::World;
+use rayon::prelude::*;
 
 /// 4 vertices * (position xyz + normal xyz). The normal's length is 1 + the depth of goo behind
 /// the vertex in blocks (0 for threads), so the renderer can make thick goo darker than a thin film.
@@ -19,10 +20,14 @@ const BRIDGE_FROM: f32 = 1.6;
 const BRIDGE_UPTO: f32 = 6.5;
 const BRIDGE_WEIGHT: f32 = 0.7;
 
-struct Grid { org: [f32; 3], dim: [usize; 3], c: f32 }
+struct Grid { org: [f32; 3] }
 
 /// Appends quads for every live body of `mat` to `out`. Returns the number of quads added.
 pub fn build(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
+    crate::sim::on_pool(|| build_on_pool(w, mat, out))
+}
+
+fn build_on_pool(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
     let start = out.len();
     let slots = w.slots;
     // group bodies whose bounds touch, so merged puddles become one seamless surface
@@ -35,13 +40,16 @@ pub fn build(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
         if (0..3).all(|k| x[k] < y[k + 3] + pad && x[k + 3] > y[k] - pad) { let (ra, rb) = (find(&mut group, a), find(&mut group, b)); group[ra] = rb; }
     } }
     let mut done = vec![false; ids.len()];
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
     for a in 0..ids.len() {
         let root = find(&mut group, a);
         if done[root] { continue; }
         done[root] = true;
-        let members: Vec<usize> = (0..ids.len()).filter(|&b| find(&mut group, b) == root).map(|b| ids[b]).collect();
-        mesh_cluster(w, &members, out);
+        clusters.push((0..ids.len()).filter(|&b| find(&mut group, b) == root).map(|b| ids[b]).collect());
     }
+    // separate puddles are meshed side by side and joined in the same order as before
+    let parts: Vec<Vec<f32>> = clusters.par_iter().map(|members| { let mut part = Vec::new(); mesh_cluster(w, members, &mut part); part }).collect();
+    for part in &parts { out.extend_from_slice(part); }
     threads(w, mat, out);
     (out.len() - start) / FLOATS_PER_QUAD
 }
@@ -113,7 +121,7 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
         if cells <= 3_000_000 { break; }
         c *= 1.26;
     }
-    let g = Grid { org: [lo[0] - rk - c, lo[1] - rk - c, lo[2] - rk - c], dim, c };
+    let g = Grid { org: [lo[0] - rk - c, lo[1] - rk - c, lo[2] - rk - c] };
     let (nx, ny, nz) = (dim[0], dim[1], dim[2]);
     let nn = nx * ny * nz;
     let mut acc = vec![0.0f32; nn * 4]; // sum w, sum w*x, sum w*y, sum w*z
@@ -164,16 +172,17 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
     }
     // signed distance-like field at grid nodes (negative inside)
     let mut phi = vec![rk; nn];
-    for z in 0..nz { for y in 0..ny { for x in 0..nx {
+    let org = g.org;
+    phi.par_chunks_mut(nx * ny).enumerate().for_each(|(z, slice)| { for y in 0..ny { for x in 0..nx {
         let n = x + nx * (y + ny * z); let wsum = acc[n * 4];
         if wsum > 1e-5 {
             let inv = 1.0 / wsum;
-            let (dx, dy, dz) = (g.org[0] + x as f32 * c - acc[n * 4 + 1] * inv, g.org[1] + y as f32 * c - acc[n * 4 + 2] * inv, g.org[2] + z as f32 * c - acc[n * 4 + 3] * inv);
+            let (dx, dy, dz) = (org[0] + x as f32 * c - acc[n * 4 + 1] * inv, org[1] + y as f32 * c - acc[n * 4 + 2] * inv, org[2] + z as f32 * c - acc[n * 4 + 3] * inv);
             // thin spots (few particles nearby) shrink a little so stray droplets stay small
             let r = rad * (0.55 + 0.45 * (wsum * 0.9).min(1.0));
-            phi[n] = (dx * dx + dy * dy + dz * dz).sqrt() - r;
+            slice[x + nx * y] = (dx * dx + dy * dy + dz * dz).sqrt() - r;
         }
-    } } }
+    } } });
     drop(acc);
     // one vertex per crossed cell
     let (cx, cy, cz) = (nx - 1, ny - 1, nz - 1);

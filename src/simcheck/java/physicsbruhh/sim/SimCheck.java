@@ -23,11 +23,11 @@ public final class SimCheck {
 
     static int floorCount(int extra) { return 11 * 7 + extra; }
 
-    static ByteBuffer plates(float[]... p) { ByteBuffer b = buf(p.length * 11); FloatBuffer f = b.asFloatBuffer(); for (float[] x : p) f.put(x); return b; }
+    static ByteBuffer plates(float[]... p) { ByteBuffer b = buf(p.length * GooSim.KINEMATIC_FLOATS); FloatBuffer f = b.asFloatBuffer(); for (float[] x : p) f.put(x); return b; }
 
     static float[] plate(int id, float face, float dir, float vel, float stick) {
         float a = dir > 0 ? face - 0.25f : face, b = dir > 0 ? face : face + 0.25f;
-        return new float[] { id, a, 0, 0, b, 1, 1, vel, 0, 0, stick };
+        return new float[] { id, a, 0, 0, b, 1, 1, vel, 0, 0, stick, dir > 0 ? 1 : 2 };
     }
 
     static void run(GooSim s, float secs) { for (int i = 0; i < (int) (secs * 60); i++) s.step(1f / 60f + 1e-6f); }

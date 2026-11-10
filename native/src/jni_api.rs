@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 1;
+pub const ABI_VERSION: jint = 2;
 const ERR: jint = -9999;
 
 struct Handle { world: World, mesh: Vec<f32> }

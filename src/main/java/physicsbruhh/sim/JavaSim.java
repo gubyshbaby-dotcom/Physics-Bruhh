@@ -51,7 +51,7 @@ public final class JavaSim implements GooSim {
     }
 
     static final class KBox {
-        int id; final float[] min = new float[3], max = new float[3], pmin = new float[3], pmax = new float[3], vel = new float[3]; float stick, t;
+        int id, front; final float[] min = new float[3], max = new float[3], pmin = new float[3], pmax = new float[3], vel = new float[3]; float stick, t;
         boolean moving() { return vel[0] != 0f || vel[1] != 0f || vel[2] != 0f; }
     }
 
@@ -218,7 +218,12 @@ public final class JavaSim implements GooSim {
             }
         }
         // anchors of awake goo whose surface is gone let go (sleeping goo is outside the scanned region)
-        for (int i = 0; i < maxp; i++) if (alive[i] != 0 && ancKind[i] == 1 && bodies[i / nb].awake && !nearStatic(ancPt[i * 3], ancPt[i * 3 + 1], ancPt[i * 3 + 2], rc + 0.06f)) ancKind[i] = 0;
+        // anchors of awake goo whose surface is gone let go, and so do anchors that ended up inside a block
+        for (int i = 0; i < maxp; i++) {
+            if (alive[i] == 0 || ancKind[i] != 1 || !bodies[i / nb].awake) continue;
+            float ax = ancPt[i * 3], ay = ancPt[i * 3 + 1], az = ancPt[i * 3 + 2];
+            if (!nearStatic(ax, ay, az, rc + 0.06f) || nearStatic(ax, ay, az, -0.5f * rc)) ancKind[i] = 0;
+        }
     }
 
     private boolean nearStatic(float px, float py, float pz, float tol) {
@@ -242,10 +247,11 @@ public final class JavaSim implements GooSim {
         count = Math.max(0, Math.min(count, data.capacity() / KINEMATIC_FLOATS));
         KBox[] next = new KBox[count];
         for (int k = 0; k < count; k++) {
-            KBox b = new KBox(); int o = k * 11;
+            KBox b = new KBox(); int o = k * KINEMATIC_FLOATS;
             b.id = (int) data.get(o);
             for (int a = 0; a < 3; a++) { b.min[a] = data.get(o + 1 + a); b.max[a] = data.get(o + 4 + a); b.vel[a] = data.get(o + 7 + a); }
             b.stick = data.get(o + 10);
+            b.front = Math.max(0, Math.min(6, (int) data.get(o + 11)));
             KBox prev = null; for (KBox kb : kin) if (kb.id == b.id) { prev = kb; break; }
             for (int a = 0; a < 3; a++) { b.pmin[a] = prev != null ? prev.min[a] : b.min[a]; b.pmax[a] = prev != null ? prev.max[a] : b.max[a]; }
             next[k] = b;
@@ -268,7 +274,7 @@ public final class JavaSim implements GooSim {
     private final float[] tq = new float[3], tp = new float[3];
 
     /** Returns the face axis that pushed the particle out, or 3 if the box was not touched. */
-    private int resolveBox(float[] bq, float[] bp, float n0, float n1, float n2, float x0, float x1, float x2, float pn0, float pn1, float pn2, float px0, float px1, float px2) {
+    private int resolveBox(float[] bq, float[] bp, float n0, float n1, float n2, float x0, float x1, float x2, float pn0, float pn1, float pn2, float px0, float px1, float px2, int front, boolean lead) {
         float best = Float.MAX_VALUE; int ba = 3; boolean hi = false;
         for (int a = 0; a < 3; a++) {
             int b = (a + 1) % 3, c = (a + 2) % 3;
@@ -281,10 +287,25 @@ public final class JavaSim implements GooSim {
         if (ba < 3) { float mn = ba == 0 ? n0 : ba == 1 ? n1 : n2, mx = ba == 0 ? x0 : ba == 1 ? x1 : x2; bq[ba] = hi ? mx + rc : mn - rc; return ba; }
         if (bq[0] <= n0 - rc || bq[0] >= x0 + rc || bq[1] <= n1 - rc || bq[1] >= x1 + rc || bq[2] <= n2 - rc || bq[2] >= x2 + rc) return 3;
         best = Float.MAX_VALUE; ba = 0; hi = false;
-        for (int a = 0; a < 3; a++) {
-            float mn = a == 0 ? n0 : a == 1 ? n1 : n2, mx = a == 0 ? x0 : a == 1 ? x1 : x2;
-            float penLo = bq[a] - (mn - rc); if (penLo < best) { best = penLo; ba = a; hi = false; }
-            float penHi = (mx + rc) - bq[a]; if (penHi < best) { best = penHi; ba = a; hi = true; }
+        if (front != 0) {
+            // a box with a front (a piston head) puts everything out in front of it
+            ba = (front - 1) / 2; hi = (front & 1) == 1;
+        } else {
+            float moved = 0f;
+            if (lead) {
+                float d0 = n0 - pn0, d1 = n1 - pn1, d2 = n2 - pn2;
+                if (Math.abs(d0) > moved) { moved = Math.abs(d0); ba = 0; hi = d0 > 0f; }
+                if (Math.abs(d1) > moved) { moved = Math.abs(d1); ba = 1; hi = d1 > 0f; }
+                if (Math.abs(d2) > moved) { moved = Math.abs(d2); ba = 2; hi = d2 > 0f; }
+            }
+            if (moved < 1e-6f) {
+                // nothing says which way: the nearest face
+                for (int a = 0; a < 3; a++) {
+                    float mn = a == 0 ? n0 : a == 1 ? n1 : n2, mx = a == 0 ? x0 : a == 1 ? x1 : x2;
+                    float penLo = bq[a] - (mn - rc); if (penLo < best) { best = penLo; ba = a; hi = false; }
+                    float penHi = (mx + rc) - bq[a]; if (penHi < best) { best = penHi; ba = a; hi = true; }
+                }
+            } // else: a block being pushed carries it along on its leading face
         }
         float mn = ba == 0 ? n0 : ba == 1 ? n1 : n2, mx = ba == 0 ? x0 : ba == 1 ? x1 : x2;
         bq[ba] = hi ? mx + rc : mn - rc;
@@ -304,14 +325,14 @@ public final class JavaSim implements GooSim {
                     int ci = x + stDim[0] * (y + stDim[1] * z);
                     for (int k = stStart[ci]; k < stStart[ci + 1]; k++) {
                         int b = stItems[k] * 7;
-                        int ax = resolveBox(tq, tp, st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5]);
+                        int ax = resolveBox(tq, tp, st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], 0, false);
                         if (ax < 3) { hit = 1; hitStick = st[b + 6]; hitAxis = ax; }
                     }
                 }
             }
         }
         for (KBox b : kin) {
-            int ax = resolveBox(tq, tp, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2], b.pmin[0], b.pmin[1], b.pmin[2], b.pmax[0], b.pmax[1], b.pmax[2]);
+            int ax = resolveBox(tq, tp, b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2], b.pmin[0], b.pmin[1], b.pmin[2], b.pmax[0], b.pmax[1], b.pmax[2], b.front, b.id > 0);
             if (ax < 3) { hit = 2; hitId = b.id; hitStick = b.stick; hm0 = b.min[0]; hm1 = b.min[1]; hm2 = b.min[2]; hitAxis = ax; }
         }
         q[o] = tq[0]; q[o + 1] = tq[1]; q[o + 2] = tq[2];
@@ -343,7 +364,7 @@ public final class JavaSim implements GooSim {
                 boolean near6 = true, near3 = true;
                 for (int a = 0; a < 3; a++) { if (!(b.max[a] > bd.bb[a] - 0.6f && b.min[a] < bd.bb[a + 3] + 0.6f)) near6 = false; if (!(b.max[a] > bd.bb[a] - 0.3f && b.min[a] < bd.bb[a + 3] + 0.3f)) near3 = false; }
                 if (!bd.awake && near6) { bd.awake = true; bd.calm = 0; }
-                if (near3) bd.shock = 1f;
+                if (b.id > 0 && near3) bd.shock = 1f; // only piston parts (positive ids) stiffen the goo
             }
         }
         // ---- bodies ----
@@ -351,6 +372,25 @@ public final class JavaSim implements GooSim {
         for (int b = 0; b < slots; b++) {
             Body bd = bodies[b];
             if (bd.state == 0 || !bd.awake) continue;
+            if (bd.state == 2) {
+                // being removed: no physics any more, it just shrinks into the middle of its base and is gone
+                float before = bd.fade;
+                bd.fade -= dt / FADE_TIME;
+                if (bd.fade <= 0f) { freeBody(b); continue; }
+                float k = bd.fade / before;
+                float c0 = (bd.bb[0] + bd.bb[3]) * 0.5f, c1 = bd.bb[1], c2 = (bd.bb[2] + bd.bb[5]) * 0.5f;
+                bd.bb[0] = c0 + (bd.bb[0] - c0) * k; bd.bb[3] = c0 + (bd.bb[3] - c0) * k;
+                bd.bb[1] = c1 + (bd.bb[1] - c1) * k; bd.bb[4] = c1 + (bd.bb[4] - c1) * k;
+                bd.bb[2] = c2 + (bd.bb[2] - c2) * k; bd.bb[5] = c2 + (bd.bb[5] - c2) * k;
+                for (int i = b * nb; i < (b + 1) * nb; i++) {
+                    if (alive[i] == 0) continue;
+                    int o = i * 3;
+                    p[o] = c0 + (p[o] - c0) * k; p[o + 1] = c1 + (p[o + 1] - c1) * k; p[o + 2] = c2 + (p[o + 2] - c2) * k;
+                    q[o] = p[o]; q[o + 1] = p[o + 1]; q[o + 2] = p[o + 2]; v[o] = 0f; v[o + 1] = 0f; v[o + 2] = 0f;
+                    scale[i] = bd.fade; ancKind[i] = 0;
+                }
+                continue;
+            }
             Material m = mats[bd.mat];
             bd.age += dt;
             bd.melt = m.meltTime > 0f ? smooth(bd.age / m.meltTime) : 0f;
@@ -364,13 +404,10 @@ public final class JavaSim implements GooSim {
             bd.brk = m.breakStrain + Math.max(0f, m.shockBreak - m.breakStrain) * sh;
             bd.maxL = m.springMaxL + Math.max(0f, m.shockMaxL - m.springMaxL) * sh;
             bd.shock = sh < 0.01f ? 0f : sh * (float) Math.exp(-dt / m.shockDecay);
-            boolean fadeDone = false;
-            if (bd.state == 2) { bd.fade -= dt / 0.6f; if (bd.fade <= 0f) fadeDone = true; }
-            if (fadeDone) { freeBody(b); continue; }
-            boolean grounded = bd.anchored > 0 || bd.shock > 0.05f, fading = bd.state == 2;
+            boolean grounded = bd.anchored > 0 || bd.shock > 0.05f;
             int cnt = 0;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
-                if (alive[i] != 0) { act[nAct++] = i; cnt++; damp[i] = grounded ? bd.kd : 0.15f; if (fading) scale[i] = bd.fade; }
+                if (alive[i] != 0) { act[nAct++] = i; cnt++; damp[i] = grounded ? bd.kd : 0.15f; }
             }
             bd.count = cnt;
             if (cnt == 0) freeBody(b);
@@ -488,7 +525,7 @@ public final class JavaSim implements GooSim {
                 for (int sidx = 0; sidx < sprN[i]; sidx++) {
                     int j = sprJ[i * MAX_SPR + sidx], oj = j * 3;
                     float l = sprL[i * MAX_SPR + sidx];
-                    boolean fixed = !bodies[j / nb].awake;
+                    boolean fixed = !(bodies[j / nb].awake && bodies[j / nb].state == 1); // asleep or on its way out: it does not give way
                     float jx = fixed ? p[oj] : q[oj], jy = fixed ? p[oj + 1] : q[oj + 1], jz = fixed ? p[oj + 2] : q[oj + 2];
                     float ex = q[oi] - jx, ey = q[oi + 1] - jy, ez = q[oi + 2] - jz;
                     float r = (float) Math.sqrt(ex * ex + ey * ey + ez * ez) + 1e-7f;
@@ -545,8 +582,16 @@ public final class JavaSim implements GooSim {
         for (int a = 0; a < nAct; a++) {
             int i = act[a], o = i * 3;
             float ex = q[o] - p[o], ey = q[o + 1] - p[o + 1], ez = q[o + 2] - p[o + 2], d2 = ex * ex + ey * ey + ez * ez;
-            if (d2 > maxMove * maxMove) { float sc = maxMove / (float) Math.sqrt(d2); q[o] = p[o] + ex * sc; q[o + 1] = p[o + 1] + ey * sc; q[o + 2] = p[o + 2] + ez * sc; }
-            v[o] = (q[o] - p[o]) * idt; v[o + 1] = (q[o + 1] - p[o + 1]) * idt; v[o + 2] = (q[o + 2] - p[o + 2]) * idt;
+            if (d2 > maxMove * maxMove) {
+                float sc = maxMove / (float) Math.sqrt(d2); q[o] = p[o] + ex * sc; q[o + 1] = p[o + 1] + ey * sc; q[o + 2] = p[o + 2] + ez * sc;
+                // holding it back must not leave it inside a collider that moved further than that in one step
+                // (a piston head seen by a simulation that is running behind): out it goes again, keeping only the speed limit
+                collide(i);
+            }
+            float vx = (q[o] - p[o]) * idt, vy = (q[o + 1] - p[o + 1]) * idt, vz = (q[o + 2] - p[o + 2]) * idt;
+            float v2 = vx * vx + vy * vy + vz * vz, vmax = maxMove * idt;
+            float vs = v2 > vmax * vmax ? vmax / (float) Math.sqrt(v2) : 1f;
+            v[o] = vx * vs; v[o + 1] = vy * vs; v[o + 2] = vz * vs;
         }
         for (int vi = 0; vi < viscIters; vi++) {
             for (int a = 0; a < nAct; a++) { int i = act[a]; dpx[i] = 0f; dpy[i] = 0f; dpz[i] = 0f; }
@@ -644,6 +689,8 @@ public final class JavaSim implements GooSim {
 
     private static final int[][] CO = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 }, { 1, 1, 1 } };
     private static final int[][] ED = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
+
+    private static final float FADE_TIME = 0.45f;
 
     // bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to
     // between BRIDGE_FROM and BRIDGE_UPTO spacings, get extra samples of this weight along them

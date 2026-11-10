@@ -10,9 +10,9 @@ fn floor() -> Vec<f32> {
     for x in -5..6 { for z in -3..4 { v.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } }
     v
 }
-fn plate(id: i32, face: f32, dir: f32, vel: f32, stick: f32) -> [f32; 11] {
+fn plate(id: i32, face: f32, dir: f32, vel: f32, stick: f32) -> [f32; 12] {
     let (a, b) = if dir > 0.0 { (face - 0.25, face) } else { (face, face + 0.25) };
-    [id as f32, a, 0.0, 0.0, b, 1.0, 1.0, vel, 0.0, 0.0, stick]
+    [id as f32, a, 0.0, 0.0, b, 1.0, 1.0, vel, 0.0, 0.0, stick, if dir > 0.0 { 1.0 } else { 2.0 }]
 }
 fn run(w: &mut World, secs: f32) { for _ in 0..(secs * 60.0) as usize { w.step(DT + 1e-6); } }
 fn all_finite_above_floor(w: &World) {
@@ -145,8 +145,8 @@ fn game_heads(w: &mut World, step: usize, retract_at: usize) {
     if tick >= 2 { w.set_kinematic(&[], 0); return; }
     let (travel, vel) = match tick { i32::MIN..=-1 => (0.0, 0.0), 0 => (0.0, 10.0), _ => (0.5, 10.0) };
     let (l, r) = (0.0 - travel, 1.0 + travel); // faces of the left and right head
-    let data = [1.0, l - 0.25, 0.0, 0.0, l, 1.0, 1.0, -vel, 0.0, 0.0, 3.0,
-                2.0, r, 0.0, 0.0, r + 0.25, 1.0, 1.0, vel, 0.0, 0.0, 3.0];
+    let data = [1.0, l - 0.25, 0.0, 0.0, l, 1.0, 1.0, -vel, 0.0, 0.0, 3.0, 1.0,
+                2.0, r, 0.0, 0.0, r + 0.25, 1.0, 1.0, vel, 0.0, 0.0, 3.0, 2.0];
     w.set_kinematic(&data, 2);
 }
 
@@ -186,4 +186,95 @@ fn honey_strings_between_sticky_heads_reported_at_game_rate() {
     assert!(strings > 40, "honey pulls into strings: {}", strings);
     let bb = w.bodies[0].bb;
     assert!(bb[0] < -0.6 && bb[3] > 1.6, "honey went with both heads: {:.2}..{:.2}", bb[0], bb[3]);
+}
+
+/// A piston the way the mod presents it to the core: the head is followed at half a block per
+/// tick, the base is a low slab while the head is out or moving and a full block otherwise.
+struct Piston { id: i32, base: f32, dir: f32, sticky: bool, shown: f32, target: f32 }
+
+impl Piston {
+    /// Advances one game tick; appends this tick's moving boxes and static boxes.
+    fn tick(&mut self, kin: &mut Vec<f32>, st: &mut Vec<f32>) {
+        let next = self.shown + (self.target - self.shown).clamp(-0.5, 0.5);
+        let (b0, b1) = (self.base, self.base + 1.0);
+        if self.shown < 1.0 || next < 1.0 {
+            let v = -(next - self.shown) * 20.0 * self.dir;
+            let off = -self.dir * self.shown;
+            let head = self.base + self.dir; // cell the extended head occupies
+            let (plate, arm) = if self.dir > 0.0 { ((head + 0.75, head + 1.0), (head - 0.25, head + 0.75)) } else { ((head, head + 0.25), (head + 0.25, head + 1.25)) };
+            let stick = if self.sticky { 3.0 } else { 0.6 };
+            kin.extend_from_slice(&[self.id as f32, plate.0 + off, 0.0, 0.0, plate.1 + off, 1.0, 1.0, v, 0.0, 0.0, stick, if self.dir > 0.0 { 1.0 } else { 2.0 }]);
+            kin.extend_from_slice(&[(self.id + 1) as f32, arm.0 + off, 0.375, 0.375, arm.1 + off, 0.625, 0.625, v, 0.0, 0.0, stick, 0.0]);
+            // the base without its head: three quarters of a block
+            if self.dir > 0.0 { st.extend_from_slice(&[b0, 0.0, 0.0, b0 + 0.75, 1.0, 1.0, 2.0]); } else { st.extend_from_slice(&[b0 + 0.25, 0.0, 0.0, b1, 1.0, 1.0, 2.0]); }
+        } else {
+            st.extend_from_slice(&[b0, 0.0, 0.0, b1, 1.0, 1.0, 2.0]);
+        }
+        self.shown = next;
+    }
+}
+
+/// `steps_per_tick` is 3 when the simulation keeps up with the game; fewer when the machine is too slow.
+fn run_pistons(w: &mut World, pistons: &mut [Piston], ticks: usize, steps_per_tick: usize, mut script: impl FnMut(usize, &mut [Piston])) {
+    let fl = floor();
+    for tick in 0..ticks {
+        script(tick, pistons);
+        let (mut kin, mut st) = (Vec::new(), fl.clone());
+        for p in pistons.iter_mut() { p.tick(&mut kin, &mut st); }
+        w.set_static(&st, st.len() / 7);
+        w.set_kinematic(&kin, kin.len() / KIN_FLOATS);
+        for _ in 0..steps_per_tick { w.step(DT + 1e-6); }
+    }
+}
+
+/// Particles sitting inside the given box (shrunk a little, so resting against it does not count).
+fn inside(w: &World, min: [f32; 3], max: [f32; 3]) -> usize {
+    (0..w.maxp).filter(|&i| w.alive[i] != 0 && (0..3).all(|a| w.p[i * 3 + a] > min[a] + 0.03 && w.p[i * 3 + a] < max[a] - 0.03)).count()
+}
+
+#[test]
+fn rapid_pistons_do_not_swallow_goo() {
+    // also with a simulation that cannot keep up (one or two steps per game tick instead of three):
+    // the head then moves in jumps as far as the goo is concerned, and it must still stay in front of it
+    for steps_per_tick in [3usize, 2, 1] {
+        for (mat, sticky) in [(HONEY, true), (HONEY, false), (SLIME, true), (SLIME, false)] {
+            let mut w = World::new(12, 4);
+            w.add_body(mat, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+            let mut pistons = [Piston { id: 1, base: -2.0, dir: 1.0, sticky, shown: 1.0, target: 1.0 }];
+            // jerk it: out and back every few ticks, at uneven intervals, for five seconds; end with the head out
+            run_pistons(&mut w, &mut pistons, 100, steps_per_tick, |tick, p| { if tick % 7 == 0 || tick % 11 == 3 { p[0].target = 1.0 - p[0].target; } });
+            run_pistons(&mut w, &mut pistons, 12, steps_per_tick, |_, p| p[0].target = 0.0);
+            let in_base = inside(&w, [-2.0, 0.0, 0.0], [-1.25, 1.0, 1.0]);
+            let behind_plate = inside(&w, [-1.25, 0.0, 0.0], [-0.25, 1.0, 1.0]);
+            let below = inside(&w, [-9.0, -1.0, -9.0], [9.0, 0.0, 9.0]);
+            if std::env::var("DIAG").is_ok() { println!("steps {} mat {} sticky {}: in base {}, behind the plate {}, under the floor {}", steps_per_tick, mat, sticky, in_base, behind_plate, below); }
+            // a few particles (of 1728) may wrap round the edge of the plate; a little more honey may creep round its sides
+            let allowed = if mat == SLIME { 12 } else { 60 };
+            assert!(in_base == 0 && below == 0 && behind_plate <= allowed,
+                "{} steps per tick, material {}, sticky {}: {} particles inside the base, {} behind the head plate, {} under the floor", steps_per_tick, mat, sticky, in_base, behind_plate, below);
+        }
+    }
+}
+
+#[test]
+fn removed_goo_shrinks_away_completely() {
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    w.add_body(HONEY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    w.add_body(SLIME, 3.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    for _ in 0..300 { w.step(DT + 1e-6); }
+    let mut out = Vec::new();
+    let full = mesh::build(&w, HONEY, &mut out);
+    w.remove_body(0, true); w.remove_body(1, true);
+    let mut widths = Vec::new();
+    for step in 0..40 {
+        w.step(DT + 1e-6);
+        if step == 12 { out.clear(); let half = mesh::build(&w, HONEY, &mut out); assert!(half > 0 && half < full, "shrinking: {} of {} quads", half, full); }
+        if w.bodies[0].state != 0 { widths.push(w.bodies[0].bb[3] - w.bodies[0].bb[0]); }
+    }
+    assert!(widths.windows(2).all(|p| p[1] < p[0]), "it only ever gets smaller");
+    assert!(w.bodies[0].state == 0 && w.bodies[1].state == 0, "both are gone after {:.2} s", 40.0 * DT);
+    assert_eq!(w.awake_count(), 0);
+    out.clear();
+    assert_eq!(mesh::build(&w, HONEY, &mut out) + mesh::build(&w, SLIME, &mut out), 0);
 }

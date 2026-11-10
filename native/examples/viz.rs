@@ -44,9 +44,9 @@ fn snap(sh: &mut Sheet, idx: usize, w: &World, statics: &[f32], cx: f32) {
 fn floor(x0: i32, x1: i32) -> Vec<f32> { let mut v = Vec::new(); for x in x0..x1 { for z in -3..4 { v.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } } v }
 
 /// A piston head plate whose front face is at `face` (moving along x), `dir` = +1 faces right.
-fn plate(id: i32, face: f32, dir: f32, vel: f32, stick: f32) -> [f32; 11] {
+fn plate(id: i32, face: f32, dir: f32, vel: f32, stick: f32) -> [f32; 12] {
     let (a, b) = if dir > 0.0 { (face - 0.25, face) } else { (face, face + 0.25) };
-    [id as f32, a, 0.0, 0.0, b, 1.0, 1.0, vel, 0.0, 0.0, stick]
+    [id as f32, a, 0.0, 0.0, b, 1.0, 1.0, vel, 0.0, 0.0, stick, if dir > 0.0 { 1.0 } else { 2.0 }]
 }
 
 fn main() {

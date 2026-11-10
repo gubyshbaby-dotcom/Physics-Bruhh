@@ -12,7 +12,7 @@ public interface GooSim extends AutoCloseable {
     int HONEY = 0;
     int SLIME = 1;
     int STATIC_FLOATS = 7;      // min xyz, max xyz, stick
-    int KINEMATIC_FLOATS = 11;  // id, min xyz, max xyz, velocity xyz, stick
+    int KINEMATIC_FLOATS = 12;  // id (> 0 piston part or moving block, < 0 creature), min xyz, max xyz, velocity xyz, stick, front (0 none, 1..6 = +x -x +y -y +z -z)
     int FLOATS_PER_QUAD = 24;   // 4 * (position xyz + normal xyz)
     int BODY_FLOATS = 8;        // state, awake, bounds min xyz, bounds max xyz
 
