@@ -73,11 +73,11 @@ fn main() {
             pistons.push((1, 1.0, 3.0, vec![(0.0, -1.0), (1.0, -1.0), (1.1, 0.0), (2.5, 0.0), (2.6, -1.0), (99.0, -1.0)]));
             times = vec![0.9, 1.05, 1.12, 1.3, 1.8, 2.45, 2.55, 2.62, 2.8, 4.0]; cx = 0.0;
         }
-        "pull" | "pull_slime" => {
+        "pull" | "pull_slime" | "game_pull" | "game_pull_slime" => {
             // two extended sticky pistons facing each other with goo between; both retract at 4 s
             statics.extend_from_slice(&[-2.0, 0.0, 0.0, -1.0, 1.0, 1.0, 1.0]);
             statics.extend_from_slice(&[2.0, 0.0, 0.0, 3.0, 1.0, 1.0, 1.0]);
-            w.add_body(if scen == "pull" { HONEY } else { SLIME }, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+            w.add_body(if scen.ends_with("slime") { SLIME } else { HONEY }, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
             pistons.push((1, 1.0, 3.0, vec![(0.0, 0.0), (4.0, 0.0), (4.1, -1.0), (99.0, -1.0)]));
             pistons.push((2, -1.0, 3.0, vec![(0.0, 1.0), (4.0, 1.0), (4.1, 2.0), (99.0, 2.0)]));
             times = vec![3.9, 4.03, 4.07, 4.12, 4.2, 4.4, 4.8, 5.5, 7.0, 10.0];
@@ -85,6 +85,7 @@ fn main() {
         _ => { eprintln!("unknown scenario"); return; }
     }
     w.set_static(&statics, statics.len() / 7);
+    let game = scen.starts_with("game_");
     let mut sh = Sheet::new(2);
     let (mut ti, mut t, mut ms_sum, mut ms_max, mut steps) = (0usize, 0.0f32, 0.0f64, 0.0f64, 0u32);
     let total = times.last().copied().unwrap() + 0.01;
@@ -98,7 +99,7 @@ fn main() {
             println!("t={:.2} awake={} pairs={} quads={} mesh={:.2}ms bb=[{:.2},{:.2},{:.2}]..[{:.2},{:.2},{:.2}] anchors st={} kin={} springs={} shock={:.2}", t, w.awake_count(), w.last_pairs, quads, t0.elapsed().as_secs_f64() * 1e3, bd.bb[0], bd.bb[1], bd.bb[2], bd.bb[3], bd.bb[4], bd.bb[5], lc.0, lc.1, lc.2, bd.shock);
             ti += 1;
         }
-        if !pistons.is_empty() {
+        if !pistons.is_empty() && !game {
             let mut data: Vec<f32> = Vec::new();
             for (id, dir, stick, keys) in &pistons {
                 let k = keys.windows(2).find(|k| t >= k[0].0 && t < k[1].0).unwrap();
@@ -107,6 +108,19 @@ fn main() {
                 data.extend_from_slice(&plate(*id, face, *dir, vel, *stick));
             }
             w.set_kinematic(&data, pistons.len());
+        }
+        // the way the game reports pistons: once per tick (3 steps), position at the start of the tick plus
+        // the velocity that carries it through the tick; a retracted head is gone one tick after it arrives
+        if !pistons.is_empty() && game && steps % 3 == 0 {
+            let face_at = |keys: &Vec<(f32, f32)>, t: f32| { let k = keys.windows(2).find(|k| t >= k[0].0 - 1e-4 && t < k[1].0 - 1e-4).unwrap(); k[0].1 + (k[1].1 - k[0].1) * ((t - k[0].0) / (k[1].0 - k[0].0)).clamp(0.0, 1.0) };
+            let mut data: Vec<f32> = Vec::new(); let mut cnt = 0;
+            for (id, dir, stick, keys) in &pistons {
+                let arrived = keys[keys.len() - 2].0;
+                if t > arrived + 0.05 - 1e-4 { continue; }
+                let (f0, f1) = (face_at(keys, t), face_at(keys, t + 0.05));
+                data.extend_from_slice(&plate(*id, f0, *dir, (f1 - f0) / 0.05, *stick)); cnt += 1;
+            }
+            w.set_kinematic(&data, cnt);
         }
         let t0 = std::time::Instant::now();
         w.step(DT + 1e-6);

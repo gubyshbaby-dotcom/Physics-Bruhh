@@ -42,6 +42,9 @@ public class PhysicsBruhh {
     private static GameRule<Boolean> physicalGoo;
     /** {@code /gamerule physicsbruhh:physical_goo false} turns honey and slime back into ordinary blocks. */
     public static final Supplier<GameRule<Boolean>> PHYSICAL_GOO = () -> physicalGoo;
+    private static GameRule<Boolean> clearGoo;
+    /** {@code /gamerule physicsbruhh:clear_goo true} draws honey and slime as clear liquid instead of with the blocks' textures. */
+    public static final Supplier<GameRule<Boolean>> CLEAR_GOO = () -> clearGoo;
 
     public PhysicsBruhh(IEventBus modBus, ModContainer container) {
         ENTITIES.register(modBus);
@@ -49,6 +52,7 @@ public class PhysicsBruhh {
         modBus.addListener((RegisterEvent e) -> {
             if (e.getRegistryKey().equals(Registries.GAME_RULE)) {
                 physicalGoo = GameRules.registerBoolean(MODID + ":physical_goo", RULE_CATEGORY, true);
+                clearGoo = GameRules.registerBoolean(MODID + ":clear_goo", RULE_CATEGORY, false);
             }
         });
         modBus.addListener((RegisterGameRuleCategoryEvent e) -> e.register(RULE_CATEGORY));

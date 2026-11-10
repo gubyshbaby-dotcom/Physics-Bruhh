@@ -8,7 +8,10 @@
 
 use crate::sim::World;
 
-pub const FLOATS_PER_QUAD: usize = 24; // 4 vertices * (position xyz + normal xyz)
+/// 4 vertices * (position xyz + normal xyz). The normal's length is 1 + the depth of goo behind
+/// the vertex in blocks (0 for threads), so the renderer can make thick goo darker than a thin film.
+pub const FLOATS_PER_QUAD: usize = 24;
+const DEPTH_STEPS: usize = 16;
 
 struct Grid { org: [f32; 3], dim: [usize; 3], c: f32 }
 
@@ -172,7 +175,18 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
         let gz = (f[4] + f[5] + f[6] + f[7]) - (f[0] + f[1] + f[2] + f[3]);
         let gl = (gx * gx + gy * gy + gz * gz).sqrt().max(1e-6);
         vid[x + cx * (y + cy * z)] = (verts.len() / 6) as u32;
-        verts.extend_from_slice(&[g.org[0] + (x as f32 + px * inv) * c, g.org[1] + (y as f32 + py * inv) * c, g.org[2] + (z as f32 + pz * inv) * c, gx / gl, gy / gl, gz / gl]);
+        let (ux, uy, uz) = (gx / gl, gy / gl, gz / gl);
+        let (vx, vy, vz) = (x as f32 + px * inv, y as f32 + py * inv, z as f32 + pz * inv);
+        // how much goo lies behind this point, measured straight inwards: the renderer tints by it
+        let mut depth = 0.0f32;
+        for st in 1..=DEPTH_STEPS {
+            let (sx, sy, sz) = ((vx - ux * st as f32 + 0.5).floor(), (vy - uy * st as f32 + 0.5).floor(), (vz - uz * st as f32 + 0.5).floor());
+            if sx < 0.0 || sy < 0.0 || sz < 0.0 || sx >= nx as f32 || sy >= ny as f32 || sz >= nz as f32 { break; }
+            if phi[sx as usize + nx * (sy as usize + ny * sz as usize)] >= 0.0 { break; }
+            depth = st as f32 * c;
+        }
+        let nl = 1.0 + depth;
+        verts.extend_from_slice(&[g.org[0] + vx * c, g.org[1] + vy * c, g.org[2] + vz * c, ux * nl, uy * nl, uz * nl]);
     } } }
     // one quad per sign-changing grid edge
     let mut quad = |a: u32, b: u32, c2: u32, d: u32, flip: bool, out: &mut Vec<f32>| {

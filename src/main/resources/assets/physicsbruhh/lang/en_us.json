@@ -5,5 +5,9 @@
   "gamerule.physicsbruhh.physical_goo": "Honey and slime behave like goo",
   "gamerule.physicsbruhh.physical_goo.description": "Placed or piston-moved honey and slime blocks melt, wobble and stretch instead of staying rigid blocks. Turn off to keep vanilla contraptions working.",
   "gamerule.physicsbruhh:physical_goo": "Honey and slime behave like goo",
-  "gamerule.physicsbruhh:physical_goo.description": "Placed or piston-moved honey and slime blocks melt, wobble and stretch instead of staying rigid blocks. Turn off to keep vanilla contraptions working."
+  "gamerule.physicsbruhh:physical_goo.description": "Placed or piston-moved honey and slime blocks melt, wobble and stretch instead of staying rigid blocks. Turn off to keep vanilla contraptions working.",
+  "gamerule.physicsbruhh.clear_goo": "Honey and slime look like clear liquid",
+  "gamerule.physicsbruhh.clear_goo.description": "Goo is drawn as translucent liquid (amber honey, green slime) instead of with the blocks' textures.",
+  "gamerule.physicsbruhh:clear_goo": "Honey and slime look like clear liquid",
+  "gamerule.physicsbruhh:clear_goo.description": "Goo is drawn as translucent liquid (amber honey, green slime) instead of with the blocks' textures."
 }

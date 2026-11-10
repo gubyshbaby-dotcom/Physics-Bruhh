@@ -481,8 +481,11 @@ impl World {
 
         // ---- kinematic colliders move ----
         for b in self.kin.iter_mut() {
-            b.pmin = b.min; b.pmax = b.max; b.t += dt;
-            if b.t > 0.3 { b.vel = [0.0; 3]; }
+            // right after an update the sweep starts where the box really was before it
+            if b.t > 0.0 { b.pmin = b.min; b.pmax = b.max; }
+            b.t += dt;
+            // the game reports 20 times a second: carry a box for one game tick, then wait for news
+            if b.t > 0.05 + 0.5 * dt { b.vel = [0.0; 3]; }
             for a in 0..3 { b.min[a] += b.vel[a] * dt; b.max[a] += b.vel[a] * dt; }
         }
 

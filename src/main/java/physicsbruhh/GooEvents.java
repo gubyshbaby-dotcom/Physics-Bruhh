@@ -33,6 +33,7 @@ public final class GooEvents {
         GooEntity goo = new GooEntity(state.is(Blocks.SLIME_BLOCK) ? PhysicsBruhh.SLIME_GOO.get() : PhysicsBruhh.HONEY_GOO.get(), level);
         goo.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
         goo.setLean(leanX, leanZ);
+        goo.applyLook(level);
         level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
         level.addFreshEntity(goo);
         return true;

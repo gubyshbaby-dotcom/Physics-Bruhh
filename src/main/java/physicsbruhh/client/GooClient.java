@@ -1,5 +1,6 @@
 package physicsbruhh.client;
 
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.nio.ByteBuffer;
@@ -61,6 +62,9 @@ public final class GooClient {
     private static final ConcurrentHashMap<Integer, Integer> SLOT_OF_ENTITY = new ConcurrentHashMap<>();
     private static final List<GooEntity> PENDING = new ArrayList<>();
     private static final IntOpenHashSet KNOWN = new IntOpenHashSet();
+    private static final Int2ObjectOpenHashMap<GooEntity> LIVE = new Int2ObjectOpenHashMap<>();
+    /** Goo is drawn as clear liquid (the server's {@code clear_goo} game rule, read off the goo markers). */
+    static volatile boolean clearLook;
 
     /**
      * Test mode ({@code -Dphysicsbruhh.lockstep=true}): exactly three simulation steps per client
@@ -75,11 +79,13 @@ public final class GooClient {
 
     static void join(GooEntity goo) {
         PENDING.add(goo);
+        LIVE.put(goo.getId(), goo);
     }
 
     static void leave(GooEntity goo) {
         PENDING.remove(goo);
         final int id = goo.getId();
+        LIVE.remove(id);
         if (KNOWN.remove(id)) {
             COMMANDS.add(() -> { Integer slot = SLOT_OF_ENTITY.remove(id); GooSim s = sim; if (slot != null && s != null) s.removeBody(slot, true); });
         }
@@ -94,7 +100,8 @@ public final class GooClient {
         sim = null;
         if (s != null) s.close();
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
-        bodyInfo = new float[0]; KNOWN.clear();
+        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false;
+        java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
     }
 
@@ -121,6 +128,9 @@ public final class GooClient {
         ClientLevel level = mc.level;
         if (level == null) { if (sim != null) reset(); return; }
         paused = mc.isPaused();
+        boolean clear = false;
+        for (GooEntity goo : LIVE.values()) { if (goo.clear()) { clear = true; break; } }
+        clearLook = clear;
         if (!PENDING.isEmpty()) {
             if (sim == null) start();
             for (GooEntity goo : PENDING) {
@@ -151,7 +161,15 @@ public final class GooClient {
         }
     }
 
-    /** Collects block collision boxes (and moving piston parts) around every awake body. */
+    private static final long[] SLEEP_HASH = new long[MAX_BODIES];
+    private static final boolean[] SLEEP_HASH_VALID = new boolean[MAX_BODIES];
+    private static final int[] WAKING = new int[MAX_BODIES];
+
+    /**
+     * Collects block collision boxes and piston parts around every awake body. Sleeping bodies are
+     * only watched: if any block around one changes it is woken, and piston heads next to it stay
+     * known so goo stuck to them is still stuck when it wakes.
+     */
     private static Colliders scan(ClientLevel level) {
         float[] info = bodyInfo;
         BlockPos o = origin;
@@ -159,22 +177,40 @@ public final class GooClient {
         float[] kin = new float[MAX_KINEMATIC * GooSim.KINEMATIC_FLOATS];
         int ns = 0, nk = 0;
         boolean any = false;
-        LongOpenHashSet seen = new LongOpenHashSet();
+        LongOpenHashSet seen = new LongOpenHashSet(), seenParts = new LongOpenHashSet();
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        for (int b = 0; b + 8 <= info.length; b += 8) {
-            if (info[b] == 0.0F || info[b + 1] == 0.0F) continue; // free or asleep
+        for (int b = 0; b + 8 <= info.length && b / 8 < MAX_BODIES; b += 8) {
+            final int slot = b / 8;
+            if (info[b] == 0.0F) { SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0; continue; }
             int x0 = (int) Math.floor(info[b + 2] - 1.0F) + o.getX(), y0 = (int) Math.floor(info[b + 3] - 1.0F) + o.getY(), z0 = (int) Math.floor(info[b + 4] - 1.0F) + o.getZ();
             int x1 = (int) Math.floor(info[b + 5] + 1.0F) + o.getX(), y1 = (int) Math.floor(info[b + 6] + 1.0F) + o.getY(), z1 = (int) Math.floor(info[b + 7] + 1.0F) + o.getZ();
             if (x1 - x0 > 24 || y1 - y0 > 24 || z1 - z0 > 24) continue; // something flew off; ignore it
+            if (info[b + 1] != 0.0F) {
+                SLEEP_HASH_VALID[slot] = false; WAKING[slot] = 0;
+            } else {
+                long hash = 1L;
+                for (int y = y0; y <= y1; y++) for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) {
+                    pos.set(x, y, z);
+                    BlockState state = level.getBlockState(pos);
+                    hash = hash * 31L + System.identityHashCode(state);
+                    if ((state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) && seenParts.add(pos.asLong())) nk = addPistonPart(level, state, pos, o, kin, nk);
+                }
+                boolean changed = SLEEP_HASH_VALID[slot] && hash != SLEEP_HASH[slot];
+                SLEEP_HASH[slot] = hash; SLEEP_HASH_VALID[slot] = true;
+                if (changed) {
+                    WAKING[slot] = 10; // scanned as awake until the simulation thread has caught up
+                    COMMANDS.add(() -> { GooSim g = sim; if (g != null) g.wake(slot); });
+                }
+                if (WAKING[slot] > 0) WAKING[slot]--; else continue;
+            }
             any = true;
             for (int y = y0; y <= y1; y++) for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) {
                 pos.set(x, y, z);
                 if (!seen.add(pos.asLong())) continue;
                 BlockState state = level.getBlockState(pos);
                 if (state.isAir()) continue;
-                if (state.is(Blocks.MOVING_PISTON)) {
-                    BlockEntity be = level.getBlockEntity(pos);
-                    if (be instanceof PistonMovingBlockEntity piston && nk < MAX_KINEMATIC) nk = addMoving(level, piston, pos, o, kin, nk);
+                if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) {
+                    if (seenParts.add(pos.asLong())) nk = addPistonPart(level, state, pos, o, kin, nk);
                     continue;
                 }
                 VoxelShape shape = state.getCollisionShape(level, pos);
@@ -196,39 +232,57 @@ public final class GooClient {
 
     /** How strongly goo clings to a surface (1 = ordinary block). */
     private static float stickiness(BlockState state) {
-        if (state.is(Blocks.PISTON_HEAD)) return state.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY ? 3.0F : 0.6F;
         if (state.is(Blocks.STICKY_PISTON) || state.is(Blocks.HONEY_BLOCK) || state.is(Blocks.SLIME_BLOCK)) return 2.0F;
         return 1.0F;
     }
 
+    private static BlockState headState(Direction facing, boolean sticky) {
+        return Blocks.PISTON_HEAD.defaultBlockState().setValue(PistonHeadBlock.FACING, facing).setValue(PistonHeadBlock.TYPE, sticky ? PistonType.STICKY : PistonType.DEFAULT);
+    }
+
     /**
-     * A block in transit: a piston head sliding out or back, or a block being pushed. Reported
-     * with its velocity (half a block per tick) so the simulation can carry it between ticks.
+     * A piston head (at rest or sliding) or a block in transit. These are reported as moving boxes
+     * with stable ids: a head keeps the same id while it extends, rests and retracts, so goo that
+     * stuck to it is carried along instead of being left behind when the head starts to move.
+     * The position is where the part was at the start of this tick, the velocity carries it to where
+     * it is at the end, which is what the game draws between the two.
      */
-    private static int addMoving(ClientLevel level, PistonMovingBlockEntity piston, BlockPos pos, BlockPos o, float[] kin, int nk) {
-        BlockState moved = piston.getMovedState();
-        BlockState shapeState = moved;
-        float stick = stickiness(moved);
-        if (piston.isSourcePiston()) {
-            boolean sticky = moved.is(Blocks.STICKY_PISTON);
-            shapeState = Blocks.PISTON_HEAD.defaultBlockState()
-                    .setValue(PistonHeadBlock.FACING, piston.getDirection())
-                    .setValue(PistonHeadBlock.TYPE, sticky ? PistonType.STICKY : PistonType.DEFAULT);
+    private static int addPistonPart(ClientLevel level, BlockState state, BlockPos pos, BlockPos o, float[] kin, int nk) {
+        BlockState shapeState;
+        BlockPos idPos = pos;
+        float stick;
+        float ox = 0.0F, oy = 0.0F, oz = 0.0F, vx = 0.0F, vy = 0.0F, vz = 0.0F;
+        if (state.is(Blocks.PISTON_HEAD)) {
+            Direction facing = state.getValue(PistonHeadBlock.FACING);
+            boolean sticky = state.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY;
+            shapeState = headState(facing, sticky);
+            idPos = pos.relative(facing.getOpposite()); // heads are named after their base
             stick = sticky ? 3.0F : 0.6F;
+        } else {
+            if (!(level.getBlockEntity(pos) instanceof PistonMovingBlockEntity piston)) return nk;
+            BlockState moved = piston.getMovedState();
+            shapeState = moved;
+            stick = stickiness(moved);
+            if (piston.isSourcePiston()) {
+                boolean sticky = moved.is(Blocks.STICKY_PISTON) || (moved.is(Blocks.PISTON_HEAD) && moved.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY);
+                shapeState = headState(piston.getDirection(), sticky);
+                stick = sticky ? 3.0F : 0.6F;
+                // while extending the moving block sits where the head will end up; while retracting, on the base
+                if (piston.isExtending()) idPos = pos.relative(piston.getDirection().getOpposite());
+            }
+            ox = piston.getXOff(0.0F); oy = piston.getYOff(0.0F); oz = piston.getZOff(0.0F);
+            vx = (piston.getXOff(1.0F) - ox) * 20.0F; vy = (piston.getYOff(1.0F) - oy) * 20.0F; vz = (piston.getZOff(1.0F) - oz) * 20.0F;
         }
         VoxelShape shape = shapeState.getCollisionShape(level, pos);
         if (shape.isEmpty()) return nk;
-        float ox = piston.getXOff(1.0F), oy = piston.getYOff(1.0F), oz = piston.getZOff(1.0F);
-        Direction dir = piston.getMovementDirection();
-        float speed = piston.getProgress(1.0F) < 1.0F ? 10.0F : 0.0F;
         int index = 0;
         for (AABB box : shape.toAabbs()) {
             if (nk >= MAX_KINEMATIC) break;
             int i = nk * GooSim.KINEMATIC_FLOATS;
-            kin[i] = (float) (((pos.asLong() * 31L + index) & 0xFFFFFFL) + 1); // stable id, exact in a float
+            kin[i] = (float) (((idPos.asLong() * 31L + index) & 0xFFFFFFL) + 1); // stable id, exact in a float
             kin[i + 1] = (float) (box.minX + ox + pos.getX() - o.getX()); kin[i + 2] = (float) (box.minY + oy + pos.getY() - o.getY()); kin[i + 3] = (float) (box.minZ + oz + pos.getZ() - o.getZ());
             kin[i + 4] = (float) (box.maxX + ox + pos.getX() - o.getX()); kin[i + 5] = (float) (box.maxY + oy + pos.getY() - o.getY()); kin[i + 6] = (float) (box.maxZ + oz + pos.getZ() - o.getZ());
-            kin[i + 7] = dir.getStepX() * speed; kin[i + 8] = dir.getStepY() * speed; kin[i + 9] = dir.getStepZ() * speed;
+            kin[i + 7] = vx; kin[i + 8] = vy; kin[i + 9] = vz;
             kin[i + 10] = stick;
             nk++; index++;
         }
@@ -248,6 +302,19 @@ public final class GooClient {
     }
 
     static boolean healthy() { return sim != null && running; }
+
+    /** Widest extent along x of any slime body, in blocks (smoke test: has the band between two pistons held?). */
+    static float widestSlime() {
+        float[] info = bodyInfo;
+        float widest = 0.0F;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != GooSim.SLIME) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] == 0.0F) continue;
+            widest = Math.max(widest, info[slot * 8 + 5] - info[slot * 8 + 2]);
+        }
+        return widest;
+    }
 
     static int quadCount(int material) { synchronized (MESH_LOCK) { return meshQuads[material]; } }
 

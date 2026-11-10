@@ -103,8 +103,11 @@ fn mesh_of_a_fresh_block_is_about_one_block() {
     assert!(quads > 300 && quads < 4000, "quads = {}", quads);
     assert_eq!(out.len(), quads * mesh::FLOATS_PER_QUAD);
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    let mut deep = 0.0f32;
     for v in out.chunks(6) { for c in 0..3 { assert!(v[c].is_finite()); lo[c] = lo[c].min(v[c]); hi[c] = hi[c].max(v[c]); }
-        let nl = (v[3] * v[3] + v[4] * v[4] + v[5] * v[5]).sqrt(); assert!((nl - 1.0).abs() < 1e-3); }
+        // normal length = 1 + depth of goo behind the vertex (measured up to 16 grid cells, about 1.3 blocks)
+        let nl = (v[3] * v[3] + v[4] * v[4] + v[5] * v[5]).sqrt(); assert!(nl > 0.999 && nl < 2.35, "normal length {}", nl); deep = deep.max(nl - 1.0); }
+    assert!(deep > 0.6, "deepest point of a full block reads as {} blocks", deep);
     for c in 0..3 { let size = hi[c] - lo[c]; assert!(size > 0.9 && size < 1.1, "axis {} size {}", c, size); }
     // quads must wind counter-clockwise seen from outside, so the game's back-face culling keeps them
     let (mut good, mut bad) = (0, 0);
@@ -131,4 +134,56 @@ fn old_honey_spawns_as_a_puddle_and_bodies_are_recycled() {
     assert!(third == 0 || third == 1, "a full world must recycle a slot");
     run(&mut w, 1.0);
     all_finite_above_floor(&w);
+}
+
+/// The way the game reports a piston head: once per game tick (three steps), where it was at the
+/// start of the tick plus the velocity that carries it through the tick. At rest the head is still
+/// reported (not moving); one tick after it has retracted it is gone.
+fn game_heads(w: &mut World, step: usize, retract_at: usize) {
+    if step % 3 != 0 { return; }
+    let tick = step as i32 / 3 - retract_at as i32 / 3;
+    if tick > 2 { w.set_kinematic(&[], 0); return; }
+    let (travel, vel) = match tick { i32::MIN..=-1 => (0.0, 0.0), 0 => (0.0, 10.0), 1 => (0.5, 10.0), _ => (1.0, 0.0) };
+    let (l, r) = (0.0 - travel, 1.0 + travel); // faces of the left and right head
+    let data = [1.0, l - 0.25, 0.0, 0.0, l, 1.0, 1.0, -vel, 0.0, 0.0, 3.0,
+                2.0, r, 0.0, 0.0, r + 0.25, 1.0, 1.0, vel, 0.0, 0.0, 3.0];
+    w.set_kinematic(&data, 2);
+}
+
+#[test]
+fn slime_stays_stretched_between_sticky_heads_reported_at_game_rate() {
+    let mut w = World::new(12, 4);
+    let mut f = floor(); f.extend_from_slice(&[-2.0, 0.0, 0.0, -1.0, 1.0, 1.0, 1.0]); f.extend_from_slice(&[2.0, 0.0, 0.0, 3.0, 1.0, 1.0, 1.0]);
+    w.set_static(&f, f.len() / 7);
+    w.add_body(SLIME, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    let retract_at = 240;
+    for step in 0..retract_at { game_heads(&mut w, step, retract_at); w.step(DT + 1e-6); }
+    let (_, on_heads, _) = w.link_counts();
+    assert!(on_heads > 60, "slime grips the resting heads: {} particles", on_heads);
+    let mut max_awake_width = 0.0f32;
+    for step in retract_at..retract_at + 240 {
+        game_heads(&mut w, step, retract_at); w.step(DT + 1e-6);
+        max_awake_width = max_awake_width.max(w.bodies[0].bb[3] - w.bodies[0].bb[0]);
+    }
+    let bb = w.bodies[0].bb;
+    assert!(bb[3] - bb[0] > 2.5, "slime ends up spanning the gap: {:.2}..{:.2}", bb[0], bb[3]);
+    let (held, on_gone_heads, _) = w.link_counts();
+    assert_eq!(on_gone_heads, 0, "heads are gone, nothing can still be attached to them");
+    assert!(held > 100, "the band is held at both ends: {} anchors", held);
+    assert!(max_awake_width < 3.3, "nothing was flung away: {}", max_awake_width);
+}
+
+#[test]
+fn honey_strings_between_sticky_heads_reported_at_game_rate() {
+    let mut w = World::new(12, 4);
+    let mut f = floor(); f.extend_from_slice(&[-2.0, 0.0, 0.0, -1.0, 1.0, 1.0, 1.0]); f.extend_from_slice(&[2.0, 0.0, 0.0, 3.0, 1.0, 1.0, 1.0]);
+    w.set_static(&f, f.len() / 7);
+    w.add_body(HONEY, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    let retract_at = 240;
+    for step in 0..retract_at { game_heads(&mut w, step, retract_at); w.step(DT + 1e-6); }
+    let mut strings = 0usize;
+    for step in retract_at..retract_at + 30 { game_heads(&mut w, step, retract_at); w.step(DT + 1e-6); strings = strings.max(w.long_springs(3.0 * w.s).len()); }
+    assert!(strings > 40, "honey pulls into strings: {}", strings);
+    let bb = w.bodies[0].bb;
+    assert!(bb[0] < -0.6 && bb[3] > 1.6, "honey went with both heads: {:.2}..{:.2}", bb[0], bb[3]);
 }

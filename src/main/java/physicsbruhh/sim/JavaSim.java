@@ -378,9 +378,12 @@ public final class JavaSim implements GooSim {
         if (nAct == 0) return;
         // ---- kinematic colliders move ----
         for (KBox b : kin) {
+            // right after an update the sweep starts where the box really was before it
+            if (b.t > 0f) { for (int a = 0; a < 3; a++) { b.pmin[a] = b.min[a]; b.pmax[a] = b.max[a]; } }
             b.t += dt;
-            if (b.t > 0.3f) { b.vel[0] = 0f; b.vel[1] = 0f; b.vel[2] = 0f; }
-            for (int a = 0; a < 3; a++) { b.pmin[a] = b.min[a]; b.pmax[a] = b.max[a]; b.min[a] += b.vel[a] * dt; b.max[a] += b.vel[a] * dt; }
+            // the game reports 20 times a second: carry a box for one game tick, then wait for news
+            if (b.t > 0.05f + 0.5f * dt) { b.vel[0] = 0f; b.vel[1] = 0f; b.vel[2] = 0f; }
+            for (int a = 0; a < 3; a++) { b.min[a] += b.vel[a] * dt; b.max[a] += b.vel[a] * dt; }
         }
         // ---- predict ----
         final float g = gravity;
@@ -713,8 +716,19 @@ public final class JavaSim implements GooSim {
             float gl = Math.max(1e-6f, (float) Math.sqrt(gx * gx + gy * gy + gz * gz));
             vid[x + cx * (y + cy * z)] = nv / 6;
             if (nv + 6 > verts.length) verts = Arrays.copyOf(verts, verts.length * 2);
-            verts[nv++] = o0 + (x + px * inv) * c; verts[nv++] = o1 + (y + py * inv) * c; verts[nv++] = o2 + (z + pz * inv) * c;
-            verts[nv++] = gx / gl; verts[nv++] = gy / gl; verts[nv++] = gz / gl;
+            float ux = gx / gl, uy = gy / gl, uz = gz / gl;
+            float vx = x + px * inv, vy = y + py * inv, vz = z + pz * inv;
+            // how much goo lies behind this point, measured straight inwards: the renderer tints by it
+            float depth = 0f;
+            for (int st = 1; st <= 16; st++) {
+                float sx = (float) Math.floor(vx - ux * st + 0.5f), sy = (float) Math.floor(vy - uy * st + 0.5f), sz = (float) Math.floor(vz - uz * st + 0.5f);
+                if (sx < 0f || sy < 0f || sz < 0f || sx >= nx || sy >= ny || sz >= nz) break;
+                if (phi[(int) sx + nx * ((int) sy + ny * (int) sz)] >= 0f) break;
+                depth = st * c;
+            }
+            float nl = 1f + depth;
+            verts[nv++] = o0 + vx * c; verts[nv++] = o1 + vy * c; verts[nv++] = o2 + vz * c;
+            verts[nv++] = ux * nl; verts[nv++] = uy * nl; verts[nv++] = uz * nl;
         }
         for (int z = 0; z < nz; z++) for (int y = 0; y < ny; y++) for (int x = 0; x < nx; x++) {
             boolean in0 = phi[x + nx * (y + ny * z)] < 0f;

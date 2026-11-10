@@ -15,6 +15,9 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 - Punch the goo to get the block back as an item.
 - `/gamerule physicsbruhh:physical_goo false` switches the mod off (blocks behave as in vanilla again;
   goo that already exists stays until it is punched).
+- `/gamerule physicsbruhh:clear_goo true` changes the look: instead of the blocks' pixel textures,
+  honey and slime are drawn as clear liquid (amber and green) that is darker where it is thick,
+  mirrors the sky at flat angles and has a highlight. Off by default; applies to all goo at once.
 
 Slime and honey contraptions (flying machines, block conveyors) do not work while the rule is on,
 because the blocks they rely on are no longer blocks.
@@ -26,7 +29,7 @@ because the blocks they rely on are no longer blocks.
 | Simulation core | `native/` (Rust) | Position-based fluid with a spring network on top: springs that creep and tear make honey, permanent springs make slime. Collides with block boxes and moving piston parts, sticks to surfaces, builds the surface mesh. |
 | Java twin | `src/main/java/physicsbruhh/sim/JavaSim.java` | The same algorithm line for line. Used when the native library cannot be loaded. |
 | Server side | `GooEvents`, `GooEntity` | Decides when a block becomes goo (placement, piston about to move it) and keeps a small marker entity so it is saved and synced. |
-| Client side | `client/` | Runs the simulation on its own thread at 60 Hz, feeds it the blocks and pistons around the goo, draws the surface with the vanilla honey / slime textures. |
+| Client side | `client/` | Runs the simulation on its own thread at 60 Hz, feeds it the blocks and pistons around the goo, draws the surface (vanilla honey / slime textures, or the clear look). |
 
 The mod jar carries the native library for Windows x64, Linux x64 and macOS (Intel and Apple
 silicon). On anything else, or if loading fails, it falls back to the Java simulation and says so in
@@ -56,6 +59,9 @@ cargo run --release --example viz -- pull_slime out.ppm   # honey, slime, slime_
 
 ## Limits
 
+- Honey or slime that is still an ordinary block (placed by a command, or while the rule was off)
+  only turns into goo when a piston can actually move it; if vanilla says the piston is blocked,
+  nothing happens.
 - The goo is visual. It is simulated separately on every client, so two players see slightly
   different puddles, and players, mobs and items pass through it.
 - At most 24 pieces of goo are simulated around a player at once; beyond that the oldest resting

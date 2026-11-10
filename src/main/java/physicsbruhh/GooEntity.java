@@ -2,6 +2,8 @@ package physicsbruhh;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.damagesource.DamageSource;
@@ -22,6 +24,7 @@ import physicsbruhh.sim.GooSim;
  * it enters their view. Hitting it gives the original block back.
  */
 public class GooEntity extends Entity implements IEntityWithComplexSpawn {
+    private static final EntityDataAccessor<Boolean> CLEAR = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.BOOLEAN);
     private int ageTicks;
     /** Client side: age at the moment this entity was sent to us, in ticks. */
     private int spawnAgeTicks;
@@ -46,14 +49,26 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
 
     public void setLean(float x, float z) { this.leanX = x; this.leanZ = z; }
 
+    /** Drawn as clear liquid rather than with the block texture. Follows the game rule. */
+    public boolean clear() { return this.entityData.get(CLEAR); }
+
+    /** Server side: takes the look from the game rule (cheap enough to do every tick). */
+    public void applyLook(ServerLevel level) {
+        boolean want = level.getGameRules().get(PhysicsBruhh.CLEAR_GOO.get());
+        if (want != this.entityData.get(CLEAR)) this.entityData.set(CLEAR, want);
+    }
+
     @Override
-    protected void defineSynchedData(SynchedEntityData.Builder builder) {}
+    protected void defineSynchedData(SynchedEntityData.Builder builder) {
+        builder.define(CLEAR, false);
+    }
 
     @Override
     public void tick() {
         super.tick();
-        if (!this.level().isClientSide()) {
+        if (this.level() instanceof ServerLevel serverLevel) {
             ageTicks++;
+            applyLook(serverLevel);
             // keep the marker resting on something, so it stays near the goo that slid down
             if (ageTicks % 10 == 0) {
                 BlockPos below = BlockPos.containing(this.getX(), this.getY() - 0.05, this.getZ());
