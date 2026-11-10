@@ -47,6 +47,7 @@ pub struct Material {
     pub set_after: f32,      // seconds after which damping starts to grow ("setting"), 0 = never
     pub set_rate: f32,
     pub tip: f32,            // initial tipping rate of a fresh block, rad/s
+    pub sleep_v: f32,        // rms speed (blocks/s) below which a body counts as at rest
 }
 
 impl Material {
@@ -57,7 +58,7 @@ impl Material {
             dynamic_springs: true, break_strain: 4.0, spring_max_l: 0.21, shock_k: 0.42, shock_plast: 0.6, shock_decay: 1.1, shock_break: 16.0, shock_max_l: 1.7, thread_sag: 0.16,
             coh_k: 0.25, coh_lim: 0.35, xsph: 0.35,
             adh_k: 0.9, adh_creep: 9.0, adh_break: 0.30,
-            set_after: 11.0, set_rate: 0.3, tip: 2.05,
+            set_after: 5.0, set_rate: 0.5, tip: 2.05, sleep_v: 0.03,
         }
     }
     pub fn slime() -> Material {
@@ -67,7 +68,7 @@ impl Material {
             dynamic_springs: false, break_strain: 8.0, spring_max_l: 9.0, shock_k: 0.45, shock_plast: 0.0, shock_decay: 0.3, shock_break: 12.0, shock_max_l: 9.0, thread_sag: 0.03,
             coh_k: 0.15, coh_lim: 0.3, xsph: 0.25,
             adh_k: 0.9, adh_creep: 0.0, adh_break: 0.16,
-            set_after: 0.0, set_rate: 0.0, tip: 0.0,
+            set_after: 0.0, set_rate: 0.0, tip: 0.0, sleep_v: 0.015,
         }
     }
 }
@@ -92,6 +93,10 @@ pub struct Body {
     pub anchored: u32,
     pub fresh: bool,
     pub shock: f32,
+    /// Seconds left of taking it easy: set when a body appears inside other goo, so the two part gently instead of bursting.
+    pub soft: f32,
+    /// Counts the steps in which this body changed; the mesher skips puddles whose bodies all stand still.
+    pub rev: u32,
     pub bb: [f32; 6],
 }
 
@@ -130,6 +135,8 @@ pub struct World {
     pub kin: Vec<KBox>,
     pub clock: f32, acc: f32, seed: u32,
     pub last_pairs: usize,
+    pub(crate) mesh_cache: std::sync::Mutex<crate::mesh::Cache>,
+    rev: u32,
     /// Seconds spent in each phase of the step since the world was made (diagnostics).
     pub prof: [f64; 8],
 }
@@ -185,8 +192,12 @@ fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3],
 
 /// Particles (or pairs) handed to one thread at a time. Fixed, so the split never depends on the machine.
 const CHUNK: usize = 256;
+/// Steps a body has to stay at rest before it is put to sleep.
+const CALM_STEPS: u32 = 60;
 /// Seconds a removed body takes to shrink away.
 const FADE_TIME: f32 = 0.45;
+/// Seconds overlapping goo is given to move apart gently after a block appears inside it.
+const SOFT_TIME: f32 = 0.9;
 
 /// The core's own worker threads: half the machine's cores (the game needs the rest), six at most.
 /// `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
@@ -306,7 +317,7 @@ impl World {
             bodies: vec![Body::default(); slots],
             st: Vec::new(), st_org: [0; 3], st_dim: [0; 3], st_start: vec![0], st_items: Vec::new(),
             kin: Vec::new(),
-            clock: 0.0, acc: 0.0, seed: 0x9E3779B9, last_pairs: 0, prof: [0.0; 8],
+            clock: 0.0, acc: 0.0, seed: 0x9E3779B9, last_pairs: 0, prof: [0.0; 8], mesh_cache: Default::default(), rev: 1,
         }
     }
 
@@ -371,8 +382,17 @@ impl World {
             self.v[o] = vx; self.v[o + 1] = vy; self.v[o + 2] = vz;
             self.alive[i] = 1; self.scale[i] = 1.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.anc_cool[i] = 0.0;
         } } }
+        // goo that is already where the new block appears: both take it easy for a moment
+        let mut crowded = false;
+        for (b, bd) in self.bodies.iter_mut().enumerate() {
+            if b == slot || bd.state != 1 { continue; }
+            if bd.bb[0] < x + 1.0 && bd.bb[3] > x && bd.bb[1] < y + 1.0 && bd.bb[4] > y && bd.bb[2] < z + 1.0 && bd.bb[5] > z {
+                bd.soft = SOFT_TIME; bd.awake = true; bd.calm = 0; crowded = true;
+            }
+        }
         self.bodies[slot] = Body {
             state: 1, mat, awake: true, age: age.max(0.0), born: self.clock, fade: 1.0, fresh: !puddle, count: nb as u32,
+            soft: if crowded { SOFT_TIME } else { 0.0 }, rev: { self.rev = self.rev.wrapping_add(1); self.rev },
             bb: [x - 0.5, y - 0.2, z - 0.5, x + 1.5, y + 1.3, z + 1.5], ..Body::default()
         };
         slot as i32
@@ -401,6 +421,19 @@ impl World {
                 let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
                 if d > min_len && (d > 2.9 * self.s || d > 1.3 * self.spr_l[i * MAX_SPR + k]) { v.push((a, b)); } } }
         v
+    }
+
+    /// How many particles of each material (honey, slime) lie inside the box: "is this creature standing in goo".
+    pub fn probe(&self, min: [f32; 3], max: [f32; 3]) -> (u32, u32) {
+        let mut n = [0u32; 2];
+        for b in 0..self.slots {
+            let bd = &self.bodies[b];
+            if bd.state != 1 || (0..3).any(|a| bd.bb[a] > max[a] || bd.bb[a + 3] < min[a]) { continue; }
+            for i in b * self.nb..(b + 1) * self.nb {
+                if self.alive[i] != 0 && (0..3).all(|a| self.p[i * 3 + a] >= min[a] && self.p[i * 3 + a] <= max[a]) { n[bd.mat as usize & 1] += 1; }
+            }
+        }
+        (n[0], n[1])
     }
 
     pub fn awake_count(&self) -> u32 { self.bodies.iter().filter(|b| b.state != 0 && b.awake).count() as u32 }
@@ -517,6 +550,8 @@ impl World {
         self.act.clear();
         for b in 0..slots {
             if self.bodies[b].state == 0 || !self.bodies[b].awake { continue; }
+            self.rev = self.rev.wrapping_add(1);
+            self.bodies[b].rev = self.rev;
             if self.bodies[b].state == 2 {
                 // being removed: no physics any more, it just shrinks into the middle of its base and is gone
                 let bd = &mut self.bodies[b];
@@ -549,6 +584,7 @@ impl World {
             bd.brk = m.break_strain + (m.shock_break - m.break_strain).max(0.0) * sh;
             bd.max_l = m.spring_max_l + (m.shock_max_l - m.spring_max_l).max(0.0) * sh;
             bd.shock = if sh < 0.01 { 0.0 } else { sh * (-dt / m.shock_decay).exp() };
+            bd.soft = (bd.soft - dt).max(0.0);
             let (grounded, kd) = (bd.anchored > 0 || bd.shock > 0.05, bd.kd);
             let mut cnt = 0u32;
             for i in b * nb..(b + 1) * nb {
@@ -753,7 +789,7 @@ impl World {
             }
             // position correction
             {
-                let (pi, pj, pw, pg, adj, adj_start, lam) = (&self.pi[..], &self.pj[..], &self.pw[..], &self.pg[..], &self.adj[..], &self.adj_start[..], &self.lam[..]);
+                let (pi, pj, pw, pg, adj, adj_start, lam, bodies) = (&self.pi[..], &self.pj[..], &self.pw[..], &self.pg[..], &self.adj[..], &self.adj_start[..], &self.lam[..], &self.bodies[..]);
                 let q = Shared::of(&mut self.q);
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3;
                     let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
@@ -765,8 +801,10 @@ impl World {
                         let (fx, fy, fz) = (f * pg[k * 3], f * pg[k * 3 + 1], f * pg[k * 3 + 2]);
                         if ent & 1 == 0 { x += fx; y += fy; z += fz; } else { x -= fx; y -= fy; z -= fz; }
                     }
+                    // goo that has just had a block dropped into it is only allowed small corrections, growing back to normal
+                    let limit = max_d * (1.0 - 0.87 * (bodies[i / nb].soft * (1.0 / SOFT_TIME)).min(1.0));
                     let l2 = x * x + y * y + z * z;
-                    if l2 > max_d * max_d { let sc = max_d / l2.sqrt(); x *= sc; y *= sc; z *= sc; }
+                    if l2 > limit * limit { let sc = limit / l2.sqrt(); x *= sc; y *= sc; z *= sc; }
                     unsafe { *q.at(o) += x; *q.at(o + 1) += y; *q.at(o + 2) += z; }
                 } });
             }
@@ -924,14 +962,14 @@ impl World {
             let bd = &mut self.bodies[b];
             if bd.state == 0 || !bd.awake { continue; }
             let vrms = (vsum[b] / bd.count.max(1) as f32).sqrt();
-            bd.quiet = bd.state == 1 && vrms < 0.012 && bd.age > m.melt_time + 1.0;
+            bd.quiet = bd.state == 1 && vrms < m.sleep_v && bd.age > m.melt_time + 1.0;
             bd.calm = if bd.quiet { bd.calm + 1 } else { 0 };
         }
         let moving_kin: Vec<KBox> = self.kin.iter().copied().filter(|b| b.vel != [0.0; 3]).collect();
         for b in 0..slots {
             if self.bodies[b].state == 0 || !self.bodies[b].awake { continue; }
             let bb = self.bodies[b].bb;
-            let mut may_sleep = self.bodies[b].calm > 120;
+            let mut may_sleep = self.bodies[b].calm > CALM_STEPS;
             for c in 0..slots {
                 if c == b || self.bodies[c].state == 0 { continue; }
                 let cb = self.bodies[c].bb;

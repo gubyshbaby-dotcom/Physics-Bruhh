@@ -10,15 +10,24 @@ use crate::sim::World;
 use rayon::prelude::*;
 
 /// 4 vertices * (position xyz + normal xyz). The normal's length is 1 + the depth of goo behind
-/// the vertex in blocks (0 for threads), so the renderer can make thick goo darker than a thin film.
+/// the vertex in blocks, so the renderer can make thick goo darker than a thin film.
 pub const FLOATS_PER_QUAD: usize = 24;
 const DEPTH_STEPS: usize = 16;
-// bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to
-// between BRIDGE_FROM and BRIDGE_UPTO spacings, get extra samples of this weight along them
+// Stretched goo is filled in along its springs, so it stays one smooth surface instead of coming
+// apart into slices (jelly) or hanging in the air as loose blobs (honey pulled into strands).
+// Jelly: nearest-neighbour springs (rest length up to BRIDGE_REST spacings) stretched to between
+// BRIDGE_FROM and BRIDGE_UPTO spacings get samples of weight BRIDGE_WEIGHT.
 const BRIDGE_REST: f32 = 1.2;
 const BRIDGE_FROM: f32 = 1.6;
 const BRIDGE_UPTO: f32 = 6.5;
 const BRIDGE_WEIGHT: f32 = 0.7;
+// Honey: every second taut spring longer than STRAND_FROM spacings (and no longer than STRAND_UPTO
+// blocks) becomes a strand, thinner the further it is pulled, drooping a little in the middle.
+const STRAND_FROM: f32 = 1.9;
+const STRAND_UPTO: f32 = 4.0;
+const STRAND_DROOP: f32 = 0.2;
+/// Extra samples one puddle may get; beyond that the longest strands simply are not drawn.
+const BRIDGE_BUDGET: usize = 12_000;
 
 struct Grid { org: [f32; 3] }
 
@@ -26,6 +35,11 @@ struct Grid { org: [f32; 3] }
 pub fn build(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
     crate::sim::on_pool(|| build_on_pool(w, mat, out))
 }
+
+/// Meshes kept from the last call: a puddle nobody touched since then is not meshed again.
+#[derive(Default)]
+pub struct Cache { entries: Vec<Entry> }
+struct Entry { mat: u8, key: Vec<(u32, u32)>, quads: Vec<f32> }
 
 fn build_on_pool(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
     let start = out.len();
@@ -47,63 +61,21 @@ fn build_on_pool(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
         done[root] = true;
         clusters.push((0..ids.len()).filter(|&b| find(&mut group, b) == root).map(|b| ids[b]).collect());
     }
-    // separate puddles are meshed side by side and joined in the same order as before
-    let parts: Vec<Vec<f32>> = clusters.par_iter().map(|members| { let mut part = Vec::new(); mesh_cluster(w, members, &mut part); part }).collect();
-    for part in &parts { out.extend_from_slice(part); }
-    threads(w, mat, out);
-    (out.len() - start) / FLOATS_PER_QUAD
-}
-
-/// Springs stretched far beyond the particle spacing are drawn as thin drooping threads: at piston
-/// speed goo tears faster than particles can flow into the gap, and the threads are what is left
-/// hanging between the two sides until they snap.
-fn threads(w: &World, mat: u8, out: &mut Vec<f32>) {
-    let s = w.s;
-    let min_len = 1.9 * s;
-    let sag = w.mats[mat as usize].thread_sag;
-    let bridged = !w.mats[mat as usize].dynamic_springs;
-    let mut budget = 6000usize; // quads
-    for b in 0..w.slots {
-        if w.bodies[b].state == 0 || w.bodies[b].mat != mat { continue; }
-        for i in b * w.nb..(b + 1) * w.nb {
-            if w.alive[i] == 0 { continue; }
-            for k in 0..w.spr_n[i] as usize {
-                let j = w.spr_j[i * crate::sim::MAX_SPR + k] as usize;
-                if w.alive[j] == 0 { continue; }
-                let a = [w.p[i * 3], w.p[i * 3 + 1], w.p[i * 3 + 2]];
-                let c = [w.p[j * 3], w.p[j * 3 + 1], w.p[j * 3 + 2]];
-                let d = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                // only springs that are both long and taut: relaxed long springs sit inside the goo
-                if len < min_len || len > 4.0 || (len < 2.9 * s && len < 1.3 * w.spr_l[i * crate::sim::MAX_SPR + k]) { continue; }
-                if bridged && len <= BRIDGE_UPTO * s { continue; } // drawn as part of the surface instead
-                if (i.wrapping_mul(31) ^ j.wrapping_mul(17)) % 3 != 0 { continue; } // a third of them is plenty
-                if budget < 4 { return; }
-                budget -= 4;
-                let half = (0.42 * s * (min_len / len).sqrt()).clamp(0.006, 0.03) * w.scale[i].min(w.scale[j]);
-                let mid = [a[0] + d[0] * 0.5, a[1] + d[1] * 0.5 - sag * len, a[2] + d[2] * 0.5];
-                for seg in 0..2 {
-                    let (p0, p1) = if seg == 0 { (a, mid) } else { (mid, c) };
-                    let t = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-                    // two ribbons at right angles so the thread is visible from any side
-                    let up = if t[1].abs() > 0.9 * (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt() { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
-                    let mut u = [t[1] * up[2] - t[2] * up[1], t[2] * up[0] - t[0] * up[2], t[0] * up[1] - t[1] * up[0]];
-                    let ul = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt().max(1e-6); for x in u.iter_mut() { *x /= ul; }
-                    let mut v = [t[1] * u[2] - t[2] * u[1], t[2] * u[0] - t[0] * u[2], t[0] * u[1] - t[1] * u[0]];
-                    let vl = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6); for x in v.iter_mut() { *x /= vl; }
-                    for (side, nrm) in [(u, v), (v, u)] {
-                        let corners = [
-                            [p0[0] - side[0] * half, p0[1] - side[1] * half, p0[2] - side[2] * half],
-                            [p0[0] + side[0] * half, p0[1] + side[1] * half, p0[2] + side[2] * half],
-                            [p1[0] + side[0] * half, p1[1] + side[1] * half, p1[2] + side[2] * half],
-                            [p1[0] - side[0] * half, p1[1] - side[1] * half, p1[2] - side[2] * half],
-                        ];
-                        for cn in corners { out.extend_from_slice(&[cn[0], cn[1], cn[2], nrm[0], nrm[1], nrm[2]]); }
-                    }
-                }
-            }
-        }
+    // a puddle is described by its bodies and how often each has changed; unchanged ones come from the cache
+    let keys: Vec<Vec<(u32, u32)>> = clusters.iter().map(|c| c.iter().map(|&b| (b as u32, w.bodies[b].rev)).collect()).collect();
+    let mut cache = w.mesh_cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut parts: Vec<Option<Vec<f32>>> = keys.iter().map(|k| cache.entries.iter().position(|e| e.mat == mat && &e.key == k).map(|i| std::mem::take(&mut cache.entries[i].quads))).collect();
+    // the others are meshed side by side
+    let todo: Vec<usize> = (0..clusters.len()).filter(|&c| parts[c].is_none()).collect();
+    let fresh: Vec<Vec<f32>> = todo.par_iter().map(|&c| { let mut part = Vec::new(); mesh_cluster(w, &clusters[c], &mut part); part }).collect();
+    for (c, part) in todo.into_iter().zip(fresh) { parts[c] = Some(part); }
+    cache.entries.retain(|e| e.mat != mat);
+    for (key, part) in keys.into_iter().zip(parts) {
+        let quads = part.unwrap_or_default();
+        out.extend_from_slice(&quads);
+        cache.entries.push(Entry { mat, key, quads });
     }
+    (out.len() - start) / FLOATS_PER_QUAD
 }
 
 fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
@@ -113,6 +85,7 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for &b in bodies { let bb = &w.bodies[b].bb; for k in 0..3 { lo[k] = lo[k].min(bb[k]); hi[k] = hi[k].max(bb[k + 3]); } }
     if lo[0] > hi[0] { return; }
+    if bodies.iter().any(|&b| w.mats[w.bodies[b].mat as usize].dynamic_springs) { lo[1] -= STRAND_DROOP; } // room for strands to droop
     let mut c = s;
     let mut dim = [0usize; 3];
     loop { // coarsen until the grid is a sane size
@@ -146,27 +119,42 @@ fn mesh_cluster(w: &World, bodies: &[usize], out: &mut Vec<f32>) {
             }
         }
     };
+    let mut budget = BRIDGE_BUDGET;
     for &b in bodies {
-        // jelly (permanent springs) pulled far apart would come out as separate slices, one per
-        // layer of particles; filling in along its stretched springs keeps it one smooth band
-        let bridge = !w.mats[w.bodies[b].mat as usize].dynamic_springs;
+        let m = &w.mats[w.bodies[b].mat as usize];
+        let jelly = !m.dynamic_springs;
         for i in b * w.nb..(b + 1) * w.nb {
             if w.alive[i] == 0 { continue; }
             let sc = w.scale[i]; if sc <= 0.01 { continue; }
             let p = [w.p[i * 3], w.p[i * 3 + 1], w.p[i * 3 + 2]];
             splat(p, sc);
-            if !bridge { continue; }
             for k in 0..w.spr_n[i] as usize {
                 let si = i * crate::sim::MAX_SPR + k;
-                if w.spr_l[si] > BRIDGE_REST * s { continue; } // nearest neighbours only: one bridge per gap is enough
+                let rest = w.spr_l[si];
+                if jelly && rest > BRIDGE_REST * s { continue; } // nearest neighbours only: one bridge per gap is enough
                 let j = w.spr_j[si] as usize;
                 if w.alive[j] == 0 { continue; }
                 let d = [w.p[j * 3] - p[0], w.p[j * 3 + 1] - p[1], w.p[j * 3 + 2] - p[2]];
                 let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                if len < BRIDGE_FROM * s || len > BRIDGE_UPTO * s { continue; }
-                let n = ((len / (1.1 * s)) as usize).min(5);
-                let wsc = BRIDGE_WEIGHT * sc.min(w.scale[j]);
-                for m in 1..=n { let t = m as f32 / (n + 1) as f32; splat([p[0] + d[0] * t, p[1] + d[1] * t, p[2] + d[2] * t], wsc); }
+                let (n, wsc, droop);
+                if jelly {
+                    if len < BRIDGE_FROM * s || len > BRIDGE_UPTO * s { continue; }
+                    n = ((len / (1.1 * s)) as usize).min(5); wsc = BRIDGE_WEIGHT; droop = 0.0;
+                } else {
+                    // only springs that are both long and taut: relaxed long springs sit inside the honey anyway
+                    if len < STRAND_FROM * s || len > STRAND_UPTO || (len < 2.9 * s && len < 1.3 * rest) { continue; }
+                    if (i.wrapping_mul(31) ^ j.wrapping_mul(17)) % 2 != 0 { continue; }
+                    n = ((len / (0.9 * s)) as usize).min(40);
+                    wsc = (1.5 * s / len).clamp(0.2, 0.6);
+                    droop = (m.thread_sag * len).min(STRAND_DROOP);
+                }
+                if n > budget { continue; }
+                budget -= n;
+                let wsc = wsc * sc.min(w.scale[j]);
+                for step in 1..=n {
+                    let t = step as f32 / (n + 1) as f32;
+                    splat([p[0] + d[0] * t, p[1] + d[1] * t - droop * 4.0 * t * (1.0 - t), p[2] + d[2] * t], wsc);
+                }
             }
         }
     }

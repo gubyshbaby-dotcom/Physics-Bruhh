@@ -50,6 +50,16 @@ public final class SelfTest {
         return level.getEntities(type, new AABB(around).inflate(1.6), e -> true).size();
     }
 
+    /** Health of the pig nearest to the given column, or -1 if there is none within three blocks. */
+    private static float pigHealth(ServerLevel level, int x, int z) {
+        float health = -1.0F; double best = 9.0;
+        for (var pig : level.getEntities(EntityType.PIG, new AABB(x - 3, Y - 2, z - 3, x + 4, Y + 12, z + 4), e -> true)) {
+            double d = (pig.getX() - x - 0.5) * (pig.getX() - x - 0.5) + (pig.getZ() - z - 0.5) * (pig.getZ() - z - 0.5);
+            if (d < best) { best = d; health = pig.getHealth(); }
+        }
+        return health;
+    }
+
     private static BlockState piston(boolean sticky) {
         return (sticky ? Blocks.STICKY_PISTON : Blocks.PISTON).defaultBlockState().setValue(PistonBaseBlock.FACING, Direction.EAST);
     }
@@ -127,6 +137,16 @@ public final class SelfTest {
                 GooEvents.convert(level, new BlockPos(-1, Y, 3), 1, 0);
                 level.setBlock(new BlockPos(4, Y, 10), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
                 GooEvents.convert(level, new BlockPos(4, Y, 10), 1, 0);
+                // H: what the original blocks do to things that land on them. Three pigs fall ten blocks:
+                // onto slime goo, onto honey goo and onto bare stone.
+                for (String at : new String[] { "-0.5 " + (Y + 10) + " 3.5", "4.5 " + (Y + 10) + " 10.5", "-4.5 " + (Y + 10) + " 11.5" }) {
+                    server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "summon minecraft:pig " + at);
+                }
+            } else if (tick == 200) {
+                float onSlime = pigHealth(level, -1, 3), onHoney = pigHealth(level, 4, 10), onStone = pigHealth(level, -5, 11);
+                expect("H: a pig that fell on stone got hurt (health " + onStone + ")", onStone > 0.0F && onStone <= 4.5F);
+                expect("H: a pig that fell on slime goo did not (health " + onSlime + ")", onSlime >= 9.5F);
+                expect("H: a pig that fell on honey goo was cushioned (health " + onHoney + ")", onHoney >= 7.5F && onHoney < 10.0F);
                 finish(server);
             }
         } catch (Throwable t) {

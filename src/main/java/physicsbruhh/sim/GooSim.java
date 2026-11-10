@@ -38,6 +38,12 @@ public interface GooSim extends AutoCloseable {
     /** Fills {@link #BODY_FLOATS} floats per slot; returns the slot count. */
     int bodies(ByteBuffer out);
 
+    /**
+     * Counts the particles inside a box ("is this creature standing in goo"): honey in the low 16 bits,
+     * slime in the next 16, each capped at 32767.
+     */
+    int probe(float minX, float minY, float minZ, float maxX, float maxY, float maxZ);
+
     String backend();
 
     @Override

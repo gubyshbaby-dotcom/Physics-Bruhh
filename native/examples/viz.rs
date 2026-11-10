@@ -122,6 +122,14 @@ fn main() {
             }
             w.set_kinematic(&data, cnt);
         }
+        // VIZ_MESH=file VIZ_MESH_AT=seconds dumps the surface at that moment (24 floats per quad, little endian)
+        if let (Ok(path), Some(at)) = (std::env::var("VIZ_MESH"), std::env::var("VIZ_MESH_AT").ok().and_then(|v| v.parse::<f32>().ok())) {
+            if t >= at && t < at + DT {
+                mesh_buf.clear(); mesh::build(&w, HONEY, &mut mesh_buf); mesh::build(&w, SLIME, &mut mesh_buf);
+                let mut bytes = Vec::with_capacity(mesh_buf.len() * 4); for v in &mesh_buf { bytes.extend_from_slice(&v.to_le_bytes()); }
+                std::fs::write(path, bytes).unwrap();
+            }
+        }
         let t0 = std::time::Instant::now();
         w.step(DT + 1e-6);
         let ms = t0.elapsed().as_secs_f64() * 1e3; ms_sum += ms; if steps > 3 && ms > ms_max { ms_max = ms; } steps += 1;
@@ -129,7 +137,7 @@ fn main() {
     }
     println!("avg {:.2} ms/step, max {:.2}", ms_sum / steps as f64, ms_max);
     // VIZ_MESH=file dumps the final surface (24 floats per quad, little endian) for an outside renderer
-    if let Ok(path) = std::env::var("VIZ_MESH") {
+    if let (Ok(path), true) = (std::env::var("VIZ_MESH"), std::env::var("VIZ_MESH_AT").is_err()) {
         mesh_buf.clear(); mesh::build(&w, HONEY, &mut mesh_buf); mesh::build(&w, SLIME, &mut mesh_buf);
         let mut bytes = Vec::with_capacity(mesh_buf.len() * 4); for v in &mesh_buf { bytes.extend_from_slice(&v.to_le_bytes()); }
         std::fs::write(path, bytes).unwrap();

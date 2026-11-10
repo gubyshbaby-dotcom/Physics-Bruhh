@@ -16,7 +16,7 @@ public final class JavaSim implements GooSim {
         float meltTime, dampFresh, dampMelted, springK0, springK1, plast0, plast1, yield;
         boolean dynamicSprings;
         float breakStrain, springMaxL, shockK, shockPlast, shockDecay, shockBreak, shockMaxL, threadSag;
-        float cohK, cohLim, xsph, adhK, adhCreep, adhBreak, setAfter, setRate, tip;
+        float cohK, cohLim, xsph, adhK, adhCreep, adhBreak, setAfter, setRate, tip, sleepV;
 
         static Material honey() {
             Material m = new Material();
@@ -25,7 +25,7 @@ public final class JavaSim implements GooSim {
             m.dynamicSprings = true; m.breakStrain = 4f; m.springMaxL = 0.21f; m.shockK = 0.42f; m.shockPlast = 0.6f; m.shockDecay = 1.1f; m.shockBreak = 16f; m.shockMaxL = 1.7f; m.threadSag = 0.16f;
             m.cohK = 0.25f; m.cohLim = 0.35f; m.xsph = 0.35f;
             m.adhK = 0.9f; m.adhCreep = 9f; m.adhBreak = 0.30f;
-            m.setAfter = 11f; m.setRate = 0.3f; m.tip = 2.05f;
+            m.setAfter = 5f; m.setRate = 0.5f; m.tip = 2.05f; m.sleepV = 0.03f;
             return m;
         }
 
@@ -36,7 +36,7 @@ public final class JavaSim implements GooSim {
             m.dynamicSprings = false; m.breakStrain = 8f; m.springMaxL = 9f; m.shockK = 0.45f; m.shockPlast = 0f; m.shockDecay = 0.3f; m.shockBreak = 12f; m.shockMaxL = 9f; m.threadSag = 0.03f;
             m.cohK = 0.15f; m.cohLim = 0.3f; m.xsph = 0.25f;
             m.adhK = 0.9f; m.adhCreep = 0f; m.adhBreak = 0.16f;
-            m.setAfter = 0f; m.setRate = 0f; m.tip = 0f;
+            m.setAfter = 0f; m.setRate = 0f; m.tip = 0f; m.sleepV = 0.015f;
             return m;
         }
     }
@@ -44,10 +44,10 @@ public final class JavaSim implements GooSim {
     static final class Body {
         int state, mat, calm, count, anchored;
         boolean awake, quiet, fresh;
-        float age, born, fade, melt, kd, kSpring, plast, brk, maxL, shock;
+        float age, born, fade, melt, kd, kSpring, plast, brk, maxL, shock, soft;
         final float[] bb = new float[6];
 
-        void clear() { state = 0; mat = 0; calm = 0; count = 0; anchored = 0; awake = false; quiet = false; fresh = false; age = born = fade = melt = kd = kSpring = plast = brk = maxL = shock = 0f; Arrays.fill(bb, 0f); }
+        void clear() { state = 0; mat = 0; calm = 0; count = 0; anchored = 0; awake = false; quiet = false; fresh = false; age = born = fade = melt = kd = kSpring = plast = brk = maxL = shock = soft = 0f; Arrays.fill(bb, 0f); }
     }
 
     static final class KBox {
@@ -113,6 +113,21 @@ public final class JavaSim implements GooSim {
     private float rnd() { seed = seed * 1664525 + 1013904223; return ((seed >>> 8) & 0xffff) / 65536f; }
     private static int ifloor(float x) { return (int) Math.floor(x); }
 
+    @Override
+    public int probe(float x0, float y0, float z0, float x1, float y1, float z1) {
+        int honey = 0, slime = 0;
+        for (int b = 0; b < slots; b++) {
+            Body bd = bodies[b];
+            if (bd.state != 1 || bd.bb[0] > x1 || bd.bb[3] < x0 || bd.bb[1] > y1 || bd.bb[4] < y0 || bd.bb[2] > z1 || bd.bb[5] < z0) continue;
+            for (int i = b * nb; i < (b + 1) * nb; i++) {
+                if (alive[i] == 0) continue;
+                float x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
+                if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1) { if (bd.mat == SLIME) slime++; else honey++; }
+            }
+        }
+        return Math.min(honey, 32767) | Math.min(slime, 32767) << 16;
+    }
+
     @Override public String backend() { return "java"; }
     @Override public void close() { }
     @Override public void setKillY(float y) { killY = y; }
@@ -171,9 +186,17 @@ public final class JavaSim implements GooSim {
             v[o] = vx; v[o + 1] = vy; v[o + 2] = vz;
             alive[i] = 1; scale[i] = 1f; sprN[i] = 0; ancKind[i] = 0; ancCool[i] = 0f;
         }
+        // goo that is already where the new block appears: both take it easy for a moment
+        boolean crowded = false;
+        for (int b = 0; b < slots; b++) {
+            Body o = bodies[b];
+            if (b == slot || o.state != 1) continue;
+            if (o.bb[0] < x + 1f && o.bb[3] > x && o.bb[1] < y + 1f && o.bb[4] > y && o.bb[2] < z + 1f && o.bb[5] > z) { o.soft = SOFT_TIME; o.awake = true; o.calm = 0; crowded = true; }
+        }
         Body bd = bodies[slot];
         bd.clear();
         bd.state = 1; bd.mat = mat; bd.awake = true; bd.age = Math.max(age, 0f); bd.born = clock; bd.fade = 1f; bd.fresh = !puddle; bd.count = nb;
+        bd.soft = crowded ? SOFT_TIME : 0f;
         bd.bb[0] = x - 0.5f; bd.bb[1] = y - 0.2f; bd.bb[2] = z - 0.5f; bd.bb[3] = x + 1.5f; bd.bb[4] = y + 1.3f; bd.bb[5] = z + 1.5f;
         return slot;
     }
@@ -404,6 +427,7 @@ public final class JavaSim implements GooSim {
             bd.brk = m.breakStrain + Math.max(0f, m.shockBreak - m.breakStrain) * sh;
             bd.maxL = m.springMaxL + Math.max(0f, m.shockMaxL - m.springMaxL) * sh;
             bd.shock = sh < 0.01f ? 0f : sh * (float) Math.exp(-dt / m.shockDecay);
+            bd.soft = Math.max(0f, bd.soft - dt);
             boolean grounded = bd.anchored > 0 || bd.shock > 0.05f;
             int cnt = 0;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
@@ -516,7 +540,9 @@ public final class JavaSim implements GooSim {
             for (int a = 0; a < nAct; a++) {
                 int i = act[a], o = i * 3;
                 float x = dpx[i], y = dpy[i], z = dpz[i], l2 = x * x + y * y + z * z;
-                if (l2 > maxD * maxD) { float sc = maxD / (float) Math.sqrt(l2); x *= sc; y *= sc; z *= sc; }
+                // goo that has just had a block dropped into it is only allowed small corrections, growing back to normal
+                float limit = maxD * (1f - 0.87f * Math.min(1f, bodies[i / nb].soft * (1f / SOFT_TIME)));
+                if (l2 > limit * limit) { float sc = limit / (float) Math.sqrt(l2); x *= sc; y *= sc; z *= sc; }
                 q[o] += x; q[o + 1] += y; q[o + 2] += z;
             }
             for (int a = 0; a < nAct; a++) {
@@ -621,13 +647,13 @@ public final class JavaSim implements GooSim {
             Body bd = bodies[b];
             if (bd.state == 0 || !bd.awake) continue;
             float vrms = (float) Math.sqrt(vsum[b] / Math.max(1, bd.count));
-            bd.quiet = bd.state == 1 && vrms < 0.012f && bd.age > mats[bd.mat].meltTime + 1f;
+            bd.quiet = bd.state == 1 && vrms < mats[bd.mat].sleepV && bd.age > mats[bd.mat].meltTime + 1f;
             bd.calm = bd.quiet ? bd.calm + 1 : 0;
         }
         for (int b = 0; b < slots; b++) {
             Body bd = bodies[b];
             if (bd.state == 0 || !bd.awake) continue;
-            boolean maySleep = bd.calm > 120;
+            boolean maySleep = bd.calm > CALM_STEPS;
             for (int c = 0; c < slots; c++) {
                 Body cb = bodies[c];
                 if (c == b || cb.state == 0) continue;
@@ -678,7 +704,6 @@ public final class JavaSim implements GooSim {
             for (int b = 0; b < nIds; b++) if (find(group, b) == root) members[nm++] = ids[b];
             meshCluster(members, nm);
         }
-        threads(material);
         FloatBuffer fb = out.asFloatBuffer();
         if (meshLen > fb.capacity()) return -meshLen;
         fb.put(0, meshOut, 0, meshLen);
@@ -690,11 +715,15 @@ public final class JavaSim implements GooSim {
     private static final int[][] CO = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 }, { 1, 1, 1 } };
     private static final int[][] ED = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
 
-    private static final float FADE_TIME = 0.45f;
+    private static final float FADE_TIME = 0.45f, SOFT_TIME = 0.9f;
+    private static final int CALM_STEPS = 60;
 
     // bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to
     // between BRIDGE_FROM and BRIDGE_UPTO spacings, get extra samples of this weight along them
     private static final float BRIDGE_REST = 1.2f, BRIDGE_FROM = 1.6f, BRIDGE_UPTO = 6.5f, BRIDGE_WEIGHT = 0.7f;
+    // honey: every second taut spring longer than STRAND_FROM spacings (up to STRAND_UPTO blocks) becomes a strand of the surface
+    private static final float STRAND_FROM = 1.9f, STRAND_UPTO = 4f, STRAND_DROOP = 0.2f;
+    private static final int BRIDGE_BUDGET = 12_000;
 
     private static void splat(float[] accm, float px, float py, float pz, float sc, float rk, float c, float o0, float o1, float o2, int nx, int ny, int nz) {
         float ic = 1f / c, irk2 = 1f / (rk * rk);
@@ -718,6 +747,7 @@ public final class JavaSim implements GooSim {
         float[] lo = { Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE }, hi = { -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE };
         for (int mi = 0; mi < nm; mi++) { float[] bb = bodies[members[mi]].bb; for (int k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], bb[k]); hi[k] = Math.max(hi[k], bb[k + 3]); } }
         if (lo[0] > hi[0]) return;
+        for (int mi = 0; mi < nm; mi++) if (mats[bodies[members[mi]].mat].dynamicSprings) { lo[1] -= STRAND_DROOP; break; } // room for strands to droop
         float c = s; int[] dim = new int[3];
         while (true) {
             long cells = 1;
@@ -729,28 +759,43 @@ public final class JavaSim implements GooSim {
         int nx = dim[0], ny = dim[1], nz = dim[2], nn = nx * ny * nz;
         float[] accm = new float[nn * 4];
         float ic = 1f / c, irk2 = 1f / (rk * rk);
+        int budget = BRIDGE_BUDGET;
         for (int mi = 0; mi < nm; mi++) {
             int b = members[mi];
-            // jelly (permanent springs) pulled far apart would come out as separate slices, one per
-            // layer of particles; filling in along its stretched springs keeps it one smooth band
-            boolean bridge = !mats[bodies[b].mat].dynamicSprings;
+            Material m = mats[bodies[b].mat];
+            boolean jelly = !m.dynamicSprings;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
                 if (alive[i] == 0) continue;
                 float sc = scale[i]; if (sc <= 0.01f) continue;
                 float px = p[i * 3], py = p[i * 3 + 1], pz = p[i * 3 + 2];
                 splat(accm, px, py, pz, sc, rk, c, o0, o1, o2, nx, ny, nz);
-                if (!bridge) continue;
                 for (int k = 0; k < sprN[i]; k++) {
                     int si = i * MAX_SPR + k;
-                    if (sprL[si] > BRIDGE_REST * s) continue; // nearest neighbours only: one bridge per gap is enough
+                    float rest = sprL[si];
+                    if (jelly && rest > BRIDGE_REST * s) continue; // nearest neighbours only: one bridge per gap is enough
                     int j = sprJ[si];
                     if (alive[j] == 0) continue;
                     float dx = p[j * 3] - px, dy = p[j * 3 + 1] - py, dz = p[j * 3 + 2] - pz;
                     float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-                    if (len < BRIDGE_FROM * s || len > BRIDGE_UPTO * s) continue;
-                    int n = Math.min(5, (int) (len / (1.1f * s)));
-                    float wsc = BRIDGE_WEIGHT * Math.min(sc, scale[j]);
-                    for (int m = 1; m <= n; m++) { float t = m / (float) (n + 1); splat(accm, px + dx * t, py + dy * t, pz + dz * t, wsc, rk, c, o0, o1, o2, nx, ny, nz); }
+                    int n; float wsc, droop;
+                    if (jelly) {
+                        if (len < BRIDGE_FROM * s || len > BRIDGE_UPTO * s) continue;
+                        n = Math.min(5, (int) (len / (1.1f * s))); wsc = BRIDGE_WEIGHT; droop = 0f;
+                    } else {
+                        // only springs that are both long and taut: relaxed long springs sit inside the honey anyway
+                        if (len < STRAND_FROM * s || len > STRAND_UPTO || (len < 2.9f * s && len < 1.3f * rest)) continue;
+                        if (Integer.remainderUnsigned((i * 31) ^ (j * 17), 2) != 0) continue;
+                        n = Math.min(40, (int) (len / (0.9f * s)));
+                        wsc = Math.max(0.2f, Math.min(0.6f, 1.5f * s / len));
+                        droop = Math.min(STRAND_DROOP, m.threadSag * len);
+                    }
+                    if (n > budget) continue;
+                    budget -= n;
+                    wsc *= Math.min(sc, scale[j]);
+                    for (int st = 1; st <= n; st++) {
+                        float t = st / (float) (n + 1);
+                        splat(accm, px + dx * t, py + dy * t - droop * 4f * t * (1f - t), pz + dz * t, wsc, rk, c, o0, o1, o2, nx, ny, nz);
+                    }
                 }
             }
         }
@@ -817,50 +862,6 @@ public final class JavaSim implements GooSim {
         if (a < 0 || b < 0 || c < 0 || d < 0) return;
         int v0 = flip ? d : a, v1 = flip ? c : b, v2 = flip ? b : c, v3 = flip ? a : d;
         for (int vtx : new int[] { v0, v1, v2, v3 }) { int o = vtx * 6; emit(verts[o], verts[o + 1], verts[o + 2], verts[o + 3], verts[o + 4], verts[o + 5]); }
-    }
-
-    private void threads(int mat) {
-        float minLen = 1.9f * s, sag = mats[mat].threadSag;
-        boolean bridged = !mats[mat].dynamicSprings;
-        int budget = 6000;
-        float[] t = new float[3], u = new float[3], w = new float[3], p0 = new float[3], p1 = new float[3];
-        for (int b = 0; b < slots; b++) {
-            if (bodies[b].state == 0 || bodies[b].mat != mat) continue;
-            for (int i = b * nb; i < (b + 1) * nb; i++) {
-                if (alive[i] == 0) continue;
-                for (int k = 0; k < sprN[i]; k++) {
-                    int j = sprJ[i * MAX_SPR + k];
-                    if (alive[j] == 0) continue;
-                    float ax = p[i * 3], ay = p[i * 3 + 1], az = p[i * 3 + 2], bx = p[j * 3], by = p[j * 3 + 1], bz = p[j * 3 + 2];
-                    float dx = bx - ax, dy = by - ay, dz = bz - az;
-                    float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-                    if (len < minLen || len > 4f || (len < 2.9f * s && len < 1.3f * sprL[i * MAX_SPR + k])) continue;
-                    if (bridged && len <= BRIDGE_UPTO * s) continue; // drawn as part of the surface instead
-                    if (Integer.remainderUnsigned((i * 31) ^ (j * 17), 3) != 0) continue;
-                    if (budget < 4) return;
-                    budget -= 4;
-                    float half = Math.max(0.006f, Math.min(0.03f, 0.42f * s * (float) Math.sqrt(minLen / len))) * Math.min(scale[i], scale[j]);
-                    float mx = ax + dx * 0.5f, my = ay + dy * 0.5f - sag * len, mz = az + dz * 0.5f;
-                    for (int seg = 0; seg < 2; seg++) {
-                        if (seg == 0) { p0[0] = ax; p0[1] = ay; p0[2] = az; p1[0] = mx; p1[1] = my; p1[2] = mz; } else { p0[0] = mx; p0[1] = my; p0[2] = mz; p1[0] = bx; p1[1] = by; p1[2] = bz; }
-                        t[0] = p1[0] - p0[0]; t[1] = p1[1] - p0[1]; t[2] = p1[2] - p0[2];
-                        float tl = (float) Math.sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
-                        float upx = Math.abs(t[1]) > 0.9f * tl ? 1f : 0f, upy = Math.abs(t[1]) > 0.9f * tl ? 0f : 1f;
-                        u[0] = t[1] * 0f - t[2] * upy; u[1] = t[2] * upx - t[0] * 0f; u[2] = t[0] * upy - t[1] * upx;
-                        float ul = Math.max(1e-6f, (float) Math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])); u[0] /= ul; u[1] /= ul; u[2] /= ul;
-                        w[0] = t[1] * u[2] - t[2] * u[1]; w[1] = t[2] * u[0] - t[0] * u[2]; w[2] = t[0] * u[1] - t[1] * u[0];
-                        float wl = Math.max(1e-6f, (float) Math.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])); w[0] /= wl; w[1] /= wl; w[2] /= wl;
-                        for (int r = 0; r < 2; r++) {
-                            float[] sd = r == 0 ? u : w, nr = r == 0 ? w : u;
-                            emit(p0[0] - sd[0] * half, p0[1] - sd[1] * half, p0[2] - sd[2] * half, nr[0], nr[1], nr[2]);
-                            emit(p0[0] + sd[0] * half, p0[1] + sd[1] * half, p0[2] + sd[2] * half, nr[0], nr[1], nr[2]);
-                            emit(p1[0] + sd[0] * half, p1[1] + sd[1] * half, p1[2] + sd[2] * half, nr[0], nr[1], nr[2]);
-                            emit(p1[0] - sd[0] * half, p1[1] - sd[1] * half, p1[2] - sd[2] * half, nr[0], nr[1], nr[2]);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     @Override

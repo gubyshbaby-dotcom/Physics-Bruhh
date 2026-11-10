@@ -53,6 +53,15 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nWake(_env: JNIEnv, _c: J
     guard(|| match unsafe { handle(h) } { Some(hd) if body >= 0 => { hd.world.wake(body as usize); 0 } _ => ERR })
 }
 
+/// Particles inside a box: honey count in the low 16 bits, slime count in the next 16 (each capped at 32767).
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nProbe(_env: JNIEnv, _c: JClass, h: jlong, x0: jfloat, y0: jfloat, z0: jfloat, x1: jfloat, y1: jfloat, z1: jfloat) -> jint {
+    guard(|| match unsafe { handle(h) } {
+        Some(hd) => { let (honey, slime) = hd.world.probe([x0, y0, z0], [x1, y1, z1]); (honey.min(32767) | slime.min(32767) << 16) as jint }
+        None => ERR,
+    })
+}
+
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nSetKillY(_env: JNIEnv, _c: JClass, h: jlong, y: jfloat) -> jint {
     guard(|| match unsafe { handle(h) } { Some(hd) => { hd.world.kill_y = y; 0 } None => ERR })

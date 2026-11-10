@@ -59,6 +59,8 @@ public final class SimCheck {
             int quads = s.mesh(GooSim.HONEY, m);
             check("honey mesh", quads > 500 && quads < 20000, quads + " quads");
             check("mesh buffer too small is reported", s.mesh(GooSim.HONEY, buf(24)) < 0, "");
+            int in = s.probe(-3f, 0f, -3f, 4f, 2f, 4f), out = s.probe(20f, 0f, 20f, 21f, 2f, 21f);
+            check("probe finds the honey and only where it is", (in & 0xFFFF) > 1000 && (in >>> 16) == 0 && out == 0, in + " / " + out);
             run(s, 25f);
             check("settled honey sleeps", body(s, 0)[1] == 0f, "awake " + body(s, 0)[1]);
         }

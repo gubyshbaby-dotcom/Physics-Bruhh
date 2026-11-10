@@ -278,3 +278,34 @@ fn removed_goo_shrinks_away_completely() {
     out.clear();
     assert_eq!(mesh::build(&w, HONEY, &mut out) + mesh::build(&w, SLIME, &mut out), 0);
 }
+
+/// How violently things move right after a block of honey appears where honey already lies
+/// (`dx` = 1: next to the first block, its bottom layers inside the edge of the puddle; 0: right in the middle of it).
+fn spawn_into_puddle(dx: f32) -> (f32, f32) {
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    w.add_body(HONEY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    for _ in 0..420 { w.step(DT + 1e-6); } // seven seconds: a puddle about two blocks wide
+    w.add_body(HONEY, dx, 0.0, 0.0, 1.0, 0.0, 0.0);
+    let (mut top, mut fastest) = (0.0f32, 0.0f32);
+    let mut prev: Vec<f32> = w.p.clone();
+    for _ in 0..90 {
+        w.step(DT + 1e-6);
+        for i in 0..w.maxp { if w.alive[i] == 0 { continue; }
+            let d = (0..3).map(|a| (w.p[i * 3 + a] - prev[i * 3 + a]).powi(2)).sum::<f32>().sqrt();
+            fastest = fastest.max(d / DT); top = top.max(w.p[i * 3 + 1]);
+        }
+        prev.copy_from_slice(&w.p);
+    }
+    (top, fastest)
+}
+
+#[test]
+fn honey_placed_into_honey_does_not_burst() {
+    for dx in [1.0f32, 0.0] {
+        let (top, fastest) = spawn_into_puddle(dx);
+        if std::env::var("DIAG").is_ok() { println!("offset {}: highest particle {:.2}, fastest {:.2} blocks/s", dx, top, fastest); }
+        assert!(top < 1.25, "offset {}: nothing is thrown upwards: highest particle at {:.2}", dx, top);
+        assert!(fastest < 4.0, "offset {}: nothing shoots off: fastest particle {:.2} blocks/s", dx, fastest);
+    }
+}
