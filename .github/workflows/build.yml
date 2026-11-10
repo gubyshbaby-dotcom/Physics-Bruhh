@@ -42,6 +42,7 @@ jobs:
         working-directory: native
         run: |
           cargo build --release --example bench
+          echo "cores: $(nproc), $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"; lscpu | grep -E 'Thread|Core|Socket' || true
           for t in 1 2 4; do PHYSICSBRUHH_THREADS=$t ./target/release/examples/bench 8 3 > bench-$t.txt; head -2 bench-$t.txt; done
           tail -1 bench-1.txt
           test "$(tail -1 bench-1.txt)" = "$(tail -1 bench-2.txt)"

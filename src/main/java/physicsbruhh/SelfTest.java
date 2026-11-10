@@ -7,7 +7,9 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.context.UseOnContext;
@@ -53,9 +55,9 @@ public final class SelfTest {
     /** Health of the pig nearest to the given column, or -1 if there is none within three blocks. */
     private static float pigHealth(ServerLevel level, int x, int z) {
         float health = -1.0F; double best = 9.0;
-        for (var pig : level.getEntities(EntityType.PIG, new AABB(x - 3, Y - 2, z - 3, x + 4, Y + 12, z + 4), e -> true)) {
-            double d = (pig.getX() - x - 0.5) * (pig.getX() - x - 0.5) + (pig.getZ() - z - 0.5) * (pig.getZ() - z - 0.5);
-            if (d < best) { best = d; health = pig.getHealth(); }
+        for (Entity e : level.getEntities((Entity) null, new AABB(x - 3, Y - 2, z - 3, x + 4, Y + 12, z + 4), e -> e instanceof LivingEntity && EntityType.getKey(e.getType()).getPath().equals("pig"))) {
+            double d = (e.getX() - x - 0.5) * (e.getX() - x - 0.5) + (e.getZ() - z - 0.5) * (e.getZ() - z - 0.5);
+            if (d < best) { best = d; health = ((LivingEntity) e).getHealth(); }
         }
         return health;
     }
