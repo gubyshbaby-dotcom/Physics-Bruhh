@@ -44,6 +44,18 @@ neoForge {
             systemProperty 'physicsbruhh.selftest', 'true'
             gameDirectory = project.file('run/selftest')
         }
+        // CI: opens the self-test world in a real client (software rendering) and plays a piston scene
+        clientTest {
+            client()
+            programArgument '--quickPlaySingleplayer'
+            programArgument 'selftest'
+            programArgument '--width'
+            programArgument '1280'
+            programArgument '--height'
+            programArgument '720'
+            systemProperty 'physicsbruhh.clienttest', 'true'
+            gameDirectory = project.file('run/clienttest')
+        }
         configureEach {
             logLevel = org.slf4j.event.Level.INFO
         }

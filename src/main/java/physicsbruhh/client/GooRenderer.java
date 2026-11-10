@@ -28,6 +28,8 @@ public final class GooRenderer {
     private static final float[][] local = { new float[0], new float[0] };
     private static final int[] quads = { 0, 0 };
     private static int seenVersion = -1;
+    /** Draw callbacks that actually ran, and quads emitted by them (smoke test and debugging). */
+    static volatile int drawCalls, drawnQuads;
 
     private GooRenderer() {}
 
@@ -59,6 +61,7 @@ public final class GooRenderer {
             final int alpha = ALPHA[mat];
             RenderType type = NeoForgeRenderTypes.getEntityUnlitTranslucent(TEXTURES[mat]);
             event.getSubmitNodeCollector().submitCustomGeometry(stack, type, (pose, consumer) -> {
+                drawCalls++; drawnQuads += count;
                 Long2FloatOpenHashMap lightCache = new Long2FloatOpenHashMap();
                 lightCache.defaultReturnValue(-1.0F);
                 BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();

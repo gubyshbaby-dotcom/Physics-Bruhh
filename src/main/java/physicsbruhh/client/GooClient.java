@@ -221,6 +221,24 @@ public final class GooClient {
         return nk;
     }
 
+    /** One line about what the simulation is doing right now (for logs and the CI smoke test). */
+    static String describe() {
+        GooSim s = sim;
+        float[] info = bodyInfo;
+        int bodies = 0, awake = 0;
+        for (int b = 0; b + 8 <= info.length; b += 8) { if (info[b] != 0.0F) { bodies++; if (info[b + 1] != 0.0F) awake++; } }
+        int honey, slime;
+        synchronized (MESH_LOCK) { honey = meshQuads[0]; slime = meshQuads[1]; }
+        return "backend=" + (s == null ? "none" : s.backend()) + " running=" + running + " bodies=" + bodies + " awake=" + awake
+                + " honeyQuads=" + honey + " slimeQuads=" + slime + " stepMs=" + String.format(java.util.Locale.ROOT, "%.2f", stepMillis);
+    }
+
+    static boolean healthy() { return sim != null && running; }
+
+    static int quadCount(int material) { synchronized (MESH_LOCK) { return meshQuads[material]; } }
+
+    private static volatile float stepMillis;
+
     // ------------------------------------------------------------------ simulation thread
 
     private static void simLoop() {
@@ -267,6 +285,7 @@ public final class GooClient {
                     dirty = false;
                 }
                 long spent = System.nanoTime() - now;
+                stepMillis += (spent / 1.0e6F - stepMillis) * 0.05F;
                 long budget = 16_666_666L - spent;
                 if (budget > 200_000L) LockSupport.parkNanos(budget); else Thread.onSpinWait();
             }

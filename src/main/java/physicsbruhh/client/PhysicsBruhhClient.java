@@ -33,5 +33,6 @@ public class PhysicsBruhhClient {
         NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> GooClient.tick());
         NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> GooClient.reset());
         NeoForge.EVENT_BUS.addListener((SubmitCustomGeometryEvent e) -> GooRenderer.submit(e));
+        ClientSelfTest.register();
     }
 }

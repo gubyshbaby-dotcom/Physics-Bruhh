@@ -74,6 +74,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build
         run: ./gradlew build -PskipCargo=true --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: physicsbruhh-jar
+          path: build/libs/*.jar
+          retention-days: 14
       - name: In-game self test (dedicated server, real pistons)
         timeout-minutes: 12
         run: |
@@ -88,8 +93,43 @@ jobs:
           name: selftest-log
           path: selftest.log
           retention-days: 7
+      - name: Client smoke test (software rendering, screenshots)
+        timeout-minutes: 15
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgl1-mesa-dri mesa-vulkan-drivers imagemagick > /dev/null
+          mkdir -p run/clienttest/saves shots
+          cp -r run/selftest/world run/clienttest/saves/selftest
+          printf 'pauseOnLostFocus:false\nonboardAccessibility:false\ntutorialStep:none\nrenderDistance:4\nsimulationDistance:5\nskipMultiplayerWarning:true\njoinedFirstServer:true\n' > run/clienttest/options.txt
+          Xvfb :99 -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
+          export DISPLAY=:99
+          sleep 3
+          touch clienttest.log
+          (
+            n=0
+            while true; do
+              n=$((n + 1))
+              if grep -q "CLIENTTEST world joined" clienttest.log; then
+                import -display :99 -window root "shots/scene_$(date +%H%M%S).png" 2> /dev/null || true
+                sleep 1
+              else
+                if [ $((n % 20)) -eq 0 ]; then import -display :99 -window root "shots/boot_$(date +%H%M%S).png" 2> /dev/null || true; fi
+                sleep 1
+              fi
+            done
+          ) &
+          SHOTS=$!
+          timeout 780 ./gradlew runClientTest -PskipCargo=true > clienttest.log 2>&1 || true
+          kill $SHOTS 2> /dev/null || true
+          grep -E "CLIENTTEST|PhysicsBruhh|Using the|Backend|OpenGL|Vulkan|Exception|ERROR" clienttest.log | head -120 || true
+          ls shots | wc -l
+          grep -q "CLIENTTEST PASS" clienttest.log
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: physicsbruhh-jar
-          path: build/libs/*.jar
-          retention-days: 14
+          name: clienttest
+          path: |
+            clienttest.log
+            shots/
+          retention-days: 7
+          if-no-files-found: ignore

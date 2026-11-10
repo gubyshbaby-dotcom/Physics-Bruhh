@@ -6,11 +6,17 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
@@ -78,10 +84,17 @@ public final class SelfTest {
                 // C: honey in front of the extended sticky head, then retract
                 level.setBlock(new BlockPos(0, Y, 6), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
                 level.setBlock(new BlockPos(-3, Y, 6), Blocks.AIR.defaultBlockState(), 3);
+                // F: a honey block placed the ordinary way (using the item on the floor)
+                BlockPos floor = new BlockPos(4, Y - 1, 10);
+                ItemStack stack = new ItemStack(Items.HONEY_BLOCK);
+                stack.useOn(new UseOnContext(level, null, InteractionHand.MAIN_HAND, stack,
+                        new BlockHitResult(Vec3.atCenterOf(floor).add(0.0, 0.5, 0.0), Direction.UP, floor, false)));
             } else if (tick == 100) {
                 expect("C: sticky piston retracted", !level.getBlockState(new BlockPos(-2, Y, 6)).getValue(PistonBaseBlock.EXTENDED));
                 expect("C: honey was not pulled as a block", !level.getBlockState(new BlockPos(-1, Y, 6)).is(Blocks.HONEY_BLOCK));
                 expect("C: honey became goo", goo(level, PhysicsBruhh.HONEY_GOO.get(), new BlockPos(0, Y, 6)) == 1);
+                expect("F: placed honey is not a block any more", level.getBlockState(new BlockPos(4, Y, 10)).isAir());
+                expect("F: placed honey became goo", goo(level, PhysicsBruhh.HONEY_GOO.get(), new BlockPos(4, Y, 10)) == 1);
                 // D: with the rule off, vanilla behaviour (z = 9)
                 level.getGameRules().set(PhysicsBruhh.PHYSICAL_GOO.get(), false, server);
                 level.setBlock(new BlockPos(-1, Y, 9), Blocks.SLIME_BLOCK.defaultBlockState(), 3);

@@ -60,13 +60,15 @@ public final class GooEvents {
     @SubscribeEvent
     public static void onPiston(PistonEvent.Pre event) {
         if (!(event.getLevel() instanceof ServerLevel level) || !enabled(level)) return;
-        // only sticky pistons drag blocks back; a plain piston retracting leaves its neighbours alone
-        if (!event.getPistonMoveType().isExtend && !event.getState().is(Blocks.STICKY_PISTON)) return;
+        float lx = event.getDirection().getStepX(), lz = event.getDirection().getStepZ();
+        if (!event.getPistonMoveType().isExtend) {
+            // Only sticky pistons drag anything back, and only the block right in front of the head.
+            // (The structure resolver is useless here: the head is still in the way at this point.)
+            if (event.getState().is(Blocks.STICKY_PISTON)) convert(level, event.getPos().relative(event.getDirection(), 2), -lx, -lz);
+            return;
+        }
         PistonStructureResolver resolver = event.getStructureHelper();
         if (resolver == null || !resolver.resolve()) return;
-        List<BlockPos> moved = List.copyOf(resolver.getToPush());
-        float lx = event.getDirection().getStepX(), lz = event.getDirection().getStepZ();
-        if (!event.getPistonMoveType().isExtend) { lx = -lx; lz = -lz; }
-        for (BlockPos pos : moved) convert(level, pos, lx, lz);
+        for (BlockPos pos : List.copyOf(resolver.getToPush())) convert(level, pos, lx, lz);
     }
 }
