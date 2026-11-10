@@ -331,9 +331,9 @@ impl World {
                 }
             }
         }
-        // anchors whose surface is gone let go
+        // anchors of awake goo whose surface is gone let go (sleeping goo is outside the scanned region)
         for i in 0..self.maxp {
-            if self.alive[i] != 0 && self.anc_kind[i] == 1 {
+            if self.alive[i] != 0 && self.anc_kind[i] == 1 && self.bodies[i / self.nb].awake {
                 let o = i * 3; let pt = [self.anc_pt[o], self.anc_pt[o + 1], self.anc_pt[o + 2]];
                 if !self.near_static(&pt, self.rc + 0.06) { self.anc_kind[i] = 0; }
             }

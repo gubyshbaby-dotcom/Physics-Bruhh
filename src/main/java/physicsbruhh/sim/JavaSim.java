@@ -217,7 +217,8 @@ public final class JavaSim implements GooSim {
                 }
             }
         }
-        for (int i = 0; i < maxp; i++) if (alive[i] != 0 && ancKind[i] == 1 && !nearStatic(ancPt[i * 3], ancPt[i * 3 + 1], ancPt[i * 3 + 2], rc + 0.06f)) ancKind[i] = 0;
+        // anchors of awake goo whose surface is gone let go (sleeping goo is outside the scanned region)
+        for (int i = 0; i < maxp; i++) if (alive[i] != 0 && ancKind[i] == 1 && bodies[i / nb].awake && !nearStatic(ancPt[i * 3], ancPt[i * 3 + 1], ancPt[i * 3 + 2], rc + 0.06f)) ancKind[i] = 0;
     }
 
     private boolean nearStatic(float px, float py, float pz, float tol) {

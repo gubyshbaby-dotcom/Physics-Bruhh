@@ -37,6 +37,13 @@ neoForge {
             type = "gameTestServer"
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         }
+        // CI: boots a real dedicated server, lets pistons loose on honey and slime, checks, stops
+        selfTest {
+            server()
+            programArgument '--nogui'
+            systemProperty 'physicsbruhh.selftest', 'true'
+            gameDirectory = project.file('run/selftest')
+        }
         configureEach {
             logLevel = org.slf4j.event.Level.INFO
         }

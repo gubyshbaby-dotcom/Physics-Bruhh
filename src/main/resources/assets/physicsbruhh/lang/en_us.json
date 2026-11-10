@@ -1,0 +1,9 @@
+{
+  "entity.physicsbruhh.honey_goo": "Honey",
+  "entity.physicsbruhh.slime_goo": "Slime",
+  "gamerule.category.physicsbruhh.goo": "Physics Bruhh",
+  "gamerule.physicsbruhh.physical_goo": "Honey and slime behave like goo",
+  "gamerule.physicsbruhh.physical_goo.description": "Placed or piston-moved honey and slime blocks melt, wobble and stretch instead of staying rigid blocks. Turn off to keep vanilla contraptions working.",
+  "gamerule.physicsbruhh:physical_goo": "Honey and slime behave like goo",
+  "gamerule.physicsbruhh:physical_goo.description": "Placed or piston-moved honey and slime blocks melt, wobble and stretch instead of staying rigid blocks. Turn off to keep vanilla contraptions working."
+}

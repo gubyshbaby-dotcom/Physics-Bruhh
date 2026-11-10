@@ -106,6 +106,16 @@ fn mesh_of_a_fresh_block_is_about_one_block() {
     for v in out.chunks(6) { for c in 0..3 { assert!(v[c].is_finite()); lo[c] = lo[c].min(v[c]); hi[c] = hi[c].max(v[c]); }
         let nl = (v[3] * v[3] + v[4] * v[4] + v[5] * v[5]).sqrt(); assert!((nl - 1.0).abs() < 1e-3); }
     for c in 0..3 { let size = hi[c] - lo[c]; assert!(size > 0.9 && size < 1.1, "axis {} size {}", c, size); }
+    // quads must wind counter-clockwise seen from outside, so the game's back-face culling keeps them
+    let (mut good, mut bad) = (0, 0);
+    for qd in out.chunks(24) {
+        let v = |k: usize| [qd[k * 6], qd[k * 6 + 1], qd[k * 6 + 2]];
+        let (a, b, d) = (v(0), v(1), v(3));
+        let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [d[0] - a[0], d[1] - a[1], d[2] - a[2]]);
+        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        if n[0] * qd[3] + n[1] * qd[4] + n[2] * qd[5] > 0.0 { good += 1; } else { bad += 1; }
+    }
+    assert!(bad * 50 < good, "winding: {} outward, {} inward", good, bad);
     assert_eq!(mesh::build(&w, HONEY, &mut out), 0);
 }
 
