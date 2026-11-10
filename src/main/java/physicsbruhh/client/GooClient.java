@@ -2,6 +2,7 @@ package physicsbruhh.client;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -102,6 +103,7 @@ public final class GooClient {
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
         bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false;
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
+        PART_IDS.clear();
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
     }
 
@@ -236,6 +238,22 @@ public final class GooClient {
         return 1.0F;
     }
 
+    private static final Long2IntOpenHashMap PART_IDS = new Long2IntOpenHashMap();
+    private static int nextPartId = 1;
+
+    /** One number per moving part (block position + box index): never shared, never reused, small enough to be exact in a float. */
+    private static int partId(BlockPos idPos, int index) {
+        long key = idPos.asLong() * 8L + Math.min(index, 7);
+        int id = PART_IDS.get(key);
+        if (id == 0) {
+            if (PART_IDS.size() > 8192) PART_IDS.clear();
+            if (nextPartId > 16_000_000) nextPartId = 1;
+            id = nextPartId++;
+            PART_IDS.put(key, id);
+        }
+        return id;
+    }
+
     private static BlockState headState(Direction facing, boolean sticky) {
         return Blocks.PISTON_HEAD.defaultBlockState().setValue(PistonHeadBlock.FACING, facing).setValue(PistonHeadBlock.TYPE, sticky ? PistonType.STICKY : PistonType.DEFAULT);
     }
@@ -279,7 +297,7 @@ public final class GooClient {
         for (AABB box : shape.toAabbs()) {
             if (nk >= MAX_KINEMATIC) break;
             int i = nk * GooSim.KINEMATIC_FLOATS;
-            kin[i] = (float) (((idPos.asLong() * 31L + index) & 0xFFFFFFL) + 1); // stable id, exact in a float
+            kin[i] = partId(idPos, index);
             kin[i + 1] = (float) (box.minX + ox + pos.getX() - o.getX()); kin[i + 2] = (float) (box.minY + oy + pos.getY() - o.getY()); kin[i + 3] = (float) (box.minZ + oz + pos.getZ() - o.getZ());
             kin[i + 4] = (float) (box.maxX + ox + pos.getX() - o.getX()); kin[i + 5] = (float) (box.maxY + oy + pos.getY() - o.getY()); kin[i + 6] = (float) (box.maxZ + oz + pos.getZ() - o.getZ());
             kin[i + 7] = vx; kin[i + 8] = vy; kin[i + 9] = vz;
@@ -303,17 +321,18 @@ public final class GooClient {
 
     static boolean healthy() { return sim != null && running; }
 
-    /** Widest extent along x of any slime body, in blocks (smoke test: has the band between two pistons held?). */
-    static float widestSlime() {
+    /** World x range of the slime body that is widest along x (smoke test: is the band between two pistons where it should be?). */
+    static float[] widestSlime() {
         float[] info = bodyInfo;
-        float widest = 0.0F;
+        float[] span = { 0.0F, 0.0F };
         for (GooEntity goo : LIVE.values()) {
             if (goo.material() != GooSim.SLIME) continue;
             Integer slot = SLOT_OF_ENTITY.get(goo.getId());
             if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] == 0.0F) continue;
-            widest = Math.max(widest, info[slot * 8 + 5] - info[slot * 8 + 2]);
+            float lo = info[slot * 8 + 2] + origin.getX(), hi = info[slot * 8 + 5] + origin.getX();
+            if (hi - lo > span[1] - span[0]) { span[0] = lo; span[1] = hi; }
         }
-        return widest;
+        return span;
     }
 
     static int quadCount(int material) { synchronized (MESH_LOCK) { return meshQuads[material]; } }

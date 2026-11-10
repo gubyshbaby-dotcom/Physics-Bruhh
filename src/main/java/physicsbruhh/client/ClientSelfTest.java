@@ -22,7 +22,7 @@ final class ClientSelfTest {
     private static int tick = -1;
     private static long firstTick;
     private static boolean done;
-    private static float stretched;
+    private static float restingWidth = -1.0F, bandLeft = 99.0F, bandRight = -99.0F, bandWidest;
 
     private ClientSelfTest() {}
 
@@ -44,8 +44,13 @@ final class ClientSelfTest {
         server.execute(() -> GooEvents.convert(server.overworld(), new BlockPos(x, Y, z), leanX, leanZ));
     }
 
+    private static String slime() {
+        float[] span = GooClient.widestSlime();
+        return String.format(java.util.Locale.ROOT, "%.2f..%.2f", span[0], span[1]);
+    }
+
     private static void stage(String what) {
-        PhysicsBruhh.LOGGER.info("CLIENTTEST stage: {}; {} widestSlime={}", what, GooClient.describe(), GooClient.widestSlime());
+        PhysicsBruhh.LOGGER.info("CLIENTTEST stage: {}; {} widestSlime={}", what, GooClient.describe(), slime());
     }
 
     private static void run() {
@@ -103,21 +108,28 @@ final class ClientSelfTest {
                 commands(server, "setblock 11 200 6 minecraft:air", "setblock 17 200 6 minecraft:air",
                         "setblock 11 200 3 minecraft:air", "setblock 17 200 3 minecraft:air");
             } else if (tick > 0 && tick < 420 && tick % 20 == 0) {
-                PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} widestSlime={} clear={} drawCalls={}", tick, GooClient.describe(), GooClient.widestSlime(), GooClient.clearLook, GooRenderer.drawCalls);
+                PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} widestSlime={} clear={} drawCalls={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.drawCalls);
             } else if (tick == 420) {
-                String state = GooClient.describe() + " widestSlime=" + GooClient.widestSlime() + " stretched=" + stretched + " clear=" + GooClient.clearLook + " drawCalls=" + GooRenderer.drawCalls;
+                String state = GooClient.describe() + " widestSlime=" + slime() + " restingWidth=" + restingWidth + " band=" + bandLeft + ".." + bandRight + " clear=" + GooClient.clearLook + " drawCalls=" + GooRenderer.drawCalls;
                 String problem = null;
                 if (!GooClient.healthy()) problem = "simulation is not running";
                 else if (GooClient.quadCount(0) == 0) problem = "no honey surface";
                 else if (GooClient.quadCount(1) == 0) problem = "no slime surface";
                 else if (GooRenderer.drawCalls == 0) problem = "the surface never reached the renderer";
-                else if (stretched < 2.3F) problem = "slime did not stay stretched between the retracted sticky pistons (widest " + stretched + ")";
+                else if (restingWidth > 1.35F) problem = "slime did not sit still between the extended pistons (width " + restingWidth + ")";
+                else if (bandLeft > 13.6F || bandRight < 15.4F) problem = "slime did not stay stretched between the retracted sticky pistons (" + bandLeft + ".." + bandRight + ")";
+                else if (bandWidest > 3.5F) problem = "slime was flung apart (" + bandWidest + " blocks wide)";
                 else if (!GooClient.clearLook) problem = "the clear_goo game rule did not reach the client";
                 PhysicsBruhh.LOGGER.info("CLIENTTEST final {}", state);
                 finish(mc, problem);
             }
-            // a second after the first retraction the band must still span the gap
-            if (tick >= 140 && tick <= 160) stretched = Math.max(stretched, GooClient.widestSlime());
+            // before the first retraction every slime body is still about a block wide ...
+            if (tick == 118) { float[] span = GooClient.widestSlime(); restingWidth = span[1] - span[0]; }
+            // ... and a second after it the band spans the gap between the two retracted heads (bases at x = 12 and 16)
+            if (tick >= 140 && tick <= 160) {
+                float[] span = GooClient.widestSlime();
+                bandLeft = Math.min(bandLeft, span[0]); bandRight = Math.max(bandRight, span[1]); bandWidest = Math.max(bandWidest, span[1] - span[0]);
+            }
         } catch (Throwable t) {
             PhysicsBruhh.LOGGER.error("CLIENTTEST crashed", t);
             finish(mc, "exception: " + t);
