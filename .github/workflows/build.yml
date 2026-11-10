@@ -97,7 +97,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb libgl1-mesa-dri mesa-vulkan-drivers imagemagick > /dev/null
+          sudo apt-get install -y -qq xvfb libgl1-mesa-dri mesa-vulkan-drivers imagemagick x11-apps > /dev/null
           mkdir -p run/clienttest/saves shots
           cp -r run/selftest/world run/clienttest/saves/selftest
           printf 'pauseOnLostFocus:false\nonboardAccessibility:false\ntutorialStep:none\nrenderDistance:4\nsimulationDistance:5\nskipMultiplayerWarning:true\njoinedFirstServer:true\n' > run/clienttest/options.txt
@@ -110,10 +110,10 @@ jobs:
             while true; do
               n=$((n + 1))
               if grep -q "CLIENTTEST world joined" clienttest.log; then
-                import -display :99 -window root "shots/scene_$(date +%H%M%S).png" 2> /dev/null || true
-                sleep 1
+                xwd -root -silent -display :99 -out "shots/scene_$(date +%H%M%S_%3N).xwd" 2> /dev/null || true
+                sleep 0.35
               else
-                if [ $((n % 20)) -eq 0 ]; then import -display :99 -window root "shots/boot_$(date +%H%M%S).png" 2> /dev/null || true; fi
+                if [ $((n % 20)) -eq 0 ]; then xwd -root -silent -display :99 -out "shots/boot_$(date +%H%M%S_%3N).xwd" 2> /dev/null || true; fi
                 sleep 1
               fi
             done
@@ -121,9 +121,18 @@ jobs:
           SHOTS=$!
           timeout 780 ./gradlew runClientTest -PskipCargo=true > clienttest.log 2>&1 || true
           kill $SHOTS 2> /dev/null || true
-          grep -E "CLIENTTEST|PhysicsBruhh|Using the|Backend|OpenGL|Vulkan|Exception|ERROR" clienttest.log | head -120 || true
-          ls shots | wc -l
+          for f in shots/*.xwd; do convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
+          grep -E "CLIENTTEST|Using the|graphics backend|Goo simulation stopped" clienttest.log | head -80 || true
+          echo "screenshots: $(ls shots | wc -l)"
           grep -q "CLIENTTEST PASS" clienttest.log
+      - name: Screenshots as text (commits tagged [shots])
+        if: always() && contains(github.event.head_commit.message, '[shots]')
+        run: |
+          for f in shots/*.jpg; do
+            echo "SHOT-BEGIN $(basename "$f")"
+            convert "$f" -resize 854x480 -quality 72 jpg:- | base64 -w 160
+            echo "SHOT-END"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:

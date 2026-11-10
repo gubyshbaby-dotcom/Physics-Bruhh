@@ -83,9 +83,9 @@ final class ClientSelfTest {
             } else if (tick == 170) {
                 PhysicsBruhh.LOGGER.info("CLIENTTEST stage: pistons push; {}", GooClient.describe());
                 commands(server, "setblock 10 200 0 minecraft:redstone_block", "setblock 17 200 0 minecraft:redstone_block");
-            } else if (tick > 0 && tick < 330 && tick % 20 == 0) {
+            } else if (tick > 0 && tick < 380 && tick % 20 == 0) {
                 PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} drawCalls={} drawnQuads={}", tick, GooClient.describe(), GooRenderer.drawCalls, GooRenderer.drawnQuads);
-            } else if (tick == 330) {
+            } else if (tick == 380) {
                 String state = GooClient.describe() + " drawCalls=" + GooRenderer.drawCalls + " drawnQuads=" + GooRenderer.drawnQuads;
                 String problem = null;
                 if (!GooClient.healthy()) problem = "simulation is not running";

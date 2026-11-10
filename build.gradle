@@ -54,6 +54,7 @@ neoForge {
             programArgument '--height'
             programArgument '720'
             systemProperty 'physicsbruhh.clienttest', 'true'
+            systemProperty 'physicsbruhh.lockstep', 'true'
             gameDirectory = project.file('run/clienttest')
         }
         configureEach {

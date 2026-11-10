@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import net.minecraft.client.Minecraft;
@@ -59,6 +61,13 @@ public final class GooClient {
     private static final ConcurrentHashMap<Integer, Integer> SLOT_OF_ENTITY = new ConcurrentHashMap<>();
     private static final List<GooEntity> PENDING = new ArrayList<>();
     private static final IntOpenHashSet KNOWN = new IntOpenHashSet();
+
+    /**
+     * Test mode ({@code -Dphysicsbruhh.lockstep=true}): exactly three simulation steps per client
+     * tick instead of wall-clock time, so a machine that is too slow shows the same motion, only slower.
+     */
+    private static final boolean LOCKSTEP = Boolean.getBoolean("physicsbruhh.lockstep");
+    private static final Semaphore STEP_REQUEST = new Semaphore(0), STEP_DONE = new Semaphore(0);
 
     private GooClient() {}
 
@@ -135,6 +144,11 @@ public final class GooClient {
             PENDING.clear();
         }
         if (sim != null && !paused) { Colliders c = scan(level); if (c != null) COLLIDERS.set(c); }
+        if (LOCKSTEP && sim != null && running && !paused) {
+            STEP_DONE.drainPermits();
+            STEP_REQUEST.release();
+            try { STEP_DONE.tryAcquire(10, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
     }
 
     /** Collects block collision boxes (and moving piston parts) around every awake body. */
@@ -251,6 +265,7 @@ public final class GooClient {
             while (running) {
                 GooSim s = sim;
                 if (s == null) break;
+                if (LOCKSTEP && !STEP_REQUEST.tryAcquire(20, TimeUnit.MILLISECONDS)) continue;
                 Runnable cmd;
                 while ((cmd = COMMANDS.poll()) != null) { cmd.run(); dirty = true; }
                 Colliders c = COLLIDERS.getAndSet(null);
@@ -263,7 +278,9 @@ public final class GooClient {
                 long now = System.nanoTime();
                 float dt = (now - last) / 1.0e9F;
                 last = now;
-                int awake = paused ? 0 : s.step(dt);
+                int awake = 0;
+                if (LOCKSTEP) { for (int k = 0; k < 3; k++) awake = s.step(1.0F / 60.0F + 1.0e-6F); }
+                else if (!paused) awake = s.step(dt);
                 if (s instanceof NativeSim n && n.broken()) throw new IllegalStateException("the Rust core reported an internal error");
                 int slots = s.bodies(infoBuf);
                 float[] info = new float[Math.max(0, slots) * GooSim.BODY_FLOATS];
@@ -286,6 +303,7 @@ public final class GooClient {
                 }
                 long spent = System.nanoTime() - now;
                 stepMillis += (spent / 1.0e6F - stepMillis) * 0.05F;
+                if (LOCKSTEP) { STEP_DONE.release(); continue; }
                 long budget = 16_666_666L - spent;
                 if (budget > 200_000L) LockSupport.parkNanos(budget); else Thread.onSpinWait();
             }
