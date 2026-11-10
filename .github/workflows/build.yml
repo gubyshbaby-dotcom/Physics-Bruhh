@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Rust core (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, platform: linux-x86_64,   lib: libphysicsbruhh_native.so }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   platform: windows-x86_64, lib: physicsbruhh_native.dll }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     platform: macos-aarch64,  lib: libphysicsbruhh_native.dylib }
+          - { os: macos-latest,   target: x86_64-apple-darwin,      platform: macos-x86_64,   lib: libphysicsbruhh_native.dylib }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: cargo-${{ matrix.target }}-${{ hashFiles('native/Cargo.toml') }}
+      - name: Test the simulation core
+        if: matrix.platform == 'linux-x86_64'
+        working-directory: native
+        run: cargo test --release
+      - name: Build
+        working-directory: native
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir -p stage/natives/${{ matrix.platform }}
+          cp native/target/${{ matrix.target }}/release/${{ matrix.lib }} stage/natives/${{ matrix.platform }}/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: stage/
+          retention-days: 7
+
+  mod:
+    name: Mod jar (NeoForge)
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: src/main/resources/
+      - name: List bundled natives
+        run: find src/main/resources/natives -type f | sort
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build
+        run: ./gradlew build -PskipCargo=true --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: physicsbruhh-jar
+          path: build/libs/*.jar
+          retention-days: 14

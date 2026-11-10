@@ -1,0 +1,130 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.148'
+    id 'idea'
+}
+
+tasks.named('wrapper', Wrapper).configure {
+    distributionType = Wrapper.DistributionType.BIN
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+neoForge {
+    version = project.neo_version
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        gameTestServer {
+            type = "gameTestServer"
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        configureEach {
+            logLevel = org.slf4j.event.Level.INFO
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+}
+
+// ---------------------------------------------------------------------------------------------
+// Native simulation core (Rust). `cargoNative` builds it for the machine running Gradle and puts
+// it under natives/<os>-<arch>/ inside the jar. CI builds every platform separately and passes
+// -PskipCargo=true. If cargo is missing the build still succeeds; the mod then falls back to its
+// pure-Java simulation at runtime.
+// ---------------------------------------------------------------------------------------------
+abstract class CargoNative extends DefaultTask {
+    @Inject abstract ExecOperations getExecOps()
+    @Internal abstract DirectoryProperty getCrateDir()
+    @OutputDirectory abstract DirectoryProperty getOutDir()
+
+    @TaskAction
+    void run() {
+        def os = System.getProperty('os.name').toLowerCase()
+        def arch = System.getProperty('os.arch').toLowerCase()
+        def o = os.contains('win') ? 'windows' : os.contains('mac') ? 'macos' : 'linux'
+        def a = (arch.contains('aarch64') || arch.contains('arm64')) ? 'aarch64' : 'x86_64'
+        def lib = o == 'windows' ? 'physicsbruhh_native.dll' : o == 'macos' ? 'libphysicsbruhh_native.dylib' : 'libphysicsbruhh_native.so'
+        def crate = crateDir.get().asFile
+        def dest = new File(outDir.get().asFile, "natives/${o}-${a}")
+        dest.mkdirs()
+        try {
+            execOps.exec {
+                workingDir = crate
+                commandLine 'cargo', 'build', '--release'
+            }
+            def built = new File(crate, "target/release/${lib}")
+            if (built.exists()) {
+                new File(dest, lib).bytes = built.bytes
+                logger.lifecycle("Native core built: natives/${o}-${a}/${lib}")
+            } else {
+                logger.warn("cargo finished but ${built} is missing; the jar will use the Java simulation")
+            }
+        } catch (Exception e) {
+            logger.warn("Could not build the Rust core (${e.message}); the jar will use the Java simulation")
+        }
+    }
+}
+
+def cargoNative = tasks.register('cargoNative', CargoNative) {
+    crateDir = layout.projectDirectory.dir('native')
+    outDir = layout.buildDirectory.dir('generated/natives')
+    outputs.upToDateWhen { false }
+    onlyIf { !providers.gradleProperty('skipCargo').isPresent() }
+}
+sourceSets.main.resources.srcDir(cargoNative)
+
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
