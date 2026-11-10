@@ -57,6 +57,7 @@ public class PhysicsBruhh {
         });
         modBus.addListener((RegisterGameRuleCategoryEvent e) -> e.register(RULE_CATEGORY));
         NeoForge.EVENT_BUS.register(GooEvents.class);
+        NeoForge.EVENT_BUS.register(GooCommands.class);
         SelfTest.register();
     }
 }

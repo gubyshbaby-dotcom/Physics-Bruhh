@@ -111,6 +111,22 @@ public final class SelfTest {
                 }
             } else if (tick == 125) {
                 expect("E: punched goo is gone", goo(level, PhysicsBruhh.HONEY_GOO.get(), new BlockPos(4, Y, 0)) == 0);
+                // G: the clear command, first with a radius that only reaches the slime of test B, then everywhere
+                int before = level.getEntities(PhysicsBruhh.HONEY_GOO.get(), e -> true).size() + level.getEntities(PhysicsBruhh.SLIME_GOO.get(), e -> true).size();
+                server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withPosition(new Vec3(-0.5, Y, 3.5)).withSuppressedOutput(), "goo clear 2");
+                expect("G: /goo clear 2 removed the goo next to it", goo(level, PhysicsBruhh.SLIME_GOO.get(), new BlockPos(-1, Y, 3)) == 0);
+                int after = level.getEntities(PhysicsBruhh.HONEY_GOO.get(), e -> true).size() + level.getEntities(PhysicsBruhh.SLIME_GOO.get(), e -> true).size();
+                expect("G: ... and left the rest (" + before + " -> " + after + ")", after > 0 && after < before);
+            } else if (tick == 127) {
+                server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "goo clear");
+            } else if (tick == 130) {
+                int left = level.getEntities(PhysicsBruhh.HONEY_GOO.get(), e -> true).size() + level.getEntities(PhysicsBruhh.SLIME_GOO.get(), e -> true).size();
+                expect("G: /goo clear removed everything", left == 0);
+                // leave something for the client test that opens this world next
+                level.setBlock(new BlockPos(-1, Y, 3), Blocks.SLIME_BLOCK.defaultBlockState(), 3);
+                GooEvents.convert(level, new BlockPos(-1, Y, 3), 1, 0);
+                level.setBlock(new BlockPos(4, Y, 10), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
+                GooEvents.convert(level, new BlockPos(4, Y, 10), 1, 0);
                 finish(server);
             }
         } catch (Throwable t) {
