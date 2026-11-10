@@ -9,13 +9,22 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemUtils;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonStructureResolver;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.living.LivingFallEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.PistonEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -51,10 +60,92 @@ public final class GooEvents {
         return goo;
     }
 
-    private static List<GooEntity> gooIn(ServerLevel level, AABB box) {
+    static List<GooEntity> gooIn(ServerLevel level, AABB box) {
         List<GooEntity> found = new ArrayList<>(level.getEntities(PhysicsBruhh.HONEY_GOO.get(), box, e -> true));
         found.addAll(level.getEntities(PhysicsBruhh.SLIME_GOO.get(), box, e -> true));
         return found;
+    }
+
+    /** A whole block's worth of goo in the cell {@code pos}, as if a block had just turned into goo there. */
+    public static GooEntity spawnBlock(ServerLevel level, BlockPos pos, int material, float leanX, float leanZ) {
+        GooEntity goo = new GooEntity(material == GooSim.SLIME ? PhysicsBruhh.SLIME_GOO.get() : PhysicsBruhh.HONEY_GOO.get(), level);
+        goo.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+        goo.setLean(leanX, leanZ);
+        goo.applyLook(level);
+        level.addFreshEntity(goo);
+        return goo;
+    }
+
+    /**
+     * Goo poured or thrown: {@code count} particles of it leave {@code from} with a velocity (blocks
+     * per second) and are expected to come down around {@code target}. They join a piece of the same
+     * material lying there if it has room, otherwise they become a new piece. Returns how many went in.
+     */
+    public static int pour(ServerLevel level, int material, Vec3 from, Vec3 velocity, Vec3 target, int count, boolean lump) {
+        GooEntity best = null;
+        double bestDistance = 1.6 * 1.6;
+        for (GooEntity goo : gooIn(level, AABB.ofSize(target, 4.0, 4.0, 4.0))) {
+            if (goo.material() != material || goo.isRemoved() || goo.amount() + count > GooSim.BLOCK) continue;
+            double d = goo.distanceToSqr(target.x, target.y, target.z);
+            if (d < bestDistance) { bestDistance = d; best = goo; }
+        }
+        if (best == null) {
+            best = new GooEntity(material == GooSim.SLIME ? PhysicsBruhh.SLIME_GOO.get() : PhysicsBruhh.HONEY_GOO.get(), level);
+            BlockPos cell = BlockPos.containing(target);
+            best.setPos(cell.getX() + 0.5, cell.getY(), cell.getZ() + 0.5);
+            best.startEmpty();
+            best.applyLook(level);
+            int poured = best.pour(from, velocity, count, lump);
+            level.addFreshEntity(best);
+            return poured;
+        }
+        return best.pour(from, velocity, count, lump);
+    }
+
+    /** Where something thrown from {@code from} with a velocity (blocks per second) comes down: followed for three seconds or until it meets a block. */
+    public static Vec3 landing(ServerLevel level, Entity thrower, Vec3 from, Vec3 velocity) {
+        Vec3 p = from, v = velocity.scale(0.05);
+        for (int i = 0; i < 60; i++) {
+            Vec3 next = p.add(v);
+            BlockHitResult hit = level.clip(new ClipContext(p, next, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, thrower));
+            if (hit.getType() != HitResult.Type.MISS) {
+                Direction face = hit.getDirection();
+                return hit.getLocation().add(face.getStepX() * 0.1, face.getStepY() * 0.1, face.getStepZ() * 0.1);
+            }
+            p = next;
+            v = v.add(0.0, -0.025, 0.0);
+        }
+        return p;
+    }
+
+    /**
+     * A honey bottle used while sneaking is poured out (the bottle stays); a slime ball is thrown as
+     * a lump of slime. On goo itself the same items go straight into it, see {@link GooEntity#interact}.
+     */
+    @SubscribeEvent
+    public static void onUseItem(PlayerInteractEvent.RightClickItem event) {
+        Player player = event.getEntity();
+        ItemStack stack = event.getItemStack();
+        boolean honey = stack.is(Items.HONEY_BOTTLE) && player.isSecondaryUseActive(), slime = stack.is(Items.SLIME_BALL);
+        if (!honey && !slime) return;
+        // the client cannot know whether the rule is on, so it leaves this to the server
+        if (!(player.level() instanceof ServerLevel level) || !enabled(level) || player.isSpectator()) return;
+        Vec3 look = player.getLookAngle();
+        if (honey) {
+            Vec3 from = player.getEyePosition().add(look.scale(0.5)).add(0.0, -0.2, 0.0);
+            Vec3 velocity = look.scale(2.2);
+            if (pour(level, GooSim.HONEY, from, velocity, landing(level, player, from, velocity), GooSim.BOTTLE, false) == 0) return;
+            level.playSound(null, player.getX(), player.getY(), player.getZ(), SoundEvents.BOTTLE_EMPTY, SoundSource.PLAYERS, 0.8F, 1.0F);
+            player.setItemInHand(event.getHand(), ItemUtils.createFilledResult(stack, player, new ItemStack(Items.GLASS_BOTTLE)));
+        } else {
+            Vec3 from = player.getEyePosition().add(look.scale(0.75)).add(0.0, -0.1, 0.0);
+            Vec3 velocity = look.scale(7.0).add(0.0, 1.2, 0.0);
+            if (pour(level, GooSim.SLIME, from, velocity, landing(level, player, from, velocity), GooSim.BALL, true) == 0) return;
+            level.playSound(null, player.getX(), player.getY(), player.getZ(), SoundEvents.SNOWBALL_THROW, SoundSource.PLAYERS, 0.6F, 0.6F);
+            stack.consume(1, player);
+        }
+        event.setCancellationResult(InteractionResult.SUCCESS_SERVER);
+        event.setCanceled(true);
     }
 
     /**

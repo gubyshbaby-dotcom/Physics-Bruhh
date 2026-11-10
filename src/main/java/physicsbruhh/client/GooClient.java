@@ -1,5 +1,6 @@
 package physicsbruhh.client;
 
+import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
@@ -61,6 +62,15 @@ public final class GooClient {
     static int[] meshQuads = { 0, 0 };
     static int meshVersion;
     static volatile BlockPos origin = BlockPos.ZERO;
+    /**
+     * Latest particles (x, y, z, kind and size: see {@link GooSim#particles}), shared with the liquid
+     * look under {@link #PARTICLE_LOCK}. Only kept up to date while {@link #wantParticles} is set; the
+     * surface mesh is not built meanwhile.
+     */
+    static final Object PARTICLE_LOCK = new Object();
+    static float[] particleData = new float[0];
+    static int particleCount, particleVersion;
+    static volatile boolean wantParticles;
 
     private static volatile GooSim sim;
     private static Thread thread;
@@ -72,6 +82,8 @@ public final class GooClient {
     private static final List<GooEntity> PENDING = new ArrayList<>();
     private static final IntOpenHashSet KNOWN = new IntOpenHashSet();
     private static final Int2ObjectOpenHashMap<GooEntity> LIVE = new Int2ObjectOpenHashMap<>();
+    /** How much goo each piece holds as far as the simulation has been told (particles); the markers say how much it should be. */
+    private static final Int2IntOpenHashMap TOLD = new Int2IntOpenHashMap();
     /** Goo is drawn as clear liquid (the server's {@code clear_goo} game rule, read off the goo markers). */
     static volatile boolean clearLook;
     /** Cells of bodies added this tick: their surroundings are scanned at once, so they never spend a tick without a floor. */
@@ -102,6 +114,7 @@ public final class GooClient {
         PENDING.remove(goo);
         final int id = goo.getId();
         LIVE.remove(id);
+        TOLD.remove(id);
         if (KNOWN.remove(id)) {
             COMMANDS.add(() -> { Integer slot = SLOT_OF_ENTITY.remove(id); GooSim s = sim; if (slot != null && s != null) s.removeBody(slot, true); });
         }
@@ -116,10 +129,11 @@ public final class GooClient {
         sim = null;
         if (s != null) s.close();
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
-        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false; NEW_CELLS.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
+        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); TOLD.clear(); clearLook = false; NEW_CELLS.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         PART_IDS.clear(); HEADS.clear();
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
+        synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
     }
 
     private static void start() {
@@ -163,6 +177,7 @@ public final class GooClient {
         boolean clear = false;
         for (GooEntity goo : LIVE.values()) { if (goo.clear()) { clear = true; break; } }
         clearLook = clear;
+        wantParticles = clear && GooFluid.inUse();
         if (!PENDING.isEmpty()) {
             if (sim == null) start();
             for (GooEntity goo : PENDING) {
@@ -176,15 +191,40 @@ public final class GooClient {
                 final float x = cell.getX() - o.getX(), y = cell.getY() - o.getY(), z = cell.getZ() - o.getZ();
                 final float age = goo.spawnAgeTicks() / 20.0F, lx = goo.leanX(), lz = goo.leanZ();
                 final float killY = level.getMinY() - 8 - o.getY();
+                // a block that turned into goo; goo being poured right now (it starts empty, the stream follows below); or poured goo met later, lying there
+                final int amount = goo.amount();
+                final int how = !goo.poured() ? 0 : goo.spawnAgeTicks() <= 2 ? 1 : 2;
+                TOLD.put(id, how == 0 ? GooSim.BLOCK : how == 1 ? 0 : amount);
                 COMMANDS.add(() -> {
                     GooSim s = sim;
                     if (s == null) return;
                     s.setKillY(killY);
-                    int slot = s.addBody(mat, x, y, z, lx, lz, age);
+                    int slot = how == 0 ? s.addBody(mat, x, y, z, lx, lz, age) : how == 1 ? s.addEmpty(mat, x, y, z) : s.addResting(mat, x, y, z, amount);
                     if (slot >= 0) { SLOT_OF_ENTITY.values().removeIf(v -> v == slot); SLOT_OF_ENTITY.put(id, slot); }
                 });
             }
             PENDING.clear();
+        }
+        // goo poured into a piece or taken out of it: the marker's amount has changed, the simulation follows
+        for (GooEntity goo : LIVE.values()) {
+            final int id = goo.getId();
+            if (!KNOWN.contains(id) || goo.isRemoved()) continue;
+            final int told = TOLD.get(id), now = goo.amount();
+            if (now == told) continue;
+            TOLD.put(id, now);
+            BlockPos o = origin;
+            Vec3 spot = goo.spot();
+            final float px = (float) (spot.x - o.getX()), py = (float) (spot.y - o.getY()), pz = (float) (spot.z - o.getZ());
+            final float vx = goo.push().x(), vy = goo.push().y(), vz = goo.push().z();
+            final boolean lump = goo.lump();
+            NEW_CELLS.add(BlockPos.containing(spot));
+            COMMANDS.add(() -> {
+                GooSim s = sim;
+                Integer slot = SLOT_OF_ENTITY.get(id);
+                if (s == null || slot == null) return;
+                if (now > told) s.emit(slot, px, py, pz, vx, vy, vz, now - told, lump);
+                else s.take(slot, px, py, pz, told - now);
+            });
         }
         if (sim != null && !paused) {
             Colliders c = scan(level);
@@ -516,19 +556,35 @@ public final class GooClient {
 
     /** The goo whose bounds the segment {@code from}-{@code to} enters first, within {@code limit} blocks; null if none. */
     static GooEntity pick(Vec3 from, Vec3 to, double limit) {
+        Picked picked = pickPoint(from, to, limit);
+        return picked == null ? null : picked.goo();
+    }
+
+    /** A piece of goo and the place a line of sight met it. */
+    record Picked(GooEntity goo, Vec3 point) {}
+
+    /** Like {@link #pick}, with the point where the segment enters the goo's bounds. */
+    static Picked pickPoint(Vec3 from, Vec3 to, double limit) {
         float[] info = bodyInfo;
         BlockPos o = origin;
         GooEntity best = null;
+        Vec3 bestPoint = null;
         double bestDistance = limit;
         for (GooEntity goo : LIVE.values()) {
             Integer slot = SLOT_OF_ENTITY.get(goo.getId());
             if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
             int b = slot * 8;
             AABB box = new AABB(info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ()).inflate(0.05);
-            double distance = box.contains(from) ? 0.0 : box.clip(from, to).map(hit -> hit.distanceTo(from)).orElse(Double.MAX_VALUE);
-            if (distance < bestDistance) { bestDistance = distance; best = goo; }
+            Vec3 point = box.contains(from) ? from : box.clip(from, to).orElse(null);
+            if (point == null) continue;
+            double distance = point.distanceTo(from);
+            if (distance < bestDistance) {
+                bestDistance = distance; best = goo;
+                // a little way in: the bounds are a box around the goo, the goo itself starts further on
+                bestPoint = point.add(to.subtract(from).normalize().scale(Math.min(0.25, Math.min(box.getXsize(), Math.min(box.getYsize(), box.getZsize())) * 0.5)));
+            }
         }
-        return best;
+        return best == null ? null : new Picked(best, bestPoint);
     }
 
     /** Material of the goo within a block of the given cell, or -1 if there is none. */
@@ -662,10 +718,10 @@ public final class GooClient {
     private static void simLoop() {
         ByteBuffer staticBuf = direct(MAX_STATIC * GooSim.STATIC_FLOATS), kinBuf = direct(MAX_KINEMATIC * GooSim.KINEMATIC_FLOATS);
         ByteBuffer infoBuf = direct(MAX_BODIES * GooSim.BODY_FLOATS);
-        ByteBuffer meshBuf = direct(1 << 18);
+        ByteBuffer meshBuf = direct(1 << 18), particleBuf = direct(1 << 16);
         long last = System.nanoTime(), speedFrom = 0L;
         int speedSteps = 0;
-        boolean dirty = true, hadAwake = false;
+        boolean dirty = true, hadAwake = false, asParticles = false;
         try {
             while (running) {
                 GooSim s = sim;
@@ -702,9 +758,22 @@ public final class GooClient {
                     traceStuck = stuck;
                 }
                 // once more after the last moving body has stopped or gone, or its final state would never be shown
-                boolean changed = awake > 0 || dirty || hadAwake;
+                boolean particles = wantParticles;
+                boolean changed = awake > 0 || dirty || hadAwake || particles != asParticles;
+                asParticles = particles;
                 hadAwake = awake > 0;
-                if (changed) {
+                if (changed && particles) {
+                    int count = s.particles(particleBuf);
+                    if (count < 0 && count > -(1 << 26)) { particleBuf = direct(-count + (1 << 14)); count = s.particles(particleBuf); }
+                    if (count < 0) count = 0;
+                    synchronized (PARTICLE_LOCK) {
+                        if (particleData.length < count * 4) particleData = new float[count * 4 + count * 2];
+                        particleBuf.asFloatBuffer().get(0, particleData, 0, count * 4);
+                        particleCount = count;
+                        particleVersion++;
+                    }
+                    dirty = false;
+                } else if (changed) {
                     for (int mat = 0; mat < 2; mat++) {
                         int quads = s.mesh(mat, meshBuf);
                         if (quads < 0 && quads > -(1 << 26)) { meshBuf = direct(-quads + (1 << 16)); quads = s.mesh(mat, meshBuf); }

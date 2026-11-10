@@ -1099,6 +1099,59 @@ public final class JavaSim implements GooSim {
         for (int vtx : new int[] { v0, v1, v2, v3 }) { int o = vtx * 6; emit(verts[o], verts[o + 1], verts[o + 2], verts[o + 3], verts[o + 4], verts[o + 5]); }
     }
 
+    /** Filler points {@link #particles} may add along stretched springs. */
+    public static final int PARTICLE_FILLERS = 16_000;
+
+    @Override
+    public int particles(ByteBuffer out) {
+        FloatBuffer fb = out.asFloatBuffer();
+        int room = fb.capacity() / 4, cnt = 0, fillers = PARTICLE_FILLERS;
+        for (int b = 0; b < slots; b++) {
+            Body bd = bodies[b];
+            if (bd.state == 0) continue;
+            Material m = mats[bd.mat];
+            boolean jelly = !m.dynamicSprings;
+            float slime = bd.mat == SLIME ? 2f : 0f;
+            for (int i = b * nb; i < (b + 1) * nb; i++) {
+                if (alive[i] == 0) continue;
+                float sc = Math.max(0f, Math.min(1f, scale[i]));
+                float px = p[i * 3], py = p[i * 3 + 1], pz = p[i * 3 + 2];
+                if (cnt < room) { fb.put(cnt * 4, px); fb.put(cnt * 4 + 1, py); fb.put(cnt * 4 + 2, pz); fb.put(cnt * 4 + 3, sc + slime); }
+                cnt++;
+                if (bd.state != 1 || sc < 0.99f) continue;
+                // fillers along springs that have been pulled long, so a band or a strand is not drawn as a row of beads
+                for (int k = 0; k < sprN[i]; k++) {
+                    int si = i * MAX_SPR + k;
+                    float rest = sprL[si];
+                    if (jelly && rest > 1.2f * s) continue;
+                    int j = sprJ[si];
+                    if (alive[j] == 0) continue;
+                    float dx = p[j * 3] - px, dy = p[j * 3 + 1] - py, dz = p[j * 3 + 2] - pz;
+                    float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    int count; float size, droop;
+                    if (jelly) {
+                        if (len < 1.6f * s || len > 6.5f * s) continue;
+                        count = Math.min(5, (int) (len / (1.1f * s))); size = 0.85f; droop = 0f;
+                    } else {
+                        if (len < 1.9f * s || len > 4f || (len < 2.9f * s && len < 1.3f * rest)) continue;
+                        if (((i * 31) ^ (j * 17)) % 2 != 0) continue;
+                        count = Math.min(40, (int) (len / (0.9f * s)));
+                        size = Math.max(0.3f, Math.min(0.7f, 1.9f * s / len));
+                        droop = Math.min(0.2f, m.threadSag * len);
+                    }
+                    if (count > fillers) continue;
+                    fillers -= count;
+                    for (int step = 1; step <= count; step++) {
+                        float t = step / (float) (count + 1);
+                        if (cnt < room) { fb.put(cnt * 4, px + dx * t); fb.put(cnt * 4 + 1, py + dy * t - droop * 4f * t * (1f - t)); fb.put(cnt * 4 + 2, pz + dz * t); fb.put(cnt * 4 + 3, size + slime + 4f); }
+                        cnt++;
+                    }
+                }
+            }
+        }
+        return cnt > room ? -cnt * 4 : cnt;
+    }
+
     @Override
     public int bodies(ByteBuffer out) {
         FloatBuffer fb = out.asFloatBuffer();

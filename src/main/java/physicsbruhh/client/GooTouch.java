@@ -6,7 +6,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.HoneyBlock;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.InputEvent;
@@ -107,20 +111,37 @@ final class GooTouch {
         mc.level.playLocalSound(player.getX(), player.getY(), player.getZ(), event, SoundSource.BLOCKS, volume, pitch, false);
     }
 
-    /** Left click: if the line of sight meets goo before anything else, the goo is what gets hit. */
+    /**
+     * Left or right click: if the line of sight meets goo before anything else, the goo is what gets
+     * hit or used, wherever on it that is (the marker the server keeps for it is much smaller than a
+     * puddle). Right clicks only when the hand holds something the goo has a use for.
+     */
     static void onClick(InputEvent.InteractionKeyMappingTriggered event) {
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
-        if (!event.isAttack() || player == null || mc.gameMode == null || player.isSpectator()) return;
+        if (!(event.isAttack() || event.isUseItem()) || player == null || mc.gameMode == null || player.isSpectator()) return;
         Vec3 from = player.getEyePosition(1.0F);
         double reach = player.entityInteractionRange();
         Vec3 to = from.add(player.getViewVector(1.0F).scale(reach));
         HitResult aimed = mc.hitResult;
-        double limit = aimed != null && aimed.getType() != HitResult.Type.MISS ? aimed.getLocation().distanceTo(from) : reach;
-        GooEntity goo = GooClient.pick(from, to, limit);
-        if (goo == null) return;
-        mc.gameMode.attack(player, goo);
+        double limit = aimed != null && aimed.getType() != HitResult.Type.MISS ? aimed.getLocation().distanceTo(from) + 0.05 : reach;
+        GooClient.Picked picked = GooClient.pickPoint(from, to, limit);
+        if (picked == null) return;
+        GooEntity goo = picked.goo();
+        if (event.isAttack()) {
+            mc.gameMode.attack(player, goo);
+        } else {
+            ItemStack held = player.getItemInHand(event.getHand());
+            boolean bare = held.isEmpty() && event.getHand() == InteractionHand.MAIN_HAND;
+            boolean useful = goo.material() == GooSim.HONEY ? bare || held.is(Items.GLASS_BOTTLE) || held.is(Items.HONEY_BOTTLE) : bare || held.is(Items.SLIME_BALL);
+            if (!useful) return;
+            uses++;
+            mc.gameMode.interact(player, goo, new EntityHitResult(goo, picked.point()), event.getHand());
+        }
         event.setSwingHand(true);
         event.setCanceled(true);
     }
+
+    /** Right clicks passed on to goo so far (smoke test). */
+    static volatile int uses;
 }

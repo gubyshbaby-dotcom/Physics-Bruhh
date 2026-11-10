@@ -142,6 +142,16 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nMesh(env: JNIEnv, _c: JC
     })
 }
 
+/// Writes every particle as position + (size 0..1, plus 2 for slime). Returns the particle count, or
+/// minus the number of floats needed when the buffer is too small.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nParticles(env: JNIEnv, _c: JClass, h: jlong, buf: JByteBuffer) -> jint {
+    guard(|| unsafe {
+        let (hd, out) = match (handle(h), floats(&env, &buf)) { (Some(a), Some(b)) => (a, b), _ => return ERR };
+        hd.world.particles(out)
+    })
+}
+
 /// Fills 8 floats per body slot: state, awake, then the bounding box. Returns the slot count.
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nBodies(env: JNIEnv, _c: JClass, h: jlong, buf: JByteBuffer) -> jint {

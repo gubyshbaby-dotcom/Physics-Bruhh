@@ -68,6 +68,8 @@ public final class GooRenderer {
     static void submit(SubmitCustomGeometryEvent event) {
         ClientLevel level = Minecraft.getInstance().level;
         if (level == null) return;
+        // clear goo is normally drawn as a liquid, after the rest of the world (GooFluid); there is no surface mesh then
+        if (GooClient.clearLook && GooFluid.inUse()) return;
         // take a private copy of the latest mesh; the draw callbacks below may run later in the frame
         synchronized (GooClient.MESH_LOCK) {
             if (GooClient.meshVersion != seenVersion) {

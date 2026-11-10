@@ -225,6 +225,8 @@ const YOUNG: f32 = 2.0;
 const FLIGHT_MAX: f32 = 4.0;
 /// Particles in one layer of a stream (one in the middle, six around it).
 const STREAM_LAYER: usize = 7;
+/// Filler points [`World::particles`] may add along stretched springs.
+pub const PARTICLE_FILLERS: usize = 16_000;
 
 /// The core's own worker threads: half the machine's cores (the game needs the rest), six at most.
 /// `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
@@ -618,6 +620,63 @@ impl World {
                 let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
                 if d > min_len && (d > 2.9 * self.s || d > 1.3 * self.spr_l[i * MAX_SPR + k]) { v.push((a, b)); } } }
         v
+    }
+
+    /// Writes every particle that exists as four floats: position, then its size (0..1, shrinking
+    /// while its piece fades away), plus 2 for slime, plus 4 for a filler. Fillers are extra points
+    /// along springs that have been pulled long: the band of slime between two pistons and the
+    /// strands of honey would otherwise be drawn as rows of separate beads. Returns the number of
+    /// points, or how many floats are needed, negated, if `out` is too small.
+    pub fn particles(&self, out: &mut [f32]) -> i32 {
+        let s = self.s;
+        let mut n = 0usize;
+        let mut fillers = PARTICLE_FILLERS;
+        let mut put = |x: f32, y: f32, z: f32, w: f32, n: &mut usize| {
+            if *n * 4 + 4 <= out.len() { out[*n * 4] = x; out[*n * 4 + 1] = y; out[*n * 4 + 2] = z; out[*n * 4 + 3] = w; }
+            *n += 1;
+        };
+        for b in 0..self.slots {
+            let bd = &self.bodies[b];
+            if bd.state == 0 { continue; }
+            let m = &self.mats[bd.mat as usize];
+            let jelly = !m.dynamic_springs;
+            let slime = if bd.mat == SLIME { 2.0 } else { 0.0 };
+            for i in b * self.nb..(b + 1) * self.nb {
+                if self.alive[i] == 0 { continue; }
+                let sc = self.scale[i].clamp(0.0, 1.0);
+                let p = [self.p[i * 3], self.p[i * 3 + 1], self.p[i * 3 + 2]];
+                put(p[0], p[1], p[2], sc + slime, &mut n);
+                if bd.state != 1 || sc < 0.99 { continue; }
+                for k in 0..self.spr_n[i] as usize {
+                    let si = i * MAX_SPR + k;
+                    let rest = self.spr_l[si];
+                    if jelly && rest > 1.2 * s { continue; } // nearest neighbours only: one row of fillers per gap
+                    let j = self.spr_j[si] as usize;
+                    if self.alive[j] == 0 { continue; }
+                    let d = [self.p[j * 3] - p[0], self.p[j * 3 + 1] - p[1], self.p[j * 3 + 2] - p[2]];
+                    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    let (count, size, droop);
+                    if jelly {
+                        if len < 1.6 * s || len > 6.5 * s { continue; }
+                        count = ((len / (1.1 * s)) as usize).min(5); size = 0.85; droop = 0.0;
+                    } else {
+                        // honey: only springs that are both long and taut are strands; every second one will do
+                        if len < 1.9 * s || len > 4.0 || (len < 2.9 * s && len < 1.3 * rest) { continue; }
+                        if (i.wrapping_mul(31) ^ j.wrapping_mul(17)) % 2 != 0 { continue; }
+                        count = ((len / (0.9 * s)) as usize).min(40);
+                        size = (1.9 * s / len).clamp(0.3, 0.7);
+                        droop = (m.thread_sag * len).min(0.2);
+                    }
+                    if count > fillers { continue; }
+                    fillers -= count;
+                    for step in 1..=count {
+                        let t = step as f32 / (count + 1) as f32;
+                        put(p[0] + d[0] * t, p[1] + d[1] * t - droop * 4.0 * t * (1.0 - t), p[2] + d[2] * t, size + slime + 4.0, &mut n);
+                    }
+                }
+            }
+        }
+        if n * 4 > out.len() { -((n * 4) as i32) } else { n as i32 }
     }
 
     /// How many particles of each material (honey, slime) lie inside the box: "is this creature standing in goo".

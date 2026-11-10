@@ -56,6 +56,8 @@ public class PhysicsBruhh {
             }
         });
         modBus.addListener((RegisterGameRuleCategoryEvent e) -> e.register(RULE_CATEGORY));
+        // dispenser behaviours are plain static state of the game: set once it has registered its own
+        modBus.addListener((net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent e) -> e.enqueueWork(GooDispense::register));
         NeoForge.EVENT_BUS.register(GooEvents.class);
         NeoForge.EVENT_BUS.register(GooCommands.class);
         SelfTest.register();

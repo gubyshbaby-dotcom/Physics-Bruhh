@@ -10,6 +10,7 @@ import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.EntityRenderersEvent;
 import net.neoforged.neoforge.client.event.InputEvent;
+import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.client.event.SubmitCustomGeometryEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
@@ -33,6 +34,8 @@ public class PhysicsBruhhClient {
             if (e.getLevel().isClientSide() && e.getEntity() instanceof GooEntity goo) GooClient.leave(goo);
         });
         modBus.addListener(GooPipelines::register);
+        modBus.addListener(GooFluid::register);
+        NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> GooFluid.render(e));
         NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); });
         NeoForge.EVENT_BUS.addListener((InputEvent.InteractionKeyMappingTriggered e) -> guarded(1, "click", () -> GooTouch.onClick(e)));
         NeoForge.EVENT_BUS.addListener(GooLook::registerCommand);

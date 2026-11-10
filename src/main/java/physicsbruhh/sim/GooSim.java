@@ -53,6 +53,13 @@ public interface GooSim extends AutoCloseable {
     /** Writes quads for one material; returns the quad count, or minus the floats needed if {@code out} is too small. */
     int mesh(int material, ByteBuffer out);
 
+    /**
+     * Writes every particle as four floats: position, then its size (0..1, shrinking while its piece
+     * fades away) plus 2 for slime. Returns the number of particles, or minus the floats needed if
+     * {@code out} is too small.
+     */
+    int particles(ByteBuffer out);
+
     /** Fills {@link #BODY_FLOATS} floats per slot; returns the slot count. */
     int bodies(ByteBuffer out);
 
