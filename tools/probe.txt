@@ -1,60 +1,38 @@
-list ^com/mojang/renderpearl/
-list ^com/mojang/blaze3d/
-list ^net/minecraft/client/renderer/[A-Za-z]+\.class
-list ^net/minecraft/client/renderer/(feature|oit|rendertype|state/level|texture|fog)/
-srcdir ^com/mojang/renderpearl/api/
-src com/mojang/blaze3d/pipeline/RenderTarget.java
-src com/mojang/blaze3d/pipeline/MainTarget.java
-src com/mojang/blaze3d/pipeline/TextureTarget.java
-src com/mojang/blaze3d/systems/RenderSystem.java
-srcdir ^net/minecraft/client/renderer/rendertype/(RenderSetup|RenderType|OutputTarget|TextureTransform|LayeringTransform)[$.]
-src net/minecraft/client/renderer/LevelRenderer.java
-grepsrc net/minecraft/client/renderer/GameRenderer.java mainRenderTarget|renderLevel|useImprovedTransparency|projection|Projection|fov|Fov
-srcdir ^net/minecraft/client/renderer/oit/
-srcdir ^net/minecraft/client/renderer/feature/(FeatureRenderDispatcher|CustomFeatureRenderer|FeatureFrame|FeatureRenderer)[$.]
-src net/minecraft/client/renderer/PostChain.java
-src net/minecraft/client/renderer/PostPass.java
-src net/minecraft/client/renderer/LevelTargetBundle.java
-src net/minecraft/client/renderer/DynamicGpuData.java
-src net/minecraft/client/renderer/DynamicUniforms.java
-src net/minecraft/client/renderer/GlobalSettingsUniform.java
-src net/minecraft/client/renderer/PerspectiveProjectionMatrixBuffer.java
-src net/minecraft/client/renderer/Projection.java
-src net/minecraft/client/renderer/SkyRenderer.java
+src net/minecraft/client/renderer/RenderPipelines.java
+src net/minecraft/client/renderer/BindGroupLayouts.java
+src net/minecraft/client/renderer/MappableRingBuffer.java
+src net/minecraft/client/renderer/CloudRenderer.java
+src net/minecraft/client/renderer/ShaderManager.java
+src net/minecraft/client/renderer/ShaderDefines.java
+src net/minecraft/client/renderer/ProjectionMatrixBuffer.java
+src net/minecraft/client/renderer/Lightmap.java
+src net/minecraft/client/renderer/SubmitNodeCollector.java
+src net/minecraft/client/renderer/OrderedSubmitNodeCollector.java
+src com/mojang/blaze3d/buffers/Std140Builder.java
+src com/mojang/blaze3d/buffers/Std140SizeCalculator.java
+src com/mojang/blaze3d/systems/SamplerCache.java
+src com/mojang/blaze3d/pipeline/PipelineCache.java
+src com/mojang/blaze3d/vertex/StagedVertexBuffer.java
+grepsrc net/minecraft/client/renderer/GameRenderer.java lightmap|Lightmap|getMainCamera|mainCamera|shaderManager|getShaderManager|resourcePool
+grepsrc net/minecraft/client/Minecraft.java getShaderManager|getTextureManager|getMainRenderTarget|gameRenderer|levelRenderer|getWindow|public .* getCameraEntity|getDeltaTracker
+src net/minecraft/client/renderer/state/level/CameraRenderState.java
+grepsrc net/minecraft/client/multiplayer/ClientLevel.java public
+grepsrc net/minecraft/world/level/Level.java getSunAngle|getTimeOfDay|getDayTime|getSkyDarken|isRaining|getRainLevel|dimensionType|getThunderLevel|getGameTime|environmentAttributes|getMoonPhase|getDefaultClockTime|getOverworldClockTime
 src net/minecraft/client/renderer/state/level/SkyRenderState.java
-src net/minecraft/client/renderer/texture/AbstractTexture.java
-src net/minecraft/client/renderer/texture/DynamicTexture.java
-grepsrc net/minecraft/client/renderer/texture/TextureManager.java public
-src com/mojang/blaze3d/vertex/DefaultVertexFormat.java
-src com/mojang/blaze3d/vertex/BufferBuilder.java
-src com/mojang/blaze3d/vertex/MeshData.java
-src com/mojang/blaze3d/vertex/Tesselator.java
-src com/mojang/blaze3d/vertex/ByteBufferBuilder.java
-src net/minecraft/world/level/block/DispenserBlock.java
-src net/minecraft/core/dispenser/DispenseItemBehavior.java
-src net/minecraft/core/dispenser/DefaultDispenseItemBehavior.java
-src net/minecraft/core/dispenser/OptionalDispenseItemBehavior.java
-src net/minecraft/core/dispenser/BlockSource.java
-grepsrc net/minecraft/world/level/block/entity/DispenserBlockEntity.java public
-grepsrc net/minecraft/world/item/Items.java HONEY_BOTTLE|SLIME_BALL|GLASS_BOTTLE|HONEY_BLOCK|SLIME_BLOCK|HONEYCOMB
-src net/minecraft/world/item/BottleItem.java
-src net/minecraft/world/item/ItemUtils.java
-src net/minecraft/world/entity/Interaction.java
-grepsrc net/minecraft/world/entity/Entity.java interact|InteractionResult|isPickable|hurtServer|getPickResult|defineSynchedData|onSyncedDataUpdated|getPistonPushReaction|public .* pick\(|isAttackable|skipAttackInteraction
-src net/minecraft/network/syncher/EntityDataSerializers.java
-src net/minecraft/client/multiplayer/MultiPlayerGameMode.java
-src net/minecraft/world/InteractionResult.java
-grepsrc net/minecraft/world/entity/player/Player.java getItemInHand|getInventory|addItem|hasInfiniteMaterials|isCreative|getAbilities|setItemInHand|awardStat
-grepsrc net/minecraft/world/entity/player/Inventory.java public
-grepsrc net/minecraft/client/Minecraft.java startUseItem|startAttack|continueAttack|hitResult|pick\(
-grepsrc net/minecraft/world/level/Level.java getSunAngle|getTimeOfDay|getDayTime|getSkyDarken|isRaining|getRainLevel|dimensionType
-grepsrc net/minecraft/client/multiplayer/ClientLevel.java getSkyColor|getSunAngle|getStarBrightness|getSkyFlashTime|getCloudColor|environmentAttributes|getSkyDarken
-asset assets/minecraft/shaders/core/oit_composite.fsh
-asset assets/minecraft/shaders/core/blit_depth.fsh
-asset assets/minecraft/shaders/core/integrate_depth.fsh
-asset assets/minecraft/shaders/core/sky.fsh
-asset assets/minecraft/shaders/core/stars.fsh
-asset assets/minecraft/shaders/core/clouds.fsh
+grepsrc net/minecraft/client/renderer/SkyRenderer.java sunAngle|rotateZ|rotateX|rotation|Axis|extractRenderState
+src net/minecraft/world/entity/projectile/ThrowableItemProjectile.java
+grepsrc net/minecraft/world/entity/Entity.java getEyePosition|getLookAngle|getViewVector|getEyeHeight|calculateViewVector|public .* getForward|getUUID|blockPosition\(|setYRot|getYRot|getXRot|snapTo|moveOrInterpolateTo|absSnapTo
+grepsrc net/minecraft/world/entity/player/Player.java public
+src net/minecraft/world/item/SnowballItem.java
+src net/minecraft/world/item/consume_effects/ConsumeEffect.java
+grepsrc net/minecraft/world/item/Item.java public
+grepsrc net/minecraft/world/item/ItemStack.java public .*(is|getItem|shrink|grow|isEmpty|copy|getCount|consume|split|hurtAndBreak)\(
+grepsrc net/minecraft/world/level/block/entity/DispenserBlockEntity.java .
+grepsrc net/minecraft/server/level/ServerLevel.java public .*(getEntities|sendParticles|playSound|levelEvent|getEntity|addFreshEntity|gameEvent)\(
+grepsrc net/minecraft/world/level/Level.java public .*(playSound|levelEvent|addParticle|gameEvent|getBlockState|isEmptyBlock|getEntities|getEntitiesOfClass)\(
+alist ^assets/minecraft/shaders/core/(clouds|lightmap|blit_depth|oit_composite|sky|stars|sunrise)
 asset assets/minecraft/shaders/core/clouds.vsh
-asset assets/minecraft/post_effect/blur.json
-alist ^assets/minecraft/shaders/post/
+asset assets/minecraft/shaders/core/clouds.fsh
+asset assets/minecraft/shaders/core/blit_depth.fsh
+asset assets/minecraft/shaders/core/oit_composite.fsh
+asset assets/minecraft/shaders/core/lightmap.fsh

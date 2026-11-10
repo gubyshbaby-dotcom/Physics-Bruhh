@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 3;
+pub const ABI_VERSION: jint = 4;
 const ERR: jint = -9999;
 
 struct Handle { world: World, mesh: Vec<f32> }
@@ -44,6 +44,28 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddBody(_env: JNIEnv, _c
 }
 
 #[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddEmpty(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_empty(mat as u8, x, y, z), None => ERR })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddResting(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat, count: jint) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_resting(mat as u8, x, y, z, count.max(0) as u32), None => ERR })
+}
+
+/// Stream (`lump` false) or lump of `count` particles into `body`, from a point with a velocity. Returns how many it had room for.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nEmit(_env: JNIEnv, _c: JClass, h: jlong, body: jint, px: jfloat, py: jfloat, pz: jfloat, vx: jfloat, vy: jfloat, vz: jfloat, count: jint, lump: jboolean) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => if body >= 0 { hd.world.emit(body as usize, [px, py, pz], [vx, vy, vz], count.max(0) as u32, lump != 0) as jint } else { 0 }, None => ERR })
+}
+
+/// Removes the `count` particles of `body` nearest to a point. Returns how many were removed.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nTake(_env: JNIEnv, _c: JClass, h: jlong, body: jint, x: jfloat, y: jfloat, z: jfloat, count: jint) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => if body >= 0 { hd.world.take(body as usize, [x, y, z], count.max(0) as u32) as jint } else { 0 }, None => ERR })
+}
+
+#[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nRemoveBody(_env: JNIEnv, _c: JClass, h: jlong, body: jint, fade: jboolean) -> jint {
     guard(|| match unsafe { handle(h) } { Some(hd) if body >= 0 => { hd.world.remove_body(body as usize, fade != 0); 0 } _ => ERR })
 }
@@ -63,7 +85,7 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nProbe(_env: JNIEnv, _c: 
 }
 
 /// Diagnostics: `what` 0 = particles stuck to the moving box with id `arg`, 1 = particles of body `arg` stuck to blocks,
-/// 2 = fixed steps taken so far (wraps), 3 = threads the solver uses.
+/// 2 = fixed steps taken so far (wraps), 3 = threads the solver uses, 4 = particles in body `arg` (with those of a stream still to come).
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCount(_env: JNIEnv, _c: JClass, h: jlong, what: jint, arg: jint) -> jint {
     guard(|| match unsafe { handle(h) } {
@@ -72,6 +94,7 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCount(_env: JNIEnv, _c: 
             1 => hd.world.anchors_of(arg.max(0) as usize) as jint,
             2 => (hd.world.ticks & 0x3fff_ffff) as jint,
             3 => crate::sim::threads() as jint,
+            4 => hd.world.amount(arg.max(0) as usize) as jint,
             _ => 0,
         },
         None => ERR,

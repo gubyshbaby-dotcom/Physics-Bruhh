@@ -43,7 +43,7 @@ public final class SimCheck {
 
     static float[] scenarios(String name, Factory f) {
         System.out.println(name + ":");
-        float[] sig = new float[6];
+        float[] sig = new float[10];
         long t0 = System.nanoTime();
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
@@ -97,6 +97,38 @@ public final class SimCheck {
             s.removeBody(third, false);
             check("removed body is free", body(s, third)[0] == 0f, "");
         }
+        try (GooSim s = f.make(12, 4)) {
+            // a bottle of honey squirted from one block up, then slime balls thrown the same way
+            s.setStatic(floor(), floorCount(0));
+            int honey = s.addEmpty(GooSim.HONEY, 0, 1, 0);
+            check("a bottle fits into an empty piece", s.emit(honey, 0f, 1.5f, 0.5f, 3.5f, 0f, 0f, GooSim.BOTTLE, false) == GooSim.BOTTLE, "");
+            check("all of it counts at once", s.count(4, honey) == GooSim.BOTTLE, "amount " + s.count(4, honey));
+            run(s, 0.25f);
+            int out = s.probe(-9f, -1f, -9f, 9f, 9f, 9f) & 0xFFFF;
+            check("the stream comes out bit by bit", out > 40 && out < GooSim.BOTTLE, out + " particles after a quarter of a second");
+            run(s, 7f);
+            float[] b = body(s, honey);
+            check("the stream became a flat puddle ahead", b[6] < 0.45f && b[2] > 0.2f && b[5] < 4.5f, "top " + b[6] + ", x " + b[2] + ".." + b[5]);
+            check("every particle came out", (s.probe(-9f, -1f, -9f, 9f, 9f, 9f) & 0xFFFF) == GooSim.BOTTLE, "");
+            sig[6] = (b[2] + b[5]) * 0.5f; sig[7] = b[5] - b[2];
+            float midZ = (b[4] + b[7]) * 0.5f;
+            check("a dipped bottle takes a bottle's worth", s.take(honey, b[2], 0.1f, midZ, GooSim.BOTTLE / 2) == GooSim.BOTTLE / 2 && s.count(4, honey) == GooSim.BOTTLE / 2, "left " + s.count(4, honey));
+            check("no more can be taken than there is", s.take(honey, b[2], 0.1f, midZ, 5000) == GooSim.BOTTLE / 2, "");
+            run(s, 1f);
+            check("an emptied piece is gone", body(s, honey)[0] == 0f, "state " + body(s, honey)[0]);
+            int slime = s.addEmpty(GooSim.SLIME, 0, 1, 0);
+            for (int k = 0; k < 3; k++) { s.emit(slime, 0.3f, 1.5f, 0.5f, 4f, 0.5f, 0f, GooSim.BALL, true); run(s, 0.45f); }
+            run(s, 6f);
+            float[] c = body(s, slime);
+            check("three slime balls make one heap ahead", c[5] - c[2] < 1.6f && c[7] - c[4] < 1.6f && c[6] < 0.9f && c[2] > 0.3f, "x " + c[2] + ".." + c[5] + ", top " + c[6]);
+            check("the heap has all three balls", (s.probe(-9f, -1f, -9f, 9f, 9f, 9f) >>> 16) == 3 * GooSim.BALL, "");
+            check("the heap comes to rest", c[1] == 0f, "awake " + c[1]);
+            sig[8] = (c[2] + c[5]) * 0.5f;
+            int back = s.addResting(GooSim.HONEY, 4, 0, -2, 2 * GooSim.BOTTLE);
+            run(s, 3f);
+            float[] d = body(s, back);
+            check("goo seen again lies at rest", d[6] < 0.4f && s.count(4, back) == 2 * GooSim.BOTTLE, "top " + d[6]);
+        }
         double ms = (System.nanoTime() - t0) / 1e6;
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
@@ -118,6 +150,8 @@ public final class SimCheck {
             check("puddle width agrees", Math.abs(j[1] - r[1]) < 0.35f, j[1] + " vs " + r[1]);
             check("push distance agrees", Math.abs(j[2] - r[2]) < 0.35f, j[2] + " vs " + r[2]);
             check("pull distance agrees", Math.abs(j[3] - r[3]) < 0.45f, j[3] + " vs " + r[3]);
+            check("the honey stream lands in the same place", Math.abs(j[6] - r[6]) < 0.5f && Math.abs(j[7] - r[7]) < 0.6f, "middle " + j[6] + " vs " + r[6] + ", width " + j[7] + " vs " + r[7]);
+            check("the slime heap lands in the same place", Math.abs(j[8] - r[8]) < 0.5f, j[8] + " vs " + r[8]);
         } else {
             System.out.println("Rust simulation skipped: " + NativeSim.loadMessage());
             if (args.length > 0 && args[0].equals("--require-native")) { System.out.println("  FAIL  native library required"); failures++; }

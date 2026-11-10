@@ -46,8 +46,12 @@ public final class JavaSim implements GooSim {
         boolean awake, quiet, fresh;
         float age, born, fade, melt, kd, kSpring, plast, brk, maxL, shock, soft;
         final float[] bb = new float[6];
+        /** A stream still on its way: particles left to come out, where from, how fast, how far the last layer has got. */
+        int pending; float emitAcc; final float[] emitPos = new float[3], emitVel = new float[3];
+        /** Until this time (world clock) the body has particles young enough to bond to what they touch. */
+        float youngUntil;
 
-        void clear() { state = 0; mat = 0; calm = 0; count = 0; anchored = 0; awake = false; quiet = false; fresh = false; age = born = fade = melt = kd = kSpring = plast = brk = maxL = shock = soft = 0f; Arrays.fill(bb, 0f); }
+        void clear() { state = 0; mat = 0; calm = 0; count = 0; anchored = 0; awake = false; quiet = false; fresh = false; age = born = fade = melt = kd = kSpring = plast = brk = maxL = shock = soft = 0f; Arrays.fill(bb, 0f); pending = 0; emitAcc = 0f; youngUntil = 0f; Arrays.fill(emitPos, 0f); Arrays.fill(emitVel, 0f); }
     }
 
     static final class KBox {
@@ -101,6 +105,7 @@ public final class JavaSim implements GooSim {
         sprN = new byte[maxp]; sprJ = new int[maxp * MAX_SPR]; sprL = new float[maxp * MAX_SPR];
         rho = new float[maxp]; lam = new float[maxp]; sgx = new float[maxp]; sgy = new float[maxp]; sgz = new float[maxp]; sg2 = new float[maxp];
         dpx = new float[maxp]; dpy = new float[maxp]; dpz = new float[maxp]; damp = new float[maxp];
+        born = new float[maxp]; fly = new byte[maxp]; land = new byte[maxp];
         act = new int[maxp];
         cStart = new int[table + 1]; cFill = new int[table]; sorted = new int[maxp]; pkey = new int[maxp]; pbkt = new int[maxp]; cell = new int[maxp * 3];
         bodies = new Body[slots];
@@ -135,6 +140,7 @@ public final class JavaSim implements GooSim {
         else if (what == 1 && arg >= 0 && arg < slots) { for (int i = arg * nb; i < (arg + 1) * nb; i++) if (alive[i] != 0 && ancKind[i] == 1) n++; }
         else if (what == 2) n = ticks & 0x3fffffff;
         else if (what == 3) n = 1;
+        else if (what == 4) n = amount(arg);
         return n;
     }
 
@@ -156,18 +162,191 @@ public final class JavaSim implements GooSim {
         }
     }
 
+    /** A free body slot; if there is none, the oldest sleeping body (else the oldest one) makes room. */
+    private int takeSlot() {
+        for (int b = 0; b < slots; b++) if (bodies[b].state == 0) return b;
+        int best = -1; float bt = Float.MAX_VALUE;
+        for (int b = 0; b < slots; b++) if (!bodies[b].awake && bodies[b].born < bt) { bt = bodies[b].born; best = b; }
+        if (best < 0) for (int b = 0; b < slots; b++) if (bodies[b].born < bt) { bt = bodies[b].born; best = b; }
+        if (best >= 0) freeBody(best);
+        return best;
+    }
+
+    /** Puts one particle into a free place of body {@code b}; false if the body is full. */
+    private boolean spawn(int b, float x, float y, float z, float vx, float vy, float vz, boolean flying) {
+        int i = -1;
+        for (int k = b * nb; k < (b + 1) * nb; k++) if (alive[k] == 0) { i = k; break; }
+        if (i < 0) return false;
+        int o = i * 3;
+        p[o] = x; p[o + 1] = y; p[o + 2] = z; q[o] = x; q[o + 1] = y; q[o + 2] = z; v[o] = vx; v[o + 1] = vy; v[o + 2] = vz;
+        alive[i] = 1; scale[i] = 1f; sprN[i] = 0; ancKind[i] = 0; ancCool[i] = 0f;
+        born[i] = clock; fly[i] = (byte) (flying ? 1 : 0);
+        return true;
+    }
+
+    @Override
+    public int addEmpty(int material, float x, float y, float z) {
+        int mat = material == SLIME ? SLIME : HONEY;
+        int slot = takeSlot();
+        if (slot < 0) return -1;
+        Body bd = bodies[slot];
+        bd.clear();
+        bd.state = 1; bd.mat = mat; bd.awake = true; bd.age = mats[mat].meltTime + 2f; bd.born = clock; bd.fade = 1f;
+        bd.bb[0] = x; bd.bb[1] = y; bd.bb[2] = z; bd.bb[3] = x + 1f; bd.bb[4] = y + 1f; bd.bb[5] = z + 1f;
+        return slot;
+    }
+
+    @Override
+    public int addResting(int material, float x, float y, float z, int count) {
+        int mat = material == SLIME ? SLIME : HONEY;
+        count = Math.max(0, Math.min(count, nb));
+        int slot = takeSlot();
+        if (slot < 0) return -1;
+        float cx = x + 0.5f, cz = z + 0.5f;
+        Body bd = bodies[slot];
+        bd.clear();
+        bd.state = 1; bd.mat = mat; bd.awake = true; bd.age = mats[mat].meltTime + 8f; bd.born = clock; bd.fade = 1f; bd.fresh = mat == SLIME;
+        bd.bb[0] = x - 0.5f; bd.bb[1] = y - 0.2f; bd.bb[2] = z - 0.5f; bd.bb[3] = x + 1.5f; bd.bb[4] = y + 1.3f; bd.bb[5] = z + 1.5f;
+        if (mat == SLIME) {
+            // the places of a block nearest to the middle of its base: a rounded lump
+            float[][] sites = new float[nb][];
+            int k = 0;
+            for (int a = 0; a < n; a++) for (int b = 0; b < n; b++) for (int c = 0; c < n; c++) {
+                float ox = (a + 0.5f) * s - side * 0.5f, oy = (b + 0.5f) * s, oz = (c + 0.5f) * s - side * 0.5f;
+                sites[k] = new float[] { ox * ox + oy * oy * 1.6f + oz * oz, ox, oy, oz, k }; k++;
+            }
+            Arrays.sort(sites, (u, w) -> u[0] != w[0] ? Float.compare(u[0], w[0]) : Float.compare(u[4], w[4]));
+            for (int i = 0; i < count; i++) spawn(slot, cx + sites[i][1], y + sites[i][2], cz + sites[i][3], 0f, 0f, 0f, false);
+        } else {
+            float reach = 1.27f * (float) Math.sqrt(count / (float) nb);
+            for (int k = 0; k < count; k++) {
+                float rad = reach * (float) Math.sqrt(rnd()), ang = rnd() * (float) (Math.PI * 2.0);
+                float lift = (k % 2) * s * 0.9f + (rnd() - 0.5f) * s * 0.1f;
+                spawn(slot, cx + rad * (float) Math.cos(ang), y + rc + lift, cz + rad * (float) Math.sin(ang), 0f, 0f, 0f, false);
+            }
+        }
+        bd.count = count;
+        return slot;
+    }
+
+    /** Goo in the body: particles that exist plus those of a stream that are still to come out. */
+    private int amount(int b) {
+        if (b < 0 || b >= slots || bodies[b].state != 1) return 0;
+        int c = bodies[b].pending;
+        for (int i = b * nb; i < (b + 1) * nb; i++) if (alive[i] != 0) c++;
+        return c;
+    }
+
+    @Override
+    public int emit(int b, float px, float py, float pz, float vx, float vy, float vz, int count, boolean lump) {
+        if (b < 0 || b >= slots || bodies[b].state != 1) return 0;
+        count = Math.min(count, nb - Math.min(nb, amount(b)));
+        if (count <= 0 || !(Float.isFinite(px) && Float.isFinite(py) && Float.isFinite(pz) && Float.isFinite(vx) && Float.isFinite(vy) && Float.isFinite(vz))) return 0;
+        Body bd = bodies[b];
+        bd.awake = true; bd.calm = 0;
+        bd.age = Math.min(bd.age, mats[bd.mat].meltTime + 2f); // fresh goo makes the whole piece runny again
+        bd.youngUntil = clock + YOUNG + 1f;
+        if (!lump) {
+            bd.pending += count; bd.emitPos[0] = px; bd.emitPos[1] = py; bd.emitPos[2] = pz; bd.emitVel[0] = vx; bd.emitVel[1] = vy; bd.emitVel[2] = vz;
+            return count;
+        }
+        // a rounded lump: the places of a small cube nearest to its middle
+        int k = (int) Math.ceil(Math.cbrt(count));
+        float[][] sites = new float[k * k * k][];
+        int t = 0;
+        for (int a = 0; a < k; a++) for (int bb = 0; bb < k; bb++) for (int c = 0; c < k; c++) {
+            float ox = (a - (k - 1) * 0.5f) * s, oy = (bb - (k - 1) * 0.5f) * s, oz = (c - (k - 1) * 0.5f) * s;
+            sites[t] = new float[] { ox * ox + oy * oy + oz * oz, ox, oy, oz, t }; t++;
+        }
+        Arrays.sort(sites, (u, w) -> u[0] != w[0] ? Float.compare(u[0], w[0]) : Float.compare(u[4], w[4]));
+        // goo that is already where the lump appears: everything there takes it easy for a moment
+        float r = k * s * 0.5f + s;
+        boolean crowded = false;
+        for (int c = 0; c < slots; c++) {
+            Body o = bodies[c];
+            if (o.state != 1 || o.bb[0] > px + r || o.bb[3] < px - r || o.bb[1] > py + r || o.bb[4] < py - r || o.bb[2] > pz + r || o.bb[5] < pz - r) continue;
+            boolean touching = false;
+            for (int i = c * nb; i < (c + 1) * nb && !touching; i++) {
+                touching = alive[i] != 0 && Math.abs(p[i * 3] - px) < r && Math.abs(p[i * 3 + 1] - py) < r && Math.abs(p[i * 3 + 2] - pz) < r;
+            }
+            if (touching) { crowded = true; o.soft = SOFT_TIME; o.awake = true; o.calm = 0; }
+        }
+        if (crowded) bd.soft = SOFT_TIME;
+        int done = 0;
+        for (int i = 0; i < count; i++) {
+            if (!spawn(b, px + sites[i][1], py + sites[i][2], pz + sites[i][3], vx, vy, vz, true)) break;
+            done++;
+        }
+        return done;
+    }
+
+    @Override
+    public int take(int b, float x, float y, float z, int count) {
+        if (b < 0 || b >= slots || bodies[b].state != 1 || count <= 0) return 0;
+        int lo = b * nb, hi = (b + 1) * nb, have = 0;
+        float[][] near = new float[nb][];
+        for (int i = lo; i < hi; i++) {
+            if (alive[i] == 0) continue;
+            float dx = p[i * 3] - x, dy = p[i * 3 + 1] - y, dz = p[i * 3 + 2] - z;
+            near[have++] = new float[] { dx * dx + dy * dy + dz * dz, i };
+        }
+        Arrays.sort(near, 0, have, (u, w) -> u[0] != w[0] ? Float.compare(u[0], w[0]) : Float.compare(u[1], w[1]));
+        int taken = Math.min(count, have);
+        Body bd = bodies[b];
+        int fromStream = Math.min(count - taken, bd.pending); // what a stream has not let out yet goes when the piece itself is not enough
+        bd.pending -= fromStream;
+        bd.awake = true; bd.calm = 0;
+        boolean[] gone = new boolean[nb];
+        for (int k = 0; k < taken; k++) { int i = (int) near[k][1]; alive[i] = 0; scale[i] = 0f; sprN[i] = 0; ancKind[i] = 0; fly[i] = 0; gone[i - lo] = true; }
+        // springs to what was taken go at once: the places may be filled again before the solver would notice
+        for (int i = 0; i < maxp; i++) {
+            int k = 0;
+            while (k < sprN[i]) {
+                int j = sprJ[i * MAX_SPR + k];
+                if (j >= lo && j < hi && gone[j - lo]) { int last = i * MAX_SPR + sprN[i] - 1; sprJ[i * MAX_SPR + k] = sprJ[last]; sprL[i * MAX_SPR + k] = sprL[last]; sprN[i]--; }
+                else k++;
+            }
+        }
+        return taken + fromStream;
+    }
+
+    /** Lets the next layers of a body's stream out of its nozzle: one layer per particle spacing travelled. */
+    private void streamOut(int b, float dt) {
+        Body bd = bodies[b];
+        float vx = bd.emitVel[0], vy = bd.emitVel[1], vz = bd.emitVel[2];
+        float speed = Math.max(0.3f, (float) Math.sqrt(vx * vx + vy * vy + vz * vz));
+        float dx = 0f, dy = -1f, dz = 0f;
+        if (speed > 0.31f) { dx = vx / speed; dy = vy / speed; dz = vz / speed; }
+        // two directions across the stream
+        float upx = Math.abs(dy) < 0.9f ? 0f : 1f, upy = Math.abs(dy) < 0.9f ? 1f : 0f, upz = 0f;
+        float ux = dy * upz - dz * upy, uy = dz * upx - dx * upz, uz = dx * upy - dy * upx;
+        float ul = (float) Math.sqrt(ux * ux + uy * uy + uz * uz);
+        ux /= ul; uy /= ul; uz /= ul;
+        float wx = dy * uz - dz * uy, wy = dz * ux - dx * uz, wz = dx * uy - dy * ux;
+        bd.emitAcc += speed * dt;
+        bd.awake = true; bd.calm = 0;
+        bd.youngUntil = clock + YOUNG + 1f;
+        while (bd.emitAcc >= s && bd.pending > 0) {
+            bd.emitAcc -= s;
+            float ahead = bd.emitAcc; // this layer is already that far out
+            float turn = rnd() * (float) (Math.PI * 2.0);
+            for (int k = 0; k < STREAM_LAYER; k++) {
+                if (bd.pending == 0) break;
+                float ca = 0f, cb = 0f;
+                if (k > 0) { float a = turn + k * (float) (Math.PI * 2.0) / 6f; ca = (float) Math.cos(a) * s; cb = (float) Math.sin(a) * s; }
+                float j0 = (rnd() - 0.5f) * 0.06f * s, j1 = (rnd() - 0.5f) * 0.06f * s, j2 = 1f + (rnd() - 0.5f) * 0.04f;
+                float ax = bd.emitPos[0] + dx * ahead + ux * (ca + j0) + wx * (cb + j1), ay = bd.emitPos[1] + dy * ahead + uy * (ca + j0) + wy * (cb + j1), az = bd.emitPos[2] + dz * ahead + uz * (ca + j0) + wz * (cb + j1);
+                if (!spawn(b, ax, ay, az, dx * speed * j2, dy * speed * j2, dz * speed * j2, true)) { bd.pending = 0; break; }
+                bd.pending--;
+            }
+        }
+    }
+
     @Override
     public int addBody(int material, float x, float y, float z, float dirX, float dirZ, float age) {
         int mat = material == SLIME ? SLIME : HONEY;
-        int slot = -1;
-        for (int b = 0; b < slots; b++) if (bodies[b].state == 0) { slot = b; break; }
-        if (slot < 0) {
-            int best = -1; float bt = Float.MAX_VALUE;
-            for (int b = 0; b < slots; b++) if (!bodies[b].awake && bodies[b].born < bt) { bt = bodies[b].born; best = b; }
-            if (best < 0) for (int b = 0; b < slots; b++) if (bodies[b].born < bt) { bt = bodies[b].born; best = b; }
-            if (best < 0) return -1;
-            freeBody(best); slot = best;
-        }
+        int slot = takeSlot();
+        if (slot < 0) return -1;
         Material m = mats[mat];
         int base = slot * nb;
         boolean puddle = mat == HONEY && age > 6f;
@@ -195,6 +374,7 @@ public final class JavaSim implements GooSim {
             p[o] = px; p[o + 1] = py; p[o + 2] = pz; q[o] = px; q[o + 1] = py; q[o + 2] = pz;
             v[o] = vx; v[o + 1] = vy; v[o + 2] = vz;
             alive[i] = 1; scale[i] = 1f; sprN[i] = 0; ancKind[i] = 0; ancCool[i] = 0f;
+            born[i] = clock; fly[i] = 0;
         }
         // goo that is already where the new block appears: both take it easy for a moment
         boolean crowded = false;
@@ -381,6 +561,7 @@ public final class JavaSim implements GooSim {
             if (ax < 3) { hit = 2; hitId = b.id; hitStick = b.stick; hm0 = b.min[0]; hm1 = b.min[1]; hm2 = b.min[2]; hitAxis = ax; }
         }
         q[o] = tq[0]; q[o + 1] = tq[1]; q[o + 2] = tq[2];
+        if (hit != 0) fly[i] = 0; // it has touched something: no longer in free flight
         if (hit != 0 && ancKind[i] == 0 && ancCool[i] <= 0f && hitStick > 0f && rho[i] < 1.25f * rho0) {
             ancKind[i] = (byte) hit; ancId[i] = hitId; ancStick[i] = hitStick; ancAxis[i] = (byte) hitAxis;
             ancPt[o] = tq[0]; ancPt[o + 1] = tq[1]; ancPt[o + 2] = tq[2];
@@ -454,12 +635,17 @@ public final class JavaSim implements GooSim {
             bd.shock = sh < 0.01f ? 0f : sh * (float) Math.exp(-dt / m.shockDecay);
             bd.soft = Math.max(0f, bd.soft - dt);
             boolean grounded = bd.anchored > 0 || bd.shock > 0.05f;
+            if (bd.pending > 0) streamOut(b, dt);
             int cnt = 0;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
-                if (alive[i] != 0) { act[nAct++] = i; cnt++; damp[i] = grounded ? bd.kd : 0.15f; }
+                if (alive[i] != 0) {
+                    act[nAct++] = i; cnt++; damp[i] = grounded ? bd.kd : 0.15f;
+                    if (fly[i] != 0 && clock - born[i] > FLIGHT_MAX) fly[i] = 0;
+                }
             }
             bd.count = cnt;
-            if (cnt == 0) freeBody(b);
+            // nothing left of it (and nothing on its way): the slot is free again
+            if (cnt == 0 && bd.pending == 0 && clock - bd.born > 0.5f) freeBody(b);
         }
         if (nAct == 0) return;
         // ---- kinematic colliders move ----
@@ -476,7 +662,7 @@ public final class JavaSim implements GooSim {
         for (int a = 0; a < nAct; a++) {
             int i = act[a], o = i * 3;
             float x = p[o], z = p[o + 2];
-            float k = damp[i];
+            float k = fly[i] != 0 ? 0.15f : damp[i]; // in flight: not slowed with the rest of its body
             if (k > 0.5f) k *= 0.72f + 0.34f * ((float) Math.sin(x * 6.1f + 1.9f * (float) Math.sin(z * 2.3f)) + (float) Math.sin(z * 3.7f + x * 1.4f));
             float f = (float) Math.exp(-k * dt);
             v[o] *= f; v[o + 1] = (v[o + 1] - g * dt) * f; v[o + 2] *= f;
@@ -518,7 +704,10 @@ public final class JavaSim implements GooSim {
             int i = pi[k], j = pj[k], bi = i / nb, bj = j / nb;
             if (bodies[bi].mat != bodies[bj].mat) continue;
             Material m = mats[bodies[bi].mat];
-            if (!(m.dynamicSprings || (bi == bj && bodies[bi].fresh))) continue;
+            // goo that does not flow only bonds when it is new: a whole block at once, or lumps that have
+            // just been added, to each other and to what they land on in their own body
+            boolean young = !m.dynamicSprings && bi == bj && !bodies[bi].fresh && clock < bodies[bi].youngUntil && (clock - born[i] <= YOUNG || clock - born[j] <= YOUNG);
+            if (!(m.dynamicSprings || (bi == bj && bodies[bi].fresh) || young)) continue;
             int oi = i * 3, oj = j * 3;
             float ex = q[oi] - q[oj], ey = q[oi + 1] - q[oj + 1], ez = q[oi + 2] - q[oj + 2];
             float r2 = ex * ex + ey * ey + ez * ez;
@@ -644,6 +833,8 @@ public final class JavaSim implements GooSim {
             float vs = v2 > vmax * vmax ? vmax / (float) Math.sqrt(v2) : 1f;
             v[o] = vx * vs; v[o + 1] = vy * vs; v[o + 2] = vz * vs;
         }
+        // kernel value at 1.3 particle spacings: closer than that counts as touching
+        final float wTouch; { float r = 1.3f * s, t = h * h - r * r; wTouch = kp * t * t * t; }
         for (int vi = 0; vi < viscIters; vi++) {
             for (int a = 0; a < nAct; a++) { int i = act[a]; dpx[i] = 0f; dpy[i] = 0f; dpz[i] = 0f; }
             for (int k = 0; k < nPair; k++) {
@@ -652,8 +843,17 @@ public final class JavaSim implements GooSim {
                 float ex = v[oj] - v[oi], ey = v[oj + 1] - v[oi + 1], ez = v[oj + 2] - v[oi + 2];
                 float wi = mats[bodies[i / nb].mat].xsph * w / rho[i], wj = mats[bodies[j / nb].mat].xsph * w / rho[j];
                 dpx[i] += ex * wi; dpy[i] += ey * wi; dpz[i] += ez * wi; dpx[j] -= ex * wj; dpy[j] -= ey * wj; dpz[j] -= ez * wj;
+                // touching goo that has already come to rest: a particle in flight has landed too
+                if (w > wTouch) {
+                    if (fly[i] != 0 && fly[j] == 0 && v[oj] * v[oj] + v[oj + 1] * v[oj + 1] + v[oj + 2] * v[oj + 2] < 2.25f) land[i] = 1;
+                    if (fly[j] != 0 && fly[i] == 0 && v[oi] * v[oi] + v[oi + 1] * v[oi + 1] + v[oi + 2] * v[oi + 2] < 2.25f) land[j] = 1;
+                }
             }
-            for (int a = 0; a < nAct; a++) { int i = act[a], o = i * 3; v[o] += dpx[i]; v[o + 1] += dpy[i]; v[o + 2] += dpz[i]; }
+            for (int a = 0; a < nAct; a++) {
+                int i = act[a], o = i * 3;
+                v[o] += dpx[i]; v[o + 1] += dpy[i]; v[o + 2] += dpz[i];
+                if (land[i] != 0) { land[i] = 0; fly[i] = 0; }
+            }
         }
         float[] vsum = new float[slots];
         // only bodies that were simulated this step get their bounds rebuilt; one that is shrinking away keeps its own
@@ -677,7 +877,7 @@ public final class JavaSim implements GooSim {
             Body bd = bodies[b];
             if (bd.state == 0 || !bd.awake) continue;
             float vrms = (float) Math.sqrt(vsum[b] / Math.max(1, bd.count));
-            bd.quiet = bd.state == 1 && vrms < mats[bd.mat].sleepV && bd.age > mats[bd.mat].meltTime + 1f;
+            bd.quiet = bd.state == 1 && vrms < mats[bd.mat].sleepV && bd.age > mats[bd.mat].meltTime + 1f && bd.pending == 0;
             bd.calm = bd.quiet ? bd.calm + 1 : 0;
         }
         for (int b = 0; b < slots; b++) {
@@ -746,6 +946,11 @@ public final class JavaSim implements GooSim {
     private static final int[][] ED = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
 
     private static final float FADE_TIME = 0.45f, SOFT_TIME = 0.9f;
+    /** Seconds a freshly emitted slime particle keeps bonding; seconds after which nothing counts as in flight any more; particles per layer of a stream. */
+    private static final float YOUNG = 2f, FLIGHT_MAX = 4f;
+    private static final int STREAM_LAYER = 7;
+    /** Per particle: when it appeared, whether it is still in free flight, scratch for "landed this step". */
+    private final float[] born; private final byte[] fly, land;
     private static final int CALM_STEPS = 60;
 
     // bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to
