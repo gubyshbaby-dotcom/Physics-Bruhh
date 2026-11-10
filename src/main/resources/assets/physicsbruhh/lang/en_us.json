@@ -10,5 +10,7 @@
   "gamerule.physicsbruhh.clear_goo.description": "Goo is drawn as translucent liquid (amber honey, green slime) instead of with the blocks' textures.",
   "gamerule.physicsbruhh:clear_goo": "Honey and slime look like clear liquid",
   "gamerule.physicsbruhh:clear_goo.description": "Goo is drawn as translucent liquid (amber honey, green slime) instead of with the blocks' textures.",
-  "commands.physicsbruhh.clear": "Removed %s pieces of goo"
+  "commands.physicsbruhh.clear": "Removed %s pieces of goo",
+  "commands.physicsbruhh.look.shader": "Goo is drawn with its own shader",
+  "commands.physicsbruhh.look.plain": "Goo is drawn the plain way, without its own shader"
 }

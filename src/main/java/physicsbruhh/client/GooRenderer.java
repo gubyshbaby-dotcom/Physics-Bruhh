@@ -3,6 +3,7 @@ package physicsbruhh.client;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import it.unimi.dsi.fastutil.longs.Long2FloatOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.rendertype.RenderType;
@@ -10,6 +11,7 @@ import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.LightCoordsUtil;
+import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.NeoForgeRenderTypes;
 import net.neoforged.neoforge.client.event.SubmitCustomGeometryEvent;
@@ -20,11 +22,14 @@ import physicsbruhh.sim.GooSim;
  * Draws the goo surface. The mesh comes from the simulation thread as quads (position + normal,
  * the normal's length carrying how deep the goo is behind that point).
  *
- * <p>Two looks. Blocky: the vanilla honey / slime block texture projected along the dominant axis
- * of each face, with simple directional shading. Clear (game rule {@code clear_goo}): no texture
- * at all, a see-through liquid (amber honey, green slime) that gets darker and more opaque where
- * it is thick, mirrors the sky at grazing angles and has a highlight. Everything is computed per
- * vertex on the CPU, so it needs no shaders of its own and works with whatever backend the game uses.
+ * <p>Normally the goo's own shader does the work (see {@link GooPipelines}): per-pixel gloss, the
+ * sky mirrored in the surface, colour by depth; this class then only hands over positions, normals,
+ * depth, material and the light level. The game rule {@code clear_goo} picks between the block's
+ * pixel texture and a clear liquid as the body colour.
+ *
+ * <p>{@code /goolook plain} (or {@code -Dphysicsbruhh.shader=false}) switches to the fallback that
+ * needs no shader of its own: the same two looks, shaded per vertex on the CPU and drawn through
+ * one of the game's stock pipelines. It is there in case the shader does not work on some machine.
  */
 public final class GooRenderer {
     private static final Identifier[] TEXTURES = {
@@ -38,6 +43,8 @@ public final class GooRenderer {
     private static int seenVersion = -1;
     /** Draw callbacks that actually ran, and quads emitted by them (smoke test and debugging). */
     static volatile int drawCalls, drawnQuads;
+    /** Use the goo shader (true) or the stock-pipeline fallback (false). */
+    static volatile boolean shader = !"false".equalsIgnoreCase(System.getProperty("physicsbruhh.shader"));
 
     // light the clear look is shaded with: high, a little to the south-east
     private static final float LX = 0.42F, LY = 0.80F, LZ = 0.43F;
@@ -87,6 +94,13 @@ public final class GooRenderer {
             final int alpha = ALPHA[mat];
             final boolean clear = GooClient.clearLook;
             final int material = mat;
+            if (shader) {
+                event.getSubmitNodeCollector().submitCustomGeometry(stack, GooPipelines.type(TEXTURES[mat]), (pose, consumer) -> {
+                    drawCalls++; drawnQuads += count;
+                    shaderQuads(pose, consumer, level, origin, data, count, material, clear);
+                });
+                continue;
+            }
             RenderType type = NeoForgeRenderTypes.getEntityUnlitTranslucent(clear ? WHITE : TEXTURES[mat]);
             event.getSubmitNodeCollector().submitCustomGeometry(stack, type, (pose, consumer) -> {
                 drawCalls++; drawnQuads += count;
@@ -105,6 +119,39 @@ public final class GooRenderer {
             });
         }
         stack.popPose();
+    }
+
+    /**
+     * Hands the quads to the goo shader. Colour is not a colour here but data for it:
+     * red = material, green = look, alpha = depth of goo behind the vertex (in 1/255 of 2.6 blocks).
+     */
+    private static void shaderQuads(PoseStack.Pose pose, VertexConsumer consumer, ClientLevel level, BlockPos origin, float[] data, int count, int material, boolean clear) {
+        Long2IntOpenHashMap lightCache = new Long2IntOpenHashMap();
+        lightCache.defaultReturnValue(-1);
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        final int red = material == GooSim.SLIME ? 255 : 0, green = clear ? 255 : 0;
+        for (int q = 0; q < count; q++) {
+            int o = q * GooSim.FLOATS_PER_QUAD;
+            // block light and sky light where the quad is, cached per block
+            pos.set(origin.getX() + (int) Math.floor(data[o]), origin.getY() + (int) Math.floor(data[o + 1] + 0.05F), origin.getZ() + (int) Math.floor(data[o + 2]));
+            int light = lightCache.get(pos.asLong());
+            if (light < 0) {
+                light = level.getBrightness(LightLayer.BLOCK, pos) << 4 | level.getBrightness(LightLayer.SKY, pos) << 20;
+                lightCache.put(pos.asLong(), light);
+            }
+            for (int v = 0; v < 4; v++) {
+                int i = o + v * 6;
+                float nx = data[i + 3], ny = data[i + 4], nz = data[i + 5];
+                float len = Math.max(1.0e-6F, (float) Math.sqrt(nx * nx + ny * ny + nz * nz));
+                int depth = Math.max(0, Math.min(255, (int) ((len - 1.0F) * (255.0F / 2.6F) + 0.5F)));
+                consumer.addVertex(pose, data[i], data[i + 1], data[i + 2])
+                        .setColor(red, green, 0, depth)
+                        .setUv(0.0F, 0.0F)
+                        .setOverlay(OverlayTexture.NO_OVERLAY)
+                        .setLight(light)
+                        .setNormal(pose, nx / len, ny / len, nz / len);
+            }
+        }
     }
 
     private static void blockyQuad(PoseStack.Pose pose, VertexConsumer consumer, float[] data, int o, float light, int alpha) {

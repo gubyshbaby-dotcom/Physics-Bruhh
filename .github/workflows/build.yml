@@ -34,7 +34,18 @@ jobs:
       - name: Test the simulation core
         if: matrix.platform == 'linux-x86_64'
         working-directory: native
-        run: cargo test --release
+        run: |
+          cargo test --release
+          PHYSICSBRUHH_THREADS=4 cargo test --release
+      - name: Threads change the speed, not the result
+        if: matrix.platform == 'linux-x86_64'
+        working-directory: native
+        run: |
+          cargo build --release --example bench
+          for t in 1 2 4; do PHYSICSBRUHH_THREADS=$t ./target/release/examples/bench 8 3 > bench-$t.txt; head -2 bench-$t.txt; done
+          tail -1 bench-1.txt
+          test "$(tail -1 bench-1.txt)" = "$(tail -1 bench-2.txt)"
+          test "$(tail -1 bench-1.txt)" = "$(tail -1 bench-4.txt)"
       - name: Build
         working-directory: native
         run: cargo build --release --target ${{ matrix.target }}
@@ -113,51 +124,72 @@ jobs:
           path: selftest.log
           retention-days: 7
       - name: Client smoke test (software rendering, screenshots)
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb libgl1-mesa-dri mesa-vulkan-drivers imagemagick x11-apps > /dev/null
-          mkdir -p run/clienttest/saves shots
-          cp -r run/selftest/world run/clienttest/saves/selftest
-          printf 'pauseOnLostFocus:false\nonboardAccessibility:false\ntutorialStep:none\nrenderDistance:4\nsimulationDistance:5\nskipMultiplayerWarning:true\njoinedFirstServer:true\n' > run/clienttest/options.txt
+          sudo apt-get install -y -qq xvfb libgl1-mesa-dri libegl1 libgles2 mesa-vulkan-drivers imagemagick x11-apps > /dev/null
           Xvfb :99 -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
           export DISPLAY=:99
           sleep 3
-          touch clienttest.log
-          (
-            n=0
-            while true; do
-              n=$((n + 1))
-              if grep -q "CLIENTTEST world joined" clienttest.log; then
-                xwd -root -silent -display :99 -out "shots/scene_$(date +%H%M%S_%3N).xwd" 2> /dev/null || true
-                sleep 0.35
-              else
-                if [ $((n % 20)) -eq 0 ]; then xwd -root -silent -display :99 -out "shots/boot_$(date +%H%M%S_%3N).xwd" 2> /dev/null || true; fi
-                sleep 1
-              fi
-            done
-          ) &
-          SHOTS=$!
-          timeout 780 ./gradlew runClientTest -PskipCargo=true > clienttest.log 2>&1 || true
-          kill $SHOTS 2> /dev/null || true
-          for f in shots/*.xwd; do convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
-          grep -E "CLIENTTEST|Using the|graphics backend|Goo simulation stopped" clienttest.log | head -80 || true
-          echo "screenshots: $(ls shots | wc -l)"
-          grep -q "CLIENTTEST PASS" clienttest.log
+          # one run of the client test: name, extra lines for options.txt, extra environment
+          run_client() {
+            name=$1
+            rm -rf run/clienttest/saves/selftest run/clienttest/options.txt
+            mkdir -p run/clienttest/saves "shots/$name"
+            cp -r run/selftest/world run/clienttest/saves/selftest
+            printf 'pauseOnLostFocus:false\nonboardAccessibility:false\ntutorialStep:none\nrenderDistance:4\nsimulationDistance:5\nskipMultiplayerWarning:true\njoinedFirstServer:true\n%b' "$2" > run/clienttest/options.txt
+            log="clienttest-$name.log"; : > "$log"
+            (
+              while true; do
+                if grep -q "CLIENTTEST world joined" "$log"; then
+                  xwd -root -silent -display :99 -out "shots/$name/scene_$(date +%H%M%S_%3N).xwd" 2> /dev/null || true
+                  sleep 0.35
+                else
+                  sleep 1
+                fi
+              done
+            ) &
+            SHOTS=$!
+            env $3 timeout 600 ./gradlew runClientTest -PskipCargo=true > "$log" 2>&1 || true
+            kill $SHOTS 2> /dev/null || true
+            for f in shots/$name/*.xwd; do [ -e "$f" ] || continue; convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
+            echo "=== client test: $name"
+            grep -E "CLIENTTEST (stage|in honey|bounced|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo simulation stopped|physicsbruhh.*(rror|ailed)|pipeline/goo|core/goo" "$log" | cut -c1-400 | head -60 || true
+            echo "screenshots: $(ls shots/$name | wc -l)"
+          }
+          run_client vulkan "" ""
+          run_client oit "improvedTransparency:true\n" ""
+          run_client opengl 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1"
+          run_client plain "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.shader=false"
+          echo "=== summary"
+          for name in vulkan oit opengl plain; do
+            echo "$name: $(grep -o 'Using graphics backend [A-Za-z]*' clienttest-$name.log | head -1) / $(grep -o 'CLIENTTEST \(PASS\|FAIL.*\)' clienttest-$name.log | head -1)"
+          done
+          # the default run and the two fallbacks of our own making must pass; OpenGL depends on what the runner can do
+          grep -q "CLIENTTEST PASS" clienttest-vulkan.log
+          grep -q "CLIENTTEST PASS" clienttest-oit.log
+          grep -q "CLIENTTEST PASS" clienttest-plain.log
       - name: Screenshots as text (commits tagged [shots])
         if: always() && contains(github.event.head_commit.message, '[shots]')
         run: |
-          for f in shots/*.jpg; do
-            echo "SHOT-BEGIN $(basename "$f")"
-            convert "$f" -resize 854x480 -quality 72 jpg:- | base64 -w 160
-            echo "SHOT-END"
+          for name in vulkan oit opengl plain; do
+            n=0
+            for f in shots/$name/*.jpg; do
+              [ -e "$f" ] || continue
+              n=$((n + 1))
+              # every frame of the default run, every fourth of the others
+              if [ "$name" != "vulkan" ] && [ $((n % 4)) -ne 0 ]; then continue; fi
+              echo "SHOT-BEGIN ${name}_$(basename "$f")"
+              convert "$f" -resize 854x480 -quality 72 jpg:- | base64 -w 160
+              echo "SHOT-END"
+            done
           done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: clienttest
           path: |
-            clienttest.log
+            clienttest-*.log
             shots/
           retention-days: 7
           if-no-files-found: ignore

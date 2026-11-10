@@ -1,5 +1,6 @@
 package physicsbruhh.client;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.NoopRenderer;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
@@ -30,7 +31,11 @@ public class PhysicsBruhhClient {
         NeoForge.EVENT_BUS.addListener((EntityLeaveLevelEvent e) -> {
             if (e.getLevel().isClientSide() && e.getEntity() instanceof GooEntity goo) GooClient.leave(goo);
         });
-        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> GooClient.tick());
+        modBus.addListener(GooPipelines::register);
+        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { GooClient.tick(); GooTouch.tick(Minecraft.getInstance()); });
+        NeoForge.EVENT_BUS.addListener(GooTouch::onClick);
+        NeoForge.EVENT_BUS.addListener(GooLook::registerCommand);
+        GooLook.load();
         NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> GooClient.reset());
         NeoForge.EVENT_BUS.addListener((SubmitCustomGeometryEvent e) -> GooRenderer.submit(e));
         ClientSelfTest.register();

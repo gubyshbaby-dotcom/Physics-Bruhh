@@ -19,6 +19,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.piston.PistonHeadBlock;
@@ -26,6 +27,7 @@ import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.PistonType;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import physicsbruhh.GooEntity;
 import physicsbruhh.PhysicsBruhh;
@@ -67,6 +69,11 @@ public final class GooClient {
     private static final Int2ObjectOpenHashMap<GooEntity> LIVE = new Int2ObjectOpenHashMap<>();
     /** Goo is drawn as clear liquid (the server's {@code clear_goo} game rule, read off the goo markers). */
     static volatile boolean clearLook;
+    /** Cells of bodies added this tick: their surroundings are scanned at once, so they never spend a tick without a floor. */
+    private static final List<BlockPos> NEW_CELLS = new ArrayList<>();
+    /** The local player's box (relative to {@link #origin}) and how much goo is inside it: honey in the low 16 bits, slime above. */
+    private static volatile float[] probeBox;
+    private static volatile int probeResult;
 
     /**
      * Test mode ({@code -Dphysicsbruhh.lockstep=true}): exactly three simulation steps per client
@@ -102,7 +109,7 @@ public final class GooClient {
         sim = null;
         if (s != null) s.close();
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
-        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false;
+        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); clearLook = false; NEW_CELLS.clear(); probeBox = null; probeResult = 0;
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         PART_IDS.clear(); HEADS.clear();
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
@@ -141,6 +148,7 @@ public final class GooClient {
                 BlockPos cell = BlockPos.containing(goo.getX(), goo.getY() + 0.01, goo.getZ());
                 if (KNOWN.isEmpty()) origin = cell; // rebase so local coordinates stay small
                 KNOWN.add(goo.getId());
+                NEW_CELLS.add(cell);
                 BlockPos o = origin;
                 final int id = goo.getId(), mat = goo.material();
                 final float x = cell.getX() - o.getX(), y = cell.getY() - o.getY(), z = cell.getZ() - o.getZ();
@@ -156,7 +164,18 @@ public final class GooClient {
             }
             PENDING.clear();
         }
-        if (sim != null && !paused) { Colliders c = scan(level); if (c != null) COLLIDERS.set(c); }
+        if (sim != null && !paused) {
+            Colliders c = scan(level);
+            if (c != null) COLLIDERS.set(c);
+            NEW_CELLS.clear();
+            BlockPos o = origin;
+            if (mc.player != null && !mc.player.isSpectator()) {
+                AABB box = mc.player.getBoundingBox();
+                probeBox = new float[] { (float) (box.minX - o.getX()), (float) (box.minY - o.getY()), (float) (box.minZ - o.getZ()), (float) (box.maxX - o.getX()), (float) (box.maxY - o.getY()), (float) (box.maxZ - o.getZ()) };
+            } else {
+                probeBox = null; probeResult = 0;
+            }
+        }
         if (LOCKSTEP && sim != null && running && !paused) {
             STEP_DONE.drainPermits();
             STEP_REQUEST.release();
@@ -182,6 +201,7 @@ public final class GooClient {
         boolean any = false;
         LongOpenHashSet seen = new LongOpenHashSet(), seenParts = new LongOpenHashSet();
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        List<int[]> regions = new ArrayList<>();
         scanTick++;
         for (int b = 0; b + 8 <= info.length && b / 8 < MAX_BODIES; b += 8) {
             final int slot = b / 8;
@@ -199,6 +219,11 @@ public final class GooClient {
                     hash = hash * 31L + System.identityHashCode(state);
                     if (isPistonPart(state) && seenParts.add(pos.asLong())) nk = notePistonPart(level, state, pos, o, kin, nk);
                 }
+                // a creature moving about inside it counts as a change too
+                AABB resting = new AABB(info[b + 2] + o.getX() - 0.1, info[b + 3] + o.getY() - 0.1, info[b + 4] + o.getZ() - 0.1, info[b + 5] + o.getX() + 0.1, info[b + 6] + o.getY() + 0.1, info[b + 7] + o.getZ() + 0.1);
+                for (Entity e : level.getEntities((Entity) null, resting, GooClient::pushesGoo)) {
+                    hash = hash * 31L + e.getId() * 7919L + (long) Math.floor(e.getX() * 16.0) * 31L + (long) Math.floor(e.getY() * 16.0) * 17L + (long) Math.floor(e.getZ() * 16.0);
+                }
                 boolean changed = SLEEP_HASH_VALID[slot] && hash != SLEEP_HASH[slot];
                 SLEEP_HASH[slot] = hash; SLEEP_HASH_VALID[slot] = true;
                 if (changed) {
@@ -208,6 +233,20 @@ public final class GooClient {
                 if (WAKING[slot] > 0) WAKING[slot]--; else continue;
             }
             any = true;
+            regions.add(new int[] { x0, y0, z0, x1, y1, z1 });
+        }
+        // bodies added this tick are not in the simulation's report yet: their cell and its neighbours
+        for (BlockPos cell : NEW_CELLS) {
+            any = true;
+            regions.add(new int[] { cell.getX() - 1, cell.getY() - 1, cell.getZ() - 1, cell.getX() + 1, cell.getY() + 2, cell.getZ() + 1 });
+        }
+        IntOpenHashSet seenEntities = new IntOpenHashSet();
+        for (int[] region : regions) {
+            final int x0 = region[0], y0 = region[1], z0 = region[2], x1 = region[3], y1 = region[4], z1 = region[5];
+            // creatures walking through: boxes that move, where they were at the start of the tick
+            for (Entity e : level.getEntities((Entity) null, new AABB(x0, y0, z0, x1 + 1, y1 + 1, z1 + 1), GooClient::pushesGoo)) {
+                if (nk < MAX_KINEMATIC - 8 && seenEntities.add(e.getId())) nk = addCreature(e, o, kin, nk);
+            }
             // piston parts are looked for one block further out than ordinary blocks: a retracting head
             // is drawn (and collides) in front of its base, but the moving block itself sits on the base
             for (int y = y0 - 1; y <= y1 + 1; y++) for (int z = z0 - 1; z <= z1 + 1; z++) for (int x = x0 - 1; x <= x1 + 1; x++) {
@@ -216,13 +255,16 @@ public final class GooClient {
                 if (inner && !seen.add(pos.asLong())) continue;
                 BlockState state = level.getBlockState(pos);
                 if (state.isAir()) continue;
+                VoxelShape shape = null;
                 if (isPistonPart(state)) {
                     if (seenParts.add(pos.asLong())) nk = notePistonPart(level, state, pos, o, kin, nk);
-                    // heads and blocks in transit only collide as moving parts; a piston's base is also an ordinary block
-                    if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) continue;
+                    // heads and blocks in transit only collide as moving parts; a piston's base is also an ordinary block,
+                    // and stays one (without its head) while the head slides back into it
+                    if (state.is(Blocks.PISTON_HEAD)) continue;
+                    if (state.is(Blocks.MOVING_PISTON)) { shape = retractingBase(level, pos); if (shape == null) continue; }
                 }
                 if (!inner) continue;
-                VoxelShape shape = state.getCollisionShape(level, pos);
+                if (shape == null) shape = state.getCollisionShape(level, pos);
                 if (shape.isEmpty()) continue;
                 float stick = stickiness(state);
                 for (AABB box : shape.toAabbs()) {
@@ -244,6 +286,34 @@ public final class GooClient {
     private static float stickiness(BlockState state) {
         if (state.is(Blocks.STICKY_PISTON) || state.is(Blocks.HONEY_BLOCK) || state.is(Blocks.SLIME_BLOCK)) return 2.0F;
         return 1.0F;
+    }
+
+    private static boolean pushesGoo(Entity e) {
+        return !(e instanceof GooEntity) && e.isAlive() && !e.isSpectator() && !e.noPhysics;
+    }
+
+    /** A creature (or item, or the player): its box where it was at the start of this tick, moving to where it is now. */
+    private static int addCreature(Entity e, BlockPos o, float[] kin, int nk) {
+        AABB box = e.getBoundingBox();
+        double dx = e.getX() - e.xo, dy = e.getY() - e.yo, dz = e.getZ() - e.zo;
+        if (dx * dx + dy * dy + dz * dz > 4.0) { dx = 0.0; dy = 0.0; dz = 0.0; } // teleported: not a shove
+        int i = nk * GooSim.KINEMATIC_FLOATS;
+        kin[i] = -(e.getId() % 8_000_000 + 1); // creatures have negative ids: they push goo aside but do not make it stiffen like a piston does
+        kin[i + 1] = (float) (box.minX - dx - o.getX()); kin[i + 2] = (float) (box.minY - dy - o.getY()); kin[i + 3] = (float) (box.minZ - dz - o.getZ());
+        kin[i + 4] = (float) (box.maxX - dx - o.getX()); kin[i + 5] = (float) (box.maxY - dy - o.getY()); kin[i + 6] = (float) (box.maxZ - dz - o.getZ());
+        kin[i + 7] = (float) (dx * 20.0); kin[i + 8] = (float) (dy * 20.0); kin[i + 9] = (float) (dz * 20.0);
+        kin[i + 10] = 1.0F;
+        kin[i + 11] = 0.0F;
+        return nk + 1;
+    }
+
+    /** The base of a piston whose head is sliding back in (the block there is "in transit" meanwhile), or null. */
+    private static VoxelShape retractingBase(ClientLevel level, BlockPos pos) {
+        if (!(level.getBlockEntity(pos) instanceof PistonMovingBlockEntity piston) || !piston.isSourcePiston() || piston.isExtending()) return null;
+        BlockState moved = piston.getMovedState();
+        boolean sticky = moved.is(Blocks.STICKY_PISTON) || (moved.is(Blocks.PISTON_HEAD) && moved.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY);
+        return (sticky ? Blocks.STICKY_PISTON : Blocks.PISTON).defaultBlockState()
+                .setValue(PistonBaseBlock.FACING, piston.getDirection()).setValue(PistonBaseBlock.EXTENDED, true).getCollisionShape(level, pos);
     }
 
     private static final Long2IntOpenHashMap PART_IDS = new Long2IntOpenHashMap();
@@ -289,6 +359,8 @@ public final class GooClient {
 
     private static final Long2ObjectOpenHashMap<Head> HEADS = new Long2ObjectOpenHashMap<>();
     private static int scanTick;
+    /** Heads that started to move this tick (for the sound they make when there is goo in front of them). */
+    static final List<BlockPos> strokes = new ArrayList<>();
 
     private static void noteHead(BlockPos base, Direction facing, boolean sticky, float start, float target, boolean exact) {
         long key = base.asLong();
@@ -330,7 +402,7 @@ public final class GooClient {
         if (shape.isEmpty()) return nk;
         float ox = piston.getXOff(0.0F), oy = piston.getYOff(0.0F), oz = piston.getZOff(0.0F);
         float vx = (piston.getXOff(1.0F) - ox) * 20.0F, vy = (piston.getYOff(1.0F) - oy) * 20.0F, vz = (piston.getZOff(1.0F) - oz) * 20.0F;
-        return addBoxes(shape, pos, pos, ox, oy, oz, vx, vy, vz, stickiness(moved), o, kin, nk);
+        return addBoxes(shape, pos, pos, ox, oy, oz, vx, vy, vz, stickiness(moved), null, o, kin, nk);
     }
 
     /** Advances every followed head by one tick and reports the ones that are not fully pulled in. */
@@ -352,15 +424,22 @@ public final class GooClient {
                 BlockPos headPos = head.base.relative(f);
                 VoxelShape shape = headState(f, head.sticky).getCollisionShape(level, headPos);
                 float v = -(next - head.shown) * 20.0F;
+                // only a sticky head holds on to goo; a plain one just pushes
                 nk = addBoxes(shape, headPos, head.base, -f.getStepX() * head.shown, -f.getStepY() * head.shown, -f.getStepZ() * head.shown,
-                        f.getStepX() * v, f.getStepY() * v, f.getStepZ() * v, head.sticky ? 3.0F : 0.6F, o, kin, nk);
+                        f.getStepX() * v, f.getStepY() * v, f.getStepZ() * v, head.sticky ? 3.0F : 0.0F, f, o, kin, nk);
+                if (next != head.shown && (head.shown == 0.0F || head.shown == 1.0F)) strokes.add(headPos);
             }
             head.shown = next;
         }
         return nk;
     }
 
-    private static int addBoxes(VoxelShape shape, BlockPos at, BlockPos idPos, float ox, float oy, float oz, float vx, float vy, float vz, float stick, BlockPos o, float[] kin, int nk) {
+    /**
+     * {@code front}: the way a piston head faces, or null for anything else. The head's plate (the box
+     * that fills the whole cross-section) is marked with it, and pushes whatever gets caught inside
+     * it out of its front, never out of its back towards the piston.
+     */
+    private static int addBoxes(VoxelShape shape, BlockPos at, BlockPos idPos, float ox, float oy, float oz, float vx, float vy, float vz, float stick, Direction front, BlockPos o, float[] kin, int nk) {
         int index = 0;
         for (AABB box : shape.toAabbs()) {
             if (nk >= MAX_KINEMATIC) break;
@@ -370,6 +449,16 @@ public final class GooClient {
             kin[i + 4] = (float) (box.maxX + ox + at.getX() - o.getX()); kin[i + 5] = (float) (box.maxY + oy + at.getY() - o.getY()); kin[i + 6] = (float) (box.maxZ + oz + at.getZ() - o.getZ());
             kin[i + 7] = vx; kin[i + 8] = vy; kin[i + 9] = vz;
             kin[i + 10] = stick;
+            float code = 0.0F;
+            if (front != null) {
+                boolean plate = switch (front.getAxis()) {
+                    case X -> box.getYsize() > 0.9 && box.getZsize() > 0.9;
+                    case Y -> box.getXsize() > 0.9 && box.getZsize() > 0.9;
+                    case Z -> box.getXsize() > 0.9 && box.getYsize() > 0.9;
+                };
+                if (plate) code = front.getAxis().ordinal() * 2 + (front.getAxisDirection() == Direction.AxisDirection.POSITIVE ? 1 : 2);
+            }
+            kin[i + 11] = code;
             nk++; index++;
         }
         return nk;
@@ -388,6 +477,40 @@ public final class GooClient {
     }
 
     static boolean healthy() { return sim != null && running; }
+
+    /** How much goo the local player is standing in: honey particles in the low 16 bits, slime in the next 16. */
+    static int contact() { return probeBox == null ? 0 : probeResult; }
+
+    /** The goo whose bounds the segment {@code from}-{@code to} enters first, within {@code limit} blocks; null if none. */
+    static GooEntity pick(Vec3 from, Vec3 to, double limit) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        GooEntity best = null;
+        double bestDistance = limit;
+        for (GooEntity goo : LIVE.values()) {
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F) continue;
+            int b = slot * 8;
+            AABB box = new AABB(info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ()).inflate(0.05);
+            double distance = box.contains(from) ? 0.0 : box.clip(from, to).map(hit -> hit.distanceTo(from)).orElse(Double.MAX_VALUE);
+            if (distance < bestDistance) { bestDistance = distance; best = goo; }
+        }
+        return best;
+    }
+
+    /** Material of the goo within a block of the given cell, or -1 if there is none. */
+    static int materialNear(BlockPos cell) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        for (GooEntity goo : LIVE.values()) {
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F) continue;
+            int b = slot * 8;
+            if (info[b + 2] + o.getX() < cell.getX() + 2 && info[b + 5] + o.getX() > cell.getX() - 1 && info[b + 3] + o.getY() < cell.getY() + 2 && info[b + 6] + o.getY() > cell.getY() - 1
+                    && info[b + 4] + o.getZ() < cell.getZ() + 2 && info[b + 7] + o.getZ() > cell.getZ() - 1) return goo.material();
+        }
+        return -1;
+    }
 
     /** World x range of the slime body that is widest along x (smoke test: is the band between two pistons where it should be?). */
     static float[] widestSlime() {
@@ -414,7 +537,7 @@ public final class GooClient {
         ByteBuffer infoBuf = direct(MAX_BODIES * GooSim.BODY_FLOATS);
         ByteBuffer meshBuf = direct(1 << 18);
         long last = System.nanoTime();
-        boolean dirty = true;
+        boolean dirty = true, hadAwake = false;
         try {
             while (running) {
                 GooSim s = sim;
@@ -440,7 +563,12 @@ public final class GooClient {
                 float[] info = new float[Math.max(0, slots) * GooSim.BODY_FLOATS];
                 infoBuf.asFloatBuffer().get(0, info, 0, info.length);
                 bodyInfo = info;
-                if (awake > 0 || dirty) {
+                float[] probe = probeBox;
+                if (probe != null) probeResult = Math.max(0, s.probe(probe[0], probe[1], probe[2], probe[3], probe[4], probe[5]));
+                // once more after the last moving body has stopped or gone, or its final state would never be shown
+                boolean changed = awake > 0 || dirty || hadAwake;
+                hadAwake = awake > 0;
+                if (changed) {
                     for (int mat = 0; mat < 2; mat++) {
                         int quads = s.mesh(mat, meshBuf);
                         if (quads < 0 && quads > -(1 << 26)) { meshBuf = direct(-quads + (1 << 16)); quads = s.mesh(mat, meshBuf); }

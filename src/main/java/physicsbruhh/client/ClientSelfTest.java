@@ -23,6 +23,8 @@ final class ClientSelfTest {
     private static long firstTick;
     private static boolean done;
     private static float restingWidth = -1.0F, bandLeft = 99.0F, bandRight = -99.0F, bandWidest;
+    private static boolean sawHoney, sawSlime, sawClear, waded, bounced;
+    private static int bouncesBefore;
 
     private ClientSelfTest() {}
 
@@ -107,22 +109,39 @@ final class ClientSelfTest {
                 stage("sticky pistons retract again");
                 commands(server, "setblock 11 200 6 minecraft:air", "setblock 17 200 6 minecraft:air",
                         "setblock 11 200 3 minecraft:air", "setblock 17 200 3 minecraft:air");
-            } else if (tick > 0 && tick < 420 && tick % 20 == 0) {
-                PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} widestSlime={} clear={} drawCalls={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.drawCalls);
-            } else if (tick == 420) {
-                String state = GooClient.describe() + " widestSlime=" + slime() + " restingWidth=" + restingWidth + " band=" + bandLeft + ".." + bandRight + " clear=" + GooClient.clearLook + " drawCalls=" + GooRenderer.drawCalls;
+            } else if (tick == 430) {
+                stage("player wades into the honey puddle");
+                commands(server, "tp @a 19.5 200 5.5");
+            } else if (tick == 450) {
+                waded = GooTouch.inHoney;
+                PhysicsBruhh.LOGGER.info("CLIENTTEST in honey: {} (contact {})", waded, GooClient.contact() & 0xFFFF);
+                stage("player drops onto the slime");
+                bouncesBefore = GooTouch.bounces;
+                commands(server, "tp @a 19.5 206 2.5");
+            } else if (tick == 500) {
+                bounced = GooTouch.bounces > bouncesBefore;
+                PhysicsBruhh.LOGGER.info("CLIENTTEST bounced on slime: {}", bounced);
+                stage("everything is cleared away");
+                commands(server, "tp @a 14.5 202 9.5", "goo clear");
+            } else if (tick > 0 && tick < 540 && tick % 20 == 0) {
+                PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} widestSlime={} clear={} shader={} drawCalls={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.shader, GooRenderer.drawCalls);
+            } else if (tick == 540) {
+                String state = GooClient.describe() + " restingWidth=" + restingWidth + " band=" + bandLeft + ".." + bandRight + " shader=" + GooRenderer.shader + " drawCalls=" + GooRenderer.drawCalls;
                 String problem = null;
                 if (!GooClient.healthy()) problem = "simulation is not running";
-                else if (GooClient.quadCount(0) == 0) problem = "no honey surface";
-                else if (GooClient.quadCount(1) == 0) problem = "no slime surface";
+                else if (!sawHoney || !sawSlime) problem = "no " + (sawHoney ? "slime" : "honey") + " surface";
                 else if (GooRenderer.drawCalls == 0) problem = "the surface never reached the renderer";
                 else if (restingWidth > 1.35F) problem = "slime did not sit still between the extended pistons (width " + restingWidth + ")";
                 else if (bandLeft > 13.6F || bandRight < 15.4F) problem = "slime did not stay stretched between the retracted sticky pistons (" + bandLeft + ".." + bandRight + ")";
                 else if (bandWidest > 3.5F) problem = "slime was flung apart (" + bandWidest + " blocks wide)";
-                else if (!GooClient.clearLook) problem = "the clear_goo game rule did not reach the client";
+                else if (!sawClear) problem = "the clear_goo game rule did not reach the client";
+                else if (!waded) problem = "standing in the honey puddle was not noticed";
+                else if (!bounced) problem = "falling onto the slime did not bounce the player";
+                else if (GooClient.quadCount(0) != 0 || GooClient.quadCount(1) != 0) problem = "goo is still drawn after /goo clear (" + GooClient.quadCount(0) + " + " + GooClient.quadCount(1) + " quads)";
                 PhysicsBruhh.LOGGER.info("CLIENTTEST final {}", state);
                 finish(mc, problem);
             }
+            if (tick == 420) { sawHoney = GooClient.quadCount(0) > 0; sawSlime = GooClient.quadCount(1) > 0; sawClear = GooClient.clearLook; }
             // before the first retraction every slime body is still about a block wide ...
             if (tick == 118) { float[] span = GooClient.widestSlime(); restingWidth = span[1] - span[0]; }
             // ... and a second after it the band spans the gap between the two retracted heads (bases at x = 12 and 16)

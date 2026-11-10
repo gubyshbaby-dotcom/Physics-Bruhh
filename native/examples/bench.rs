@@ -33,6 +33,9 @@ fn main() {
     println!("step {:.2} ms, mesh {:.2} ms", step_ms, mesh_ms);
     for (k, n) in names.iter().enumerate() { println!("  {:<22} {:5.1} %", n, w.prof[k] / total * 100.0); }
 
+    // every bit of every position: the same whatever the number of threads
+    let mut sum = 0xcbf29ce484222325u64;
+    for v in &w.p { sum = (sum ^ v.to_bits() as u64).wrapping_mul(0x100000001b3); }
     let b = w.bodies[0].bb;
-    println!("body 0 bounds {:.4} {:.4} {:.4} .. {:.4} {:.4} {:.4}", b[0], b[1], b[2], b[3], b[4], b[5]);
+    println!("body 0 bounds {:.4} {:.4} {:.4} .. {:.4} {:.4} {:.4}, positions checksum {:016x}", b[0], b[1], b[2], b[3], b[4], b[5], sum);
 }
