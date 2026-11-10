@@ -128,18 +128,22 @@ final class GooTouch {
         GooClient.Picked picked = GooClient.pickPoint(from, to, limit);
         if (picked == null) return;
         GooEntity goo = picked.goo();
-        if (event.isAttack()) {
-            mc.gameMode.attack(player, goo);
-        } else {
-            ItemStack held = player.getItemInHand(event.getHand());
-            boolean bare = held.isEmpty() && event.getHand() == InteractionHand.MAIN_HAND;
-            boolean useful = goo.material() == GooSim.HONEY ? bare || held.is(Items.GLASS_BOTTLE) || held.is(Items.HONEY_BOTTLE) : bare || held.is(Items.SLIME_BALL);
-            if (!useful) return;
-            uses++;
-            mc.gameMode.interact(player, goo, new EntityHitResult(goo, picked.point()), event.getHand());
-        }
+        if (event.isAttack()) mc.gameMode.attack(player, goo);
+        else if (!use(mc, player, picked, event.getHand())) return;
         event.setSwingHand(true);
         event.setCanceled(true);
+    }
+
+    /** Uses what one hand holds on a piece of goo, if the goo has a use for it. */
+    static boolean use(Minecraft mc, LocalPlayer player, GooClient.Picked picked, InteractionHand hand) {
+        GooEntity goo = picked.goo();
+        ItemStack held = player.getItemInHand(hand);
+        boolean bare = held.isEmpty() && hand == InteractionHand.MAIN_HAND;
+        boolean useful = goo.material() == GooSim.HONEY ? bare || held.is(Items.GLASS_BOTTLE) || held.is(Items.HONEY_BOTTLE) : bare || held.is(Items.SLIME_BALL);
+        if (!useful) return false;
+        uses++;
+        mc.gameMode.interact(player, goo, new EntityHitResult(goo, picked.point()), hand);
+        return true;
     }
 
     /** Right clicks passed on to goo so far (smoke test). */

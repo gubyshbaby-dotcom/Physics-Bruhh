@@ -699,6 +699,39 @@ public final class GooClient {
 
     static int quadCount(int material) { synchronized (MESH_LOCK) { return meshQuads[material]; } }
 
+    /** Particles last handed to the liquid look. */
+    static int particleCount() { synchronized (PARTICLE_LOCK) { return particleCount; } }
+
+    /** Smoke test: keep {@link #amountNear} up to date. */
+    static volatile boolean watchAmounts;
+    private static volatile int[] bodyAmounts = new int[0];
+
+    /** How many particles the simulated goo of one kind holds whose marker is within two blocks of (x, z); -1 if there is none (smoke test). */
+    static int amountNear(int material, double x, double z) {
+        int[] amounts = bodyAmounts;
+        int total = -1;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != material || goo.isRemoved()) continue;
+            if ((goo.getX() - x) * (goo.getX() - x) + (goo.getZ() - z) * (goo.getZ() - z) > 4.0) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot >= amounts.length) continue;
+            total = Math.max(total, 0) + amounts[slot];
+        }
+        return total;
+    }
+
+    /** The piece of one kind whose marker is nearest to (x, z), within two blocks; null if none (smoke test). */
+    static GooEntity gooNear(int material, double x, double z) {
+        GooEntity best = null;
+        double bestDistance = 4.0;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != material || goo.isRemoved()) continue;
+            double d = (goo.getX() - x) * (goo.getX() - x) + (goo.getZ() - z) * (goo.getZ() - z);
+            if (d < bestDistance) { bestDistance = d; best = goo; }
+        }
+        return best;
+    }
+
     private static volatile float stepMillis;
     /** Simulated time per real time over the last second or so (1 = keeping up), and the threads the solver uses. */
     private static volatile float simSpeed = 1.0F;
@@ -760,7 +793,17 @@ public final class GooClient {
                 // once more after the last moving body has stopped or gone, or its final state would never be shown
                 boolean particles = wantParticles;
                 boolean changed = awake > 0 || dirty || hadAwake || particles != asParticles;
+                if (particles != asParticles) {
+                    // the other look's data is not kept up from here on: nothing stale must be left to draw
+                    if (particles) synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
+                    else synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
+                }
                 asParticles = particles;
+                if (watchAmounts) {
+                    int[] amounts = new int[MAX_BODIES];
+                    for (int b = 0; b < MAX_BODIES; b++) amounts[b] = info.length >= (b + 1) * GooSim.BODY_FLOATS && info[b * GooSim.BODY_FLOATS] != 0.0F ? s.count(4, b) : 0;
+                    bodyAmounts = amounts;
+                }
                 hadAwake = awake > 0;
                 if (changed && particles) {
                     int count = s.particles(particleBuf);

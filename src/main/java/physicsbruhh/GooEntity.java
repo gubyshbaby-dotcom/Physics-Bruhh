@@ -45,7 +45,12 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     private static final EntityDataAccessor<Boolean> CLEAR = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.BOOLEAN);
     /** How much goo, in particles of the simulation ({@link GooSim#BLOCK} is a whole block). */
     private static final EntityDataAccessor<Integer> AMOUNT = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.INT);
-    /** Where the amount last changed (a spout, or the place something was scooped from), relative to the marker; and the velocity goo came in with. */
+    /**
+     * Where the amount last changed (a spout, or the place something was scooped from): a block and
+     * the place within it. (Not relative to the marker: that moves, and on a client it lags behind.)
+     * And the velocity goo came in with.
+     */
+    private static final EntityDataAccessor<BlockPos> SPOT_BLOCK = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.BLOCK_POS);
     private static final EntityDataAccessor<Vector3fc> SPOT = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.VECTOR3);
     private static final EntityDataAccessor<Vector3fc> PUSH = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.VECTOR3);
     /** The last goo came in as one lump (a thrown slime ball) rather than as a stream. */
@@ -86,7 +91,14 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     /** Where goo last came into this piece or was taken out of it. */
     public Vec3 spot() {
         Vector3fc spot = this.entityData.get(SPOT);
-        return new Vec3(this.getX() + spot.x(), this.getY() + spot.y(), this.getZ() + spot.z());
+        BlockPos block = this.entityData.get(SPOT_BLOCK);
+        return new Vec3(block.getX() + spot.x(), block.getY() + spot.y(), block.getZ() + spot.z());
+    }
+
+    private void setSpot(Vec3 at) {
+        BlockPos block = BlockPos.containing(at);
+        this.entityData.set(SPOT_BLOCK, block);
+        this.entityData.set(SPOT, new Vector3f((float) (at.x - block.getX()), (float) (at.y - block.getY()), (float) (at.z - block.getZ())));
     }
 
     /** The velocity the last goo came in with, in blocks per second. */
@@ -108,7 +120,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     public int pour(Vec3 from, Vec3 velocity, int count, boolean lump) {
         int now = amount(), fits = Math.max(0, Math.min(count, GooSim.BLOCK - now));
         if (fits == 0) return 0;
-        this.entityData.set(SPOT, new Vector3f((float) (from.x - this.getX()), (float) (from.y - this.getY()), (float) (from.z - this.getZ())));
+        setSpot(from);
         this.entityData.set(PUSH, new Vector3f((float) velocity.x, (float) velocity.y, (float) velocity.z));
         this.entityData.set(LUMP, lump);
         this.entityData.set(AMOUNT, now + fits);
@@ -119,7 +131,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     public int scoop(Vec3 at, int count) {
         int now = amount(), taken = Math.max(0, Math.min(count, now));
         if (taken == 0) return 0;
-        this.entityData.set(SPOT, new Vector3f((float) (at.x - this.getX()), (float) (at.y - this.getY()), (float) (at.z - this.getZ())));
+        setSpot(at);
         this.entityData.set(AMOUNT, now - taken);
         if (now - taken < GooSim.BALL / 4) this.discard(); // a few last drops are not worth a marker
         return taken;
@@ -138,7 +150,8 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
         builder.define(CLEAR, false);
         builder.define(AMOUNT, GooSim.BLOCK);
-        builder.define(SPOT, new Vector3f(0.0F, 0.5F, 0.0F));
+        builder.define(SPOT_BLOCK, BlockPos.ZERO);
+        builder.define(SPOT, new Vector3f());
         builder.define(PUSH, new Vector3f());
         builder.define(LUMP, false);
     }

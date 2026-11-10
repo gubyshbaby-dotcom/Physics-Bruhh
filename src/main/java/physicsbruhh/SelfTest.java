@@ -22,6 +22,7 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import physicsbruhh.sim.GooSim;
 
 /**
  * In-game check for CI: with {@code -Dphysicsbruhh.selftest=true} a dedicated server builds a few
@@ -60,6 +61,33 @@ public final class SelfTest {
             if (d < best) { best = d; health = ((LivingEntity) e).getHealth(); }
         }
         return health;
+    }
+
+    private static void run(MinecraftServer server, String... commands) {
+        for (String command : commands) server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command);
+    }
+
+    /** The goo of one kind nearest to a column, within two blocks; null if there is none. */
+    private static GooEntity nearest(ServerLevel level, EntityType<GooEntity> type, double x, double z) {
+        GooEntity best = null; double bestDistance = 4.0;
+        for (GooEntity goo : level.getEntities(type, new AABB(x - 2, Y - 2, z - 2, x + 2, Y + 3, z + 2), e -> !e.isRemoved())) {
+            double d = (goo.getX() - x) * (goo.getX() - x) + (goo.getZ() - z) * (goo.getZ() - z);
+            if (d < bestDistance) { bestDistance = d; best = goo; }
+        }
+        return best;
+    }
+
+    /** How many of an item the dispenser at a place holds. */
+    private static int held(ServerLevel level, BlockPos pos, net.minecraft.world.item.Item item) {
+        if (!(level.getBlockEntity(pos) instanceof net.minecraft.world.Container container)) return -1;
+        int count = 0;
+        for (int i = 0; i < container.getContainerSize(); i++) if (container.getItem(i).is(item)) count += container.getItem(i).getCount();
+        return count;
+    }
+
+    private static boolean honeyUse(GooEntity goo, net.minecraft.world.entity.player.Player player, ItemStack with) {
+        player.setItemInHand(InteractionHand.MAIN_HAND, with);
+        return goo.interact(player, InteractionHand.MAIN_HAND, new Vec3(0.0, 0.4, 0.0)).consumesAction();
     }
 
     private static BlockState piston(boolean sticky) {
@@ -149,6 +177,100 @@ public final class SelfTest {
                 expect("H: a pig that fell on stone got hurt (health " + onStone + ")", onStone > 0.0F && onStone <= 4.5F);
                 expect("H: a pig that fell on slime goo did not (health " + onSlime + ")", onSlime >= 9.5F);
                 expect("H: a pig that fell on honey goo was cushioned (health " + onHoney + ")", onHoney >= 7.5F && onHoney < 10.0F);
+                // I: dispensers. A honey bottle is poured out, a slime ball is shot out, a slime block comes out as goo.
+                run(server, "kill @e[type=minecraft:pig]", "goo clear",
+                        "setblock 1 " + Y + " 0 minecraft:dispenser[facing=east]{Items:[{Slot:0b,id:\"minecraft:honey_bottle\",count:1}]}",
+                        "setblock 0 " + Y + " 0 minecraft:redstone_block",
+                        "setblock 1 " + Y + " 12 minecraft:dispenser[facing=east]{Items:[{Slot:0b,id:\"minecraft:slime_ball\",count:2}]}",
+                        "setblock 0 " + Y + " 12 minecraft:redstone_block",
+                        "setblock -5 " + Y + " 0 minecraft:dispenser[facing=east]{Items:[{Slot:0b,id:\"minecraft:slime_block\",count:1}]}",
+                        "setblock -6 " + Y + " 0 minecraft:redstone_block");
+            } else if (tick == 215) {
+                GooEntity honey = nearest(level, PhysicsBruhh.HONEY_GOO.get(), 3.5, 0.5);
+                expect("I: a dispensed honey bottle became a stream of honey (" + (honey == null ? "nothing" : honey.amount() + " particles") + ")",
+                        honey != null && honey.poured() && honey.amount() == GooSim.BOTTLE && honey.push().x() > 1.0F);
+                expect("I: ... and left its bottle in the dispenser", held(level, new BlockPos(1, Y, 0), Items.GLASS_BOTTLE) == 1 && held(level, new BlockPos(1, Y, 0), Items.HONEY_BOTTLE) == 0);
+                GooEntity lump = nearest(level, PhysicsBruhh.SLIME_GOO.get(), 4.5, 12.5);
+                expect("I: a dispensed slime ball became a lump of slime (" + (lump == null ? "nothing" : lump.amount() + " particles at x " + lump.getX()) + ")",
+                        lump != null && lump.poured() && lump.lump() && lump.amount() == GooSim.BALL && lump.getX() > 2.5);
+                expect("I: ... one ball at a time", held(level, new BlockPos(1, Y, 12), Items.SLIME_BALL) == 1);
+                GooEntity block = nearest(level, PhysicsBruhh.SLIME_GOO.get(), -3.5, 0.5);
+                expect("I: a dispensed slime block became a block of goo", block != null && !block.poured() && block.amount() == GooSim.BLOCK && held(level, new BlockPos(-5, Y, 0), Items.SLIME_BLOCK) == 0);
+                // an empty bottle in a dispenser facing that honey takes it up again
+                run(server, "setblock 5 " + Y + " 0 minecraft:dispenser[facing=west]{Items:[{Slot:0b,id:\"minecraft:glass_bottle\",count:1}]}",
+                        "setblock 6 " + Y + " 0 minecraft:redstone_block",
+                        // a second ball out of the other one: it joins the lump that is already lying there
+                        "setblock 0 " + Y + " 12 minecraft:air");
+            } else if (tick == 218) {
+                run(server, "setblock 0 " + Y + " 12 minecraft:redstone_block");
+            } else if (tick == 230) {
+                expect("I: a dispensed empty bottle was filled from the honey in front of it", held(level, new BlockPos(5, Y, 0), Items.HONEY_BOTTLE) == 1);
+                expect("I: ... and the honey is gone", nearest(level, PhysicsBruhh.HONEY_GOO.get(), 3.5, 0.5) == null);
+                GooEntity lump = nearest(level, PhysicsBruhh.SLIME_GOO.get(), 4.5, 12.5);
+                expect("I: a second slime ball joined the first lump (" + (lump == null ? "nothing" : lump.amount() + " particles") + ")", lump != null && lump.amount() == 2 * GooSim.BALL);
+                // J: a player's hands. Bottle on honey, bare hand on slime, slime ball on slime, honey bottle poured while sneaking, slime ball thrown.
+                BlockPos h = new BlockPos(4, Y, 6), sl = new BlockPos(-4, Y, 6);
+                level.setBlock(h, Blocks.HONEY_BLOCK.defaultBlockState(), 3);
+                level.setBlock(sl, Blocks.SLIME_BLOCK.defaultBlockState(), 3);
+                GooEntity honey = GooEvents.convertToGoo(level, h, 1, 0), slime = GooEvents.convertToGoo(level, sl, 1, 0);
+                var player = FakePlayerFactory.getMinecraft(level);
+                player.setPos(4.5, Y, 4.5);
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GLASS_BOTTLE));
+                boolean used = honey.interact(player, InteractionHand.MAIN_HAND, new Vec3(0.0, 0.4, 0.0)).consumesAction();
+                expect("J: an empty bottle is filled from honey goo", used && player.getItemInHand(InteractionHand.MAIN_HAND).is(Items.HONEY_BOTTLE) && honey.amount() == GooSim.BLOCK - GooSim.BOTTLE);
+                used = honey.interact(player, InteractionHand.MAIN_HAND, new Vec3(0.0, 0.4, 0.0)).consumesAction();
+                expect("J: a honey bottle is poured back into it", used && player.getItemInHand(InteractionHand.MAIN_HAND).is(Items.GLASS_BOTTLE) && honey.amount() == GooSim.BLOCK);
+                player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                player.getInventory().clearContent();
+                used = slime.interact(player, InteractionHand.MAIN_HAND, new Vec3(0.0, 0.5, 0.0)).consumesAction();
+                expect("J: a bare hand tears a slime ball off slime goo", used && slime.amount() == GooSim.BLOCK - GooSim.BALL && player.getInventory().countItem(Items.SLIME_BALL) == 1);
+                player.getInventory().clearContent();
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SLIME_BALL));
+                used = slime.interact(player, InteractionHand.MAIN_HAND, new Vec3(0.0, 0.5, 0.0)).consumesAction();
+                expect("J: a slime ball is pressed back on", used && slime.amount() == GooSim.BLOCK && player.getItemInHand(InteractionHand.MAIN_HAND).isEmpty());
+                expect("J: a stick does nothing to goo", !honeyUse(honey, player, new ItemStack(Items.STICK)));
+                // pouring and throwing, at the floor two blocks ahead
+                player.setPos(0.5, Y, 8.5);
+                player.setYRot(-90.0F);
+                player.setXRot(35.0F);
+                player.setShiftKeyDown(true);
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.HONEY_BOTTLE));
+                var pour = new net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.RightClickItem(player, InteractionHand.MAIN_HAND);
+                NeoForge.EVENT_BUS.post(pour);
+                GooEntity poured = nearest(level, PhysicsBruhh.HONEY_GOO.get(), 2.5, 8.5);
+                expect("J: a honey bottle used while sneaking is poured out (" + (poured == null ? "nothing" : poured.amount() + " particles at x " + poured.getX()) + ")",
+                        pour.isCanceled() && poured != null && poured.poured() && poured.amount() == GooSim.BOTTLE && player.getItemInHand(InteractionHand.MAIN_HAND).is(Items.GLASS_BOTTLE));
+                player.setShiftKeyDown(false);
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.HONEY_BOTTLE));
+                var drink = new net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.RightClickItem(player, InteractionHand.MAIN_HAND);
+                NeoForge.EVENT_BUS.post(drink);
+                expect("J: without sneaking the honey bottle is left alone (to be drunk)", !drink.isCanceled() && player.getItemInHand(InteractionHand.MAIN_HAND).is(Items.HONEY_BOTTLE));
+                player.setPos(0.5, Y, 10.5);
+                player.setXRot(10.0F);
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SLIME_BALL, 3));
+                var toss = new net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.RightClickItem(player, InteractionHand.MAIN_HAND);
+                NeoForge.EVENT_BUS.post(toss);
+                GooEntity thrown = nearest(level, PhysicsBruhh.SLIME_GOO.get(), 4.5, 10.5);
+                expect("J: a slime ball is thrown as a lump (" + (thrown == null ? "nothing" : thrown.amount() + " particles at x " + thrown.getX()) + ")",
+                        toss.isCanceled() && thrown != null && thrown.lump() && thrown.amount() == GooSim.BALL && thrown.getX() > 2.0 && player.getItemInHand(InteractionHand.MAIN_HAND).getCount() == 2);
+                // K: punching less than a block of slime gives slime balls
+                thrown.hurtServer(level, level.damageSources().generic(), 1.0F);
+            } else if (tick == 234) {
+                int balls = 0;
+                for (Entity e : level.getEntities((Entity) null, new AABB(-6, Y - 1, -1, 7, Y + 3, 14), e -> e instanceof net.minecraft.world.entity.item.ItemEntity)) {
+                    ItemStack stack = ((net.minecraft.world.entity.item.ItemEntity) e).getItem();
+                    if (stack.is(Items.SLIME_BALL)) balls += stack.getCount();
+                }
+                expect("K: a punched lump of slime came back as a slime ball (" + balls + ")", balls == 1);
+                // tidy up, and leave something for the client test that opens this world next
+                run(server, "goo clear", "kill @e[type=minecraft:item]",
+                        "setblock 1 " + Y + " 0 minecraft:air", "setblock 0 " + Y + " 0 minecraft:air", "setblock 1 " + Y + " 12 minecraft:air", "setblock 0 " + Y + " 12 minecraft:air",
+                        "setblock -5 " + Y + " 0 minecraft:air", "setblock -6 " + Y + " 0 minecraft:air", "setblock 5 " + Y + " 0 minecraft:air", "setblock 6 " + Y + " 0 minecraft:air");
+                level.setBlock(new BlockPos(-1, Y, 3), Blocks.SLIME_BLOCK.defaultBlockState(), 3);
+                GooEvents.convert(level, new BlockPos(-1, Y, 3), 1, 0);
+                level.setBlock(new BlockPos(4, Y, 10), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
+                GooEvents.convert(level, new BlockPos(4, Y, 10), 1, 0);
+            } else if (tick == 240) {
                 finish(server);
             }
         } catch (Throwable t) {
