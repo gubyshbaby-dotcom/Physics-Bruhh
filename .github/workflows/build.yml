@@ -66,6 +66,11 @@ jobs:
         with:
           java-version: '25'
           distribution: 'temurin'
+      - name: Java and Rust simulations agree
+        run: |
+          mkdir -p build/simcheck
+          javac -nowarn -d build/simcheck src/main/java/physicsbruhh/sim/*.java src/simcheck/java/physicsbruhh/sim/*.java
+          java -cp build/simcheck:src/main/resources physicsbruhh.sim.SimCheck --require-native
       - uses: gradle/actions/setup-gradle@v4
       - name: Build
         run: ./gradlew build -PskipCargo=true --stacktrace
