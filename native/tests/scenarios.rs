@@ -470,3 +470,125 @@ fn slime_band_holds_wherever_it_is_in_the_world() {
         assert!(bb[0] - o[0] < -0.8 && bb[3] - o[0] > 1.8, "at {:?} the band spans {:.2}..{:.2}", o, bb[0] - o[0], bb[3] - o[0]);
     }
 }
+
+/// Particles of the world in the air (above `y`), and the furthest of them along x.
+fn airborne(w: &World, y: f32) -> (usize, f32) {
+    let (mut n, mut far) = (0, f32::MIN);
+    for i in 0..w.maxp { if w.alive[i] != 0 && w.p[i * 3 + 1] > y { n += 1; far = far.max(w.p[i * 3]); } }
+    (n, far)
+}
+
+/// A dispenser one block up squirts a bottle of honey sideways: it comes out as a stream over a
+/// second or so, flies freely, and gathers into one puddle on the floor ahead. A second bottle
+/// into the same piece flies just as fast, although the piece now lies on the ground.
+#[test]
+fn honey_stream_flies_and_gathers_into_a_puddle() {
+    const BOTTLE: u32 = 432;
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    let b = w.add_empty(HONEY, 0.0, 1.0, 0.0);
+    assert_eq!(b, 0);
+    assert_eq!(w.emit(0, [0.0, 1.5, 0.5], [3.5, 0.0, 0.0], BOTTLE, false), BOTTLE);
+    assert_eq!(w.amount(0), BOTTLE, "all of it counts from the start, also what has not come out yet");
+    run(&mut w, 0.25);
+    let out = w.bodies[0].count;
+    assert!(out > 40 && out < BOTTLE, "it comes out bit by bit: {} particles after a quarter of a second", out);
+    let (in_air, front) = airborne(&w, 0.6);
+    assert!(in_air > 30 && front > 0.6, "the stream is under way: {} in the air, front at {:.2}", in_air, front);
+    run(&mut w, 6.0);
+    assert_eq!(w.bodies[0].count, BOTTLE, "every particle came out");
+    assert_eq!(w.bodies[0].pending, 0);
+    let bb = w.bodies[0].bb;
+    assert!(bb[4] < 0.45, "it lies flat: top at {:.2}", bb[4]);
+    assert!(bb[0] > 0.2 && bb[3] < 4.5, "it landed ahead of the nozzle and stayed together: {:.2}..{:.2}", bb[0], bb[3]);
+    assert_eq!(w.flying(0), 0, "nothing still counts as in flight");
+    all_finite_above_floor(&w);
+    run(&mut w, 10.0);
+    assert!(!w.bodies[0].awake, "the puddle comes to rest");
+    // the second bottle
+    assert_eq!(w.emit(0, [0.0, 1.5, 0.5], [3.5, 0.0, 0.0], BOTTLE, false), BOTTLE);
+    run(&mut w, 0.3);
+    let (in_air, front) = airborne(&w, 0.6);
+    assert!(in_air > 30 && front > 0.75, "the second stream is not slowed by the puddle it belongs to: {} in the air, front at {:.2}", in_air, front);
+    run(&mut w, 6.0);
+    assert_eq!(w.bodies[0].count, 2 * BOTTLE);
+    all_finite_above_floor(&w);
+    // a piece holds one block of goo, no more
+    assert_eq!(w.emit(0, [0.0, 1.5, 0.5], [3.5, 0.0, 0.0], 5 * BOTTLE, false), 2 * BOTTLE);
+    assert_eq!(w.emit(0, [0.0, 1.5, 0.5], [3.5, 0.0, 0.0], BOTTLE, false), 0);
+}
+
+/// A dispenser throws slime balls: each is a lump that flies, lands, and sticks to the lumps of
+/// the same piece that are already there, so that in the end there is one wobbly heap.
+#[test]
+fn slime_lumps_fly_and_stick_together() {
+    const BALL: u32 = 192;
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    w.add_empty(SLIME, 0.0, 1.0, 0.0);
+    for k in 0..3 {
+        assert_eq!(w.emit(0, [0.3, 1.5, 0.5], [4.0, 0.5, 0.0], BALL, true), BALL);
+        if k == 0 {
+            run(&mut w, 0.1);
+            let (in_air, front) = airborne(&w, 0.9);
+            assert!(in_air > 150 && front > 0.6, "the lump flies: {} in the air, front at {:.2}", in_air, front);
+            let (_, _, springs) = w.link_counts();
+            assert!(springs > BALL * 3, "the lump is held together from the start: {} springs", springs);
+        }
+        run(&mut w, 0.35);
+    }
+    run(&mut w, 6.0);
+    assert_eq!(w.bodies[0].count, 3 * BALL);
+    let bb = w.bodies[0].bb;
+    assert!(bb[3] - bb[0] < 1.6 && bb[5] - bb[2] < 1.6 && bb[4] < 0.9, "one heap, not a smear: {:?}", bb);
+    assert!(bb[0] > 0.3, "it landed ahead of the nozzle: {:.2}", bb[0]);
+    // one heap: pull at one end and the other end follows
+    let (_, _, springs) = w.link_counts();
+    assert!(springs > 3 * BALL * 4, "the lumps have grown together: {} springs", springs);
+    assert!(!w.bodies[0].awake, "the heap comes to rest");
+    all_finite_above_floor(&w);
+}
+
+/// Dipping a bottle into honey takes a bottle's worth from where the bottle was, and a piece that
+/// has been emptied frees its slot.
+#[test]
+fn taking_goo_removes_that_much_from_that_place() {
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    w.add_body(HONEY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    run(&mut w, 9.0);
+    let bb = w.bodies[0].bb;
+    let left_end = [bb[0], 0.1, (bb[2] + bb[5]) * 0.5];
+    assert_eq!(w.take(0, left_end, 432), 432);
+    assert_eq!(w.amount(0), 1728 - 432);
+    w.step(DT + 1e-6);
+    assert!(w.bodies[0].awake, "what is left flows into the gap");
+    assert!(w.bodies[0].bb[0] > bb[0] + 0.15, "it was taken from the end the bottle was at: {:.2} -> {:.2}", bb[0], w.bodies[0].bb[0]);
+    run(&mut w, 2.0);
+    assert_eq!(w.bodies[0].count, 1728 - 432);
+    all_finite_above_floor(&w);
+    assert_eq!(w.take(0, left_end, 5000), 1728 - 432, "no more than there is");
+    run(&mut w, 1.0);
+    assert_eq!(w.bodies[0].state, 0, "an emptied piece is gone");
+    let mut out = Vec::new();
+    assert_eq!(mesh::build(&w, HONEY, &mut out), 0);
+}
+
+/// Goo that comes back into view is put down as it would lie by then: honey from two bottles as a
+/// small puddle, three slime balls as a lump that holds together.
+#[test]
+fn goo_seen_again_is_put_down_at_rest() {
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    assert_eq!(w.add_resting(HONEY, 0.0, 0.0, 0.0, 864), 0);
+    assert_eq!(w.add_resting(SLIME, 3.0, 0.0, 0.0, 576), 1);
+    assert_eq!((w.amount(0), w.amount(1)), (864, 576));
+    run(&mut w, 4.0);
+    let (honey, slime) = (w.bodies[0].bb, w.bodies[1].bb);
+    assert!(honey[4] < 0.4 && honey[3] - honey[0] < 2.4 && honey[3] - honey[0] > 1.0, "a small puddle: {:?}", honey);
+    assert!(slime[4] > 0.3 && slime[4] < 0.9 && slime[3] - slime[0] < 1.3, "a lump: {:?}", slime);
+    assert_eq!((w.bodies[0].count, w.bodies[1].count), (864, 576));
+    run(&mut w, 8.0);
+    assert!(!w.bodies[0].awake && !w.bodies[1].awake);
+    all_finite_above_floor(&w);
+}

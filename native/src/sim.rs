@@ -98,6 +98,13 @@ pub struct Body {
     /// Counts the steps in which this body changed; the mesher skips puddles whose bodies all stand still.
     pub rev: u32,
     pub bb: [f32; 6],
+    /// A stream still on its way: particles left to come out, where from, how fast, and how far the last layer has got.
+    pub pending: u32,
+    pub emit_pos: [f32; 3],
+    pub emit_vel: [f32; 3],
+    pub emit_acc: f32,
+    /// Until this time (world clock) the body has particles young enough to bond to what they touch.
+    pub young_until: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +132,10 @@ pub struct World {
     pub(crate) spr_n: Vec<u8>, pub(crate) spr_j: Vec<u32>, pub(crate) spr_l: Vec<f32>,
     rho: Vec<f32>, lam: Vec<f32>,
     dpx: Vec<f32>, dpy: Vec<f32>, dpz: Vec<f32>, damp: Vec<f32>,
+    /// Per particle: when it appeared (world clock); whether it is still in flight (a stream or lump
+    /// that has not touched anything yet falls freely instead of being slowed with the rest of its
+    /// body); scratch for "landed this step".
+    born: Vec<f32>, fly: Vec<u8>, land: Vec<u8>,
     act: Vec<u32>,
     mask: u32, c_start: Vec<u32>, c_fill: Vec<u32>, sorted: Vec<u32>, pkey: Vec<u32>, pbkt: Vec<u32>, cell: Vec<i32>,
     /// Neighbour lists: particle `i` owns entries `nbr_lo[i]..nbr_hi[i]` of `nbr` (the neighbour), `nw` (kernel value) and `ng` (kernel gradient).
@@ -208,6 +219,12 @@ const CALM_STEPS: u32 = 60;
 const FADE_TIME: f32 = 0.45;
 /// Seconds overlapping goo is given to move apart gently after a block appears inside it.
 const SOFT_TIME: f32 = 0.9;
+/// Seconds a freshly emitted slime particle keeps bonding to slime of its own body that it touches.
+const YOUNG: f32 = 2.0;
+/// Seconds after which a particle no longer counts as in flight, whatever happened to it.
+const FLIGHT_MAX: f32 = 4.0;
+/// Particles in one layer of a stream (one in the middle, six around it).
+const STREAM_LAYER: usize = 7;
 
 /// The core's own worker threads: half the machine's cores (the game needs the rest), six at most.
 /// `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
@@ -243,7 +260,7 @@ impl<T> Shared<T> {
 struct Walls<'a> { st: &'a [SBox], st_org: [i32; 3], st_dim: [i32; 3], st_start: &'a [u32], st_items: &'a [u32], kin: &'a [KBox], kin_near: &'a [u64], nb: usize, rc: f32, rho_max: f32 }
 
 #[derive(Clone, Copy)]
-struct Anchors { kind: Shared<u8>, id: Shared<i32>, pt: Shared<f32>, loc: Shared<f32>, stick: Shared<f32>, axis: Shared<u8> }
+struct Anchors { kind: Shared<u8>, id: Shared<i32>, pt: Shared<f32>, loc: Shared<f32>, stick: Shared<f32>, axis: Shared<u8>, fly: Shared<u8> }
 
 /// Pushes particle `i` out of the colliders and lets it stick to the last one it touched.
 /// Safety: writes only particle `i`'s own position and anchor.
@@ -279,6 +296,7 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
         if ax < 3 { hit = 2; hit_id = b.id; hit_stick = b.stick; hit_min = b.min; hit_axis = ax; }
     }
     *qs.at(o) = q[0]; *qs.at(o + 1) = q[1]; *qs.at(o + 2) = q[2];
+    if hit != 0 { *an.fly.at(i) = 0; } // it has touched something: no longer in free flight
     if hit != 0 && *an.kind.at(i) == 0 && cool <= 0.0 && hit_stick > 0.0 && rho < w.rho_max {
         *an.kind.at(i) = hit; *an.id.at(i) = hit_id; *an.stick.at(i) = hit_stick; *an.axis.at(i) = hit_axis;
         for a in 0..3 { *an.pt.at(o + a) = q[a]; *an.loc.at(o + a) = q[a] - hit_min[a]; }
@@ -321,6 +339,7 @@ impl World {
             spr_n: vec![0; maxp], spr_j: vec![0; maxp * MAX_SPR], spr_l: vec![0.0; maxp * MAX_SPR],
             rho: vec![0.0; maxp], lam: vec![0.0; maxp],
             dpx: vec![0.0; maxp], dpy: vec![0.0; maxp], dpz: vec![0.0; maxp], damp: vec![0.0; maxp],
+            born: vec![0.0; maxp], fly: vec![0; maxp], land: vec![0; maxp],
             act: Vec::with_capacity(maxp),
             mask: (table - 1) as u32, c_start: vec![0; table + 1], c_fill: vec![0; table], sorted: vec![0; maxp], pkey: vec![0; maxp], pbkt: vec![0; maxp], cell: vec![0; maxp * 3],
             nbr: Vec::new(), nbr_lo: vec![0; maxp], nbr_hi: vec![0; maxp], nw: Vec::new(), ng: Vec::new(), sp: Vec::new(), runs: Vec::new(),
@@ -351,18 +370,167 @@ impl World {
         }
     }
 
-    /// Adds a body occupying the block cell whose minimum corner is (x, y, z).
-    /// `age` > 6 s spawns honey already melted (used when an old puddle comes back into view).
-    pub fn add_body(&mut self, mat: u8, x: f32, y: f32, z: f32, dirx: f32, dirz: f32, age: f32) -> i32 {
-        let mat = if mat == SLIME { SLIME } else { HONEY };
+    /// A free body slot; if there is none, the oldest sleeping body (else the oldest one) makes room.
+    fn take_slot(&mut self) -> Option<usize> {
         let mut slot = self.bodies.iter().position(|b| b.state == 0);
-        if slot.is_none() { // evict the oldest sleeping body, else the oldest one
+        if slot.is_none() {
             let mut best: Option<usize> = None; let mut bt = f32::MAX;
             for (i, b) in self.bodies.iter().enumerate() { if !b.awake && b.born < bt { bt = b.born; best = Some(i); } }
             if best.is_none() { for (i, b) in self.bodies.iter().enumerate() { if b.born < bt { bt = b.born; best = Some(i); } } }
             if let Some(b) = best { self.free_body(b); slot = Some(b); }
         }
-        let slot = match slot { Some(s) => s, None => return -1 };
+        slot
+    }
+
+    /// Puts one particle into a free place of body `b`. Returns false if the body is full.
+    fn spawn(&mut self, b: usize, pos: [f32; 3], vel: [f32; 3], flying: bool) -> bool {
+        let (lo, hi) = (b * self.nb, (b + 1) * self.nb);
+        let i = match (lo..hi).find(|&i| self.alive[i] == 0) { Some(i) => i, None => return false };
+        let o = i * 3;
+        for a in 0..3 { self.p[o + a] = pos[a]; self.q[o + a] = pos[a]; self.v[o + a] = vel[a]; }
+        self.alive[i] = 1; self.scale[i] = 1.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.anc_cool[i] = 0.0;
+        self.born[i] = self.clock; self.fly[i] = flying as u8;
+        true
+    }
+
+    /// Adds a body with nothing in it yet, at the block cell (x, y, z); goo arrives through [`World::emit`].
+    pub fn add_empty(&mut self, mat: u8, x: f32, y: f32, z: f32) -> i32 {
+        let mat = if mat == SLIME { SLIME } else { HONEY };
+        let slot = match self.take_slot() { Some(s) => s, None => return -1 };
+        self.rev = self.rev.wrapping_add(1);
+        self.bodies[slot] = Body {
+            state: 1, mat, awake: true, age: self.mats[mat as usize].melt_time + 2.0, born: self.clock, fade: 1.0, rev: self.rev,
+            bb: [x, y, z, x + 1.0, y + 1.0, z + 1.0], ..Body::default()
+        };
+        slot as i32
+    }
+
+    /// Adds `count` particles of goo already lying at rest on the floor of the block cell (x, y, z):
+    /// what a stream left behind, seen again later. Honey lies as a puddle, slime as a lump.
+    pub fn add_resting(&mut self, mat: u8, x: f32, y: f32, z: f32, count: u32) -> i32 {
+        let mat = if mat == SLIME { SLIME } else { HONEY };
+        let count = (count as usize).min(self.nb);
+        let slot = match self.take_slot() { Some(s) => s, None => return -1 };
+        let (n, s, side, nb) = (self.n, self.s, self.side, self.nb);
+        let (cx, cz) = (x + 0.5, z + 0.5);
+        self.rev = self.rev.wrapping_add(1);
+        self.bodies[slot] = Body {
+            state: 1, mat, awake: true, age: self.mats[mat as usize].melt_time + 8.0, born: self.clock, fade: 1.0, fresh: mat == SLIME, rev: self.rev,
+            bb: [x - 0.5, y - 0.2, z - 0.5, x + 1.5, y + 1.3, z + 1.5], ..Body::default()
+        };
+        if mat == SLIME {
+            // the places of a block nearest to the middle of its base: a rounded lump
+            let mut sites: Vec<(f32, [f32; 3])> = Vec::with_capacity(nb);
+            for a in 0..n { for b in 0..n { for c in 0..n {
+                let o = [(a as f32 + 0.5) * s - side * 0.5, (b as f32 + 0.5) * s, (c as f32 + 0.5) * s - side * 0.5];
+                sites.push((o[0] * o[0] + o[1] * o[1] * 1.6 + o[2] * o[2], o));
+            } } }
+            sites.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for k in 0..count { let o = sites[k].1; self.spawn(slot, [cx + o[0], y + o[1], cz + o[2]], [0.0; 3], false); }
+        } else {
+            let reach = 1.27 * (count as f32 / nb as f32).sqrt();
+            for k in 0..count {
+                let rad = reach * self.rnd().sqrt(); let ang = self.rnd() * std::f32::consts::TAU;
+                let lift = (k % 2) as f32 * s * 0.9 + (self.rnd() - 0.5) * s * 0.1;
+                self.spawn(slot, [cx + rad * ang.cos(), y + self.rc + lift, cz + rad * ang.sin()], [0.0; 3], false);
+            }
+        }
+        self.bodies[slot].count = count as u32;
+        slot as i32
+    }
+
+    /// Goo in the body: particles that exist plus those of a stream that are still to come out.
+    pub fn amount(&self, b: usize) -> u32 {
+        if b >= self.slots || self.bodies[b].state != 1 { return 0; }
+        (b * self.nb..(b + 1) * self.nb).filter(|&i| self.alive[i] != 0).count() as u32 + self.bodies[b].pending
+    }
+
+    /// Lets `count` more particles into body `b`, leaving `pos` with velocity `vel`: as a stream that
+    /// comes out layer by layer over the next steps, or (`lump`) all at once as a rounded lump around
+    /// `pos`. Returns how many the body had room for.
+    pub fn emit(&mut self, b: usize, pos: [f32; 3], vel: [f32; 3], count: u32, lump: bool) -> u32 {
+        if b >= self.slots || self.bodies[b].state != 1 { return 0; }
+        let room = self.nb as u32 - self.amount(b).min(self.nb as u32);
+        let count = count.min(room);
+        if count == 0 || !pos.iter().chain(vel.iter()).all(|v| v.is_finite()) { return 0; }
+        let m = self.mats[self.bodies[b].mat as usize];
+        {
+            let bd = &mut self.bodies[b];
+            bd.awake = true; bd.calm = 0;
+            bd.age = bd.age.min(m.melt_time + 2.0); // fresh goo makes the whole piece runny again
+            bd.young_until = self.clock + YOUNG + 1.0;
+        }
+        if !lump {
+            let bd = &mut self.bodies[b];
+            bd.pending += count; bd.emit_pos = pos; bd.emit_vel = vel;
+            return count;
+        }
+        // a rounded lump: the places of a small cube nearest to its middle
+        let s = self.s;
+        let k = (count as f32).cbrt().ceil() as i32;
+        let mut sites: Vec<(f32, [f32; 3])> = Vec::with_capacity((k * k * k) as usize);
+        for a in 0..k { for bb in 0..k { for c in 0..k {
+            let o = [(a as f32 - (k - 1) as f32 * 0.5) * s, (bb as f32 - (k - 1) as f32 * 0.5) * s, (c as f32 - (k - 1) as f32 * 0.5) * s];
+            sites.push((o[0] * o[0] + o[1] * o[1] + o[2] * o[2], o));
+        } } }
+        sites.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // goo that is already where the lump appears: everything there takes it easy for a moment
+        let r = k as f32 * s * 0.5 + s;
+        let mut crowded = false;
+        for c in 0..self.slots {
+            let bd = &self.bodies[c];
+            if bd.state != 1 || (0..3).any(|a| bd.bb[a] > pos[a] + r || bd.bb[a + 3] < pos[a] - r) { continue; }
+            let touching = (c * self.nb..(c + 1) * self.nb).any(|i| self.alive[i] != 0 && (0..3).all(|a| (self.p[i * 3 + a] - pos[a]).abs() < r));
+            if touching { crowded = true; let bd = &mut self.bodies[c]; bd.soft = SOFT_TIME; bd.awake = true; bd.calm = 0; }
+        }
+        if crowded { self.bodies[b].soft = SOFT_TIME; }
+        let mut done = 0;
+        for site in sites.iter().take(count as usize) {
+            let o = site.1;
+            if !self.spawn(b, [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]], vel, true) { break; }
+            done += 1;
+        }
+        done
+    }
+
+    /// Removes the `count` particles of body `b` nearest to the point `at` (a bottle dipped in, a
+    /// handful torn off). Returns how many were removed.
+    pub fn take(&mut self, b: usize, at: [f32; 3], count: u32) -> u32 {
+        if b >= self.slots || self.bodies[b].state != 1 || count == 0 { return 0; }
+        let (lo, hi) = (b * self.nb, (b + 1) * self.nb);
+        let mut near: Vec<(f32, usize)> = (lo..hi).filter(|&i| self.alive[i] != 0)
+            .map(|i| ((0..3).map(|a| (self.p[i * 3 + a] - at[a]).powi(2)).sum::<f32>(), i)).collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        near.truncate(count as usize);
+        // what a stream has not let out yet goes first when the piece itself is not enough
+        let short = count - near.len() as u32;
+        let bd = &mut self.bodies[b];
+        let from_stream = short.min(bd.pending);
+        bd.pending -= from_stream;
+        bd.awake = true; bd.calm = 0;
+        let mut gone = vec![false; self.nb];
+        for &(_, i) in &near { self.alive[i] = 0; self.scale[i] = 0.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.fly[i] = 0; gone[i - lo] = true; }
+        // springs to what was taken go at once: the places may be filled again before the solver would notice
+        for i in 0..self.maxp {
+            let mut k = 0usize;
+            while k < self.spr_n[i] as usize {
+                let j = self.spr_j[i * MAX_SPR + k] as usize;
+                if j >= lo && j < hi && gone[j - lo] {
+                    let last = i * MAX_SPR + self.spr_n[i] as usize - 1;
+                    self.spr_j[i * MAX_SPR + k] = self.spr_j[last]; self.spr_l[i * MAX_SPR + k] = self.spr_l[last]; self.spr_n[i] -= 1;
+                } else { k += 1; }
+            }
+        }
+        self.rev = self.rev.wrapping_add(1);
+        self.bodies[b].rev = self.rev;
+        near.len() as u32 + from_stream
+    }
+
+    /// Adds a body occupying the block cell whose minimum corner is (x, y, z).
+    /// `age` > 6 s spawns honey already melted (used when an old puddle comes back into view).
+    pub fn add_body(&mut self, mat: u8, x: f32, y: f32, z: f32, dirx: f32, dirz: f32, age: f32) -> i32 {
+        let mat = if mat == SLIME { SLIME } else { HONEY };
+        let slot = match self.take_slot() { Some(s) => s, None => return -1 };
         let m = self.mats[mat as usize];
         let (n, s, side, nb) = (self.n, self.s, self.side, self.nb);
         let base = slot * nb;
@@ -392,6 +560,7 @@ impl World {
             self.q[o] = px; self.q[o + 1] = py; self.q[o + 2] = pz;
             self.v[o] = vx; self.v[o + 1] = vy; self.v[o + 2] = vz;
             self.alive[i] = 1; self.scale[i] = 1.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.anc_cool[i] = 0.0;
+            self.born[i] = self.clock; self.fly[i] = 0;
         } } }
         // goo that is already where the new block appears: both take it easy for a moment
         let mut crowded = false;
@@ -432,6 +601,12 @@ impl World {
     pub fn anchors_of(&self, b: usize) -> u32 {
         if b >= self.slots { return 0; }
         (b * self.nb..(b + 1) * self.nb).filter(|&i| self.alive[i] != 0 && self.anc_kind[i] == 1).count() as u32
+    }
+
+    /// How many particles of body `b` are still in free flight (diagnostics and tests).
+    pub fn flying(&self, b: usize) -> u32 {
+        if b >= self.slots { return 0; }
+        (b * self.nb..(b + 1) * self.nb).filter(|&i| self.alive[i] != 0 && self.fly[i] != 0).count() as u32
     }
 
     /// End points of springs longer than `min_len` (diagnostics).
@@ -562,6 +737,37 @@ impl World {
         self.awake_count()
     }
 
+    /// Lets the next layers of body `b`'s stream out of its nozzle: one layer for every particle
+    /// spacing the stream has travelled, so the stream is as dense as goo at rest.
+    fn stream_out(&mut self, b: usize, dt: f32) {
+        let (pos, vel) = (self.bodies[b].emit_pos, self.bodies[b].emit_vel);
+        let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt().max(0.3);
+        let dir = if speed > 0.31 { [vel[0] / speed, vel[1] / speed, vel[2] / speed] } else { [0.0, -1.0, 0.0] };
+        // two directions across the stream
+        let up = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+        let mut u = [dir[1] * up[2] - dir[2] * up[1], dir[2] * up[0] - dir[0] * up[2], dir[0] * up[1] - dir[1] * up[0]];
+        let ul = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+        for a in 0..3 { u[a] /= ul; }
+        let w = [dir[1] * u[2] - dir[2] * u[1], dir[2] * u[0] - dir[0] * u[2], dir[0] * u[1] - dir[1] * u[0]];
+        let s = self.s;
+        self.bodies[b].emit_acc += speed * dt;
+        self.bodies[b].awake = true; self.bodies[b].calm = 0;
+        self.bodies[b].young_until = self.clock + YOUNG + 1.0;
+        while self.bodies[b].emit_acc >= s && self.bodies[b].pending > 0 {
+            self.bodies[b].emit_acc -= s;
+            let ahead = self.bodies[b].emit_acc; // this layer is already that far out
+            let turn = self.rnd() * std::f32::consts::TAU;
+            for k in 0..STREAM_LAYER {
+                if self.bodies[b].pending == 0 { break; }
+                let (ca, cb) = if k == 0 { (0.0, 0.0) } else { let a = turn + k as f32 * std::f32::consts::TAU / 6.0; (a.cos() * s, a.sin() * s) };
+                let (j0, j1, j2) = ((self.rnd() - 0.5) * 0.06 * s, (self.rnd() - 0.5) * 0.06 * s, 1.0 + (self.rnd() - 0.5) * 0.04);
+                let at = [pos[0] + dir[0] * ahead + u[0] * (ca + j0) + w[0] * (cb + j1), pos[1] + dir[1] * ahead + u[1] * (ca + j0) + w[1] * (cb + j1), pos[2] + dir[2] * ahead + u[2] * (ca + j0) + w[2] * (cb + j1)];
+                if !self.spawn(b, at, [dir[0] * speed * j2, dir[1] * speed * j2, dir[2] * speed * j2], true) { self.bodies[b].pending = 0; break; }
+                self.bodies[b].pending -= 1;
+            }
+        }
+    }
+
     fn step_once(&mut self) {
         let dt = DT;
         self.clock += dt;
@@ -619,15 +825,18 @@ impl World {
             bd.shock = if sh < 0.01 { 0.0 } else { sh * (-dt / m.shock_decay).exp() };
             bd.soft = (bd.soft - dt).max(0.0);
             let (grounded, kd) = (bd.anchored > 0 || bd.shock > 0.05, bd.kd);
+            if self.bodies[b].pending > 0 { self.stream_out(b, dt); }
             let mut cnt = 0u32;
             for i in b * nb..(b + 1) * nb {
                 if self.alive[i] != 0 {
                     self.act.push(i as u32); cnt += 1;
                     self.damp[i] = if grounded { kd } else { 0.15 };
+                    if self.fly[i] != 0 && self.clock - self.born[i] > FLIGHT_MAX { self.fly[i] = 0; }
                 }
             }
             self.bodies[b].count = cnt;
-            if cnt == 0 { self.free_body(b); }
+            // nothing left of it (and nothing on its way): the slot is free again
+            if cnt == 0 && self.bodies[b].pending == 0 && self.clock - self.bodies[b].born > 0.5 { self.free_body(b); }
         }
         if self.act.is_empty() { return; }
 
@@ -669,12 +878,12 @@ impl World {
         let g = self.gravity;
         {
             let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
-            let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis) };
+            let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
             let (v, q, cool) = (Shared::of(&mut self.v), Shared::of(&mut self.q), Shared::of(&mut self.anc_cool));
             let (p, damp, rho) = (&self.p[..], &self.damp[..], &self.rho[..]);
             self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
                 let (x, z) = (p[o], p[o + 2]);
-                let mut k = damp[i];
+                let mut k = if *an.fly.at(i) != 0 { 0.15 } else { damp[i] }; // in flight: not slowed with the rest of its body
                 if k > 0.5 { k *= 0.72 + 0.34 * ((x * 6.1 + 1.9 * (z * 2.3).sin()).sin() + (z * 3.7 + x * 1.4).sin()); }
                 let f = (-k * dt).exp();
                 *v.at(o) *= f; *v.at(o + 1) = (*v.at(o + 1) - g * dt) * f; *v.at(o + 2) *= f;
@@ -793,19 +1002,23 @@ impl World {
         self.steps = self.steps.wrapping_add(1);
         let look = self.steps & 1 == 0 || (0..slots).any(|b| self.bodies[b].fresh && self.bodies[b].state == 1);
         let wanted: Vec<Vec<(u32, u32)>> = if !look { Vec::new() } else {
-            let (nbr, nbr_lo, nbr_hi, q, spr_n, spr_j, bodies, mats) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.q[..], &self.spr_n[..], &self.spr_j[..], &self.bodies[..], &self.mats);
+            let (nbr, nbr_lo, nbr_hi, q, spr_n, spr_j, bodies, mats, born, clock) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.q[..], &self.spr_n[..], &self.spr_j[..], &self.bodies[..], &self.mats, &self.born[..], self.clock);
             self.act.par_chunks(CHUNK).map(|chunk| {
                 let mut out = Vec::new();
                 for &iu in chunk {
                     let i = iu as usize; let bi = i / nb; let mi = bodies[bi].mat;
                     let (dynamic, fresh) = (mats[mi as usize].dynamic_springs, bodies[bi].fresh);
-                    if !dynamic && !fresh { continue; }
+                    // goo that does not flow only bonds when it is new: a whole block at once, or lumps
+                    // that have just been added, to each other and to what they land on in their own body
+                    let young = !dynamic && !fresh && clock < bodies[bi].young_until;
+                    if !dynamic && !fresh && !young { continue; }
                     let oi = i * 3;
                     for e in nbr_lo[i]..nbr_hi[i] {
                         let j = nbr[e as usize] as usize;
                         if j < i { continue; } // each pair once, from its lower particle
                         let bj = j / nb;
                         if bodies[bj].mat != mi || !(dynamic || bi == bj) { continue; }
+                        if young && clock - born[i] > YOUNG && clock - born[j] > YOUNG { continue; }
                         let oj = j * 3;
                         let (ex, ey, ez) = (q[oi] - q[oj], q[oi + 1] - q[oj + 1], q[oi + 2] - q[oj + 2]);
                         if ex * ex + ey * ey + ez * ez > hs2 { continue; }
@@ -934,7 +1147,7 @@ impl World {
             // anchors pull, then colliders push
             {
                 let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
-                let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis) };
+                let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
                 let (q, anc_d) = (Shared::of(&mut self.q), Shared::of(&mut self.anc_d));
                 let (p, rho, cool, bodies, mats, kin) = (&self.p[..], &self.rho[..], &self.anc_cool[..], &self.bodies[..], &self.mats, &self.kin[..]);
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
@@ -1001,7 +1214,7 @@ impl World {
         let max_move = 0.3f32; // blocks per step; stops a crushed particle from being shot across the map
         {
             let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
-            let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis) };
+            let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
             let (p, rho, cool) = (&self.p[..], &self.rho[..], &self.anc_cool[..]);
             let (q, v) = (Shared::of(&mut self.q), Shared::of(&mut self.v));
             self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
@@ -1020,23 +1233,34 @@ impl World {
                 *v.at(o) = vx * sc; *v.at(o + 1) = vy * sc; *v.at(o + 2) = vz * sc;
             } } });
         }
+        // kernel value at 1.3 particle spacings: closer than that counts as touching
+        let w_touch = { let r = 1.3 * self.s; let t = self.h * self.h - r * r; self.kp * t * t * t };
         for _ in 0..self.visc_iters {
             {
                 let (nbr, nbr_lo, nbr_hi, nw, v, rho, bodies, mats) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.nw[..], &self.v[..], &self.rho[..], &self.bodies[..], &self.mats);
-                let (dpx, dpy, dpz) = (Shared::of(&mut self.dpx), Shared::of(&mut self.dpy), Shared::of(&mut self.dpz));
+                let (dpx, dpy, dpz, land) = (Shared::of(&mut self.dpx), Shared::of(&mut self.dpy), Shared::of(&mut self.dpz), Shared::of(&mut self.land));
+                let fly = &self.fly[..];
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let oi = i * 3;
                     let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
                     let k = mats[bodies[i / nb].mat as usize].xsph / rho[i];
+                    let mut landed = false;
                     for e in nbr_lo[i] as usize..nbr_hi[i] as usize {
                         let w = nw[e]; if w == 0.0 { continue; }
-                        let oj = nbr[e] as usize * 3;
+                        let j = nbr[e] as usize; let oj = j * 3;
                         let ws = k * w;
                         x += (v[oj] - v[oi]) * ws; y += (v[oj + 1] - v[oi + 1]) * ws; z += (v[oj + 2] - v[oi + 2]) * ws;
+                        // touching goo that has already come to rest: this particle has landed too
+                        landed |= w > w_touch && fly[j] == 0 && v[oj] * v[oj] + v[oj + 1] * v[oj + 1] + v[oj + 2] * v[oj + 2] < 2.25;
                     }
+                    if landed && fly[i] != 0 { unsafe { *land.at(i) = 1; } }
                     unsafe { *dpx.at(i) = x; *dpy.at(i) = y; *dpz.at(i) = z; }
                 } });
             }
-            for a in 0..n_act { let i = self.act[a] as usize; let o = i * 3; self.v[o] += self.dpx[i]; self.v[o + 1] += self.dpy[i]; self.v[o + 2] += self.dpz[i]; }
+            for a in 0..n_act {
+                let i = self.act[a] as usize; let o = i * 3;
+                self.v[o] += self.dpx[i]; self.v[o + 1] += self.dpy[i]; self.v[o + 2] += self.dpz[i];
+                if self.land[i] != 0 { self.land[i] = 0; self.fly[i] = 0; }
+            }
         }
         let kill_y = self.kill_y;
         let mut vsum = vec![0.0f32; slots];
@@ -1063,7 +1287,7 @@ impl World {
             let bd = &mut self.bodies[b];
             if bd.state == 0 || !bd.awake { continue; }
             let vrms = (vsum[b] / bd.count.max(1) as f32).sqrt();
-            bd.quiet = bd.state == 1 && vrms < m.sleep_v && bd.age > m.melt_time + 1.0;
+            bd.quiet = bd.state == 1 && vrms < m.sleep_v && bd.age > m.melt_time + 1.0 && bd.pending == 0;
             bd.calm = if bd.quiet { bd.calm + 1 } else { 0 };
         }
         let moving_kin: Vec<KBox> = self.kin.iter().copied().filter(|b| b.vel != [0.0; 3]).collect();

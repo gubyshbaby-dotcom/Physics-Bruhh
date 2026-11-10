@@ -1,17 +1,17 @@
 list ^com/mojang/renderpearl/
 list ^com/mojang/blaze3d/
-list ^net/minecraft/client/renderer/[A-Za-z]+\.java
+list ^net/minecraft/client/renderer/[A-Za-z]+\.class
 list ^net/minecraft/client/renderer/(feature|oit|rendertype|state/level|texture|fog)/
 srcdir ^com/mojang/renderpearl/api/
 src com/mojang/blaze3d/pipeline/RenderTarget.java
 src com/mojang/blaze3d/pipeline/MainTarget.java
 src com/mojang/blaze3d/pipeline/TextureTarget.java
 src com/mojang/blaze3d/systems/RenderSystem.java
-srcdir ^net/minecraft/client/renderer/rendertype/(RenderSetup|RenderType|OutputTarget|TextureTransform|LayeringTransform)\.java
+srcdir ^net/minecraft/client/renderer/rendertype/(RenderSetup|RenderType|OutputTarget|TextureTransform|LayeringTransform)[$.]
 src net/minecraft/client/renderer/LevelRenderer.java
 grepsrc net/minecraft/client/renderer/GameRenderer.java mainRenderTarget|renderLevel|useImprovedTransparency|projection|Projection|fov|Fov
 srcdir ^net/minecraft/client/renderer/oit/
-srcdir ^net/minecraft/client/renderer/feature/(FeatureRenderDispatcher|CustomFeatureRenderer|FeatureFrame|FeatureRenderer)\.java
+srcdir ^net/minecraft/client/renderer/feature/(FeatureRenderDispatcher|CustomFeatureRenderer|FeatureFrame|FeatureRenderer)[$.]
 src net/minecraft/client/renderer/PostChain.java
 src net/minecraft/client/renderer/PostPass.java
 src net/minecraft/client/renderer/LevelTargetBundle.java
@@ -30,21 +30,6 @@ src com/mojang/blaze3d/vertex/BufferBuilder.java
 src com/mojang/blaze3d/vertex/MeshData.java
 src com/mojang/blaze3d/vertex/Tesselator.java
 src com/mojang/blaze3d/vertex/ByteBufferBuilder.java
-alist ^assets/minecraft/shaders/
-alist ^assets/minecraft/post_effect/
-assetdir ^assets/minecraft/shaders/include/
-asset assets/minecraft/shaders/core/entity.vsh
-asset assets/minecraft/shaders/core/entity.fsh
-asset assets/minecraft/shaders/core/sky.fsh
-asset assets/minecraft/shaders/core/sky.vsh
-asset assets/minecraft/shaders/core/blit_screen.fsh
-asset assets/minecraft/shaders/core/blit_screen.vsh
-asset assets/minecraft/shaders/core/screenquad.vsh
-asset assets/minecraft/post_effect/transparency.json
-asset assets/minecraft/post_effect/blur.json
-asset assets/minecraft/shaders/post/transparency.fsh
-asset assets/minecraft/shaders/post/blit.fsh
-asset assets/minecraft/shaders/post/blit.vsh
 src net/minecraft/world/level/block/DispenserBlock.java
 src net/minecraft/core/dispenser/DispenseItemBehavior.java
 src net/minecraft/core/dispenser/DefaultDispenseItemBehavior.java
@@ -64,3 +49,12 @@ grepsrc net/minecraft/world/entity/player/Inventory.java public
 grepsrc net/minecraft/client/Minecraft.java startUseItem|startAttack|continueAttack|hitResult|pick\(
 grepsrc net/minecraft/world/level/Level.java getSunAngle|getTimeOfDay|getDayTime|getSkyDarken|isRaining|getRainLevel|dimensionType
 grepsrc net/minecraft/client/multiplayer/ClientLevel.java getSkyColor|getSunAngle|getStarBrightness|getSkyFlashTime|getCloudColor|environmentAttributes|getSkyDarken
+asset assets/minecraft/shaders/core/oit_composite.fsh
+asset assets/minecraft/shaders/core/blit_depth.fsh
+asset assets/minecraft/shaders/core/integrate_depth.fsh
+asset assets/minecraft/shaders/core/sky.fsh
+asset assets/minecraft/shaders/core/stars.fsh
+asset assets/minecraft/shaders/core/clouds.fsh
+asset assets/minecraft/shaders/core/clouds.vsh
+asset assets/minecraft/post_effect/blur.json
+alist ^assets/minecraft/shaders/post/
