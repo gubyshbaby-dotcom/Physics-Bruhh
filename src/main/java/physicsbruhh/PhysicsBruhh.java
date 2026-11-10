@@ -1,6 +1,7 @@
 package physicsbruhh;
 
 import com.mojang.logging.LogUtils;
+import java.util.function.Supplier;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.EntityType;
@@ -15,6 +16,7 @@ import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterGameRuleCategoryEvent;
 import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredRegister;
+import net.neoforged.neoforge.registries.RegisterEvent;
 import org.slf4j.Logger;
 
 /**
@@ -37,14 +39,18 @@ public class PhysicsBruhh {
             "slime_goo", GooEntity::new, MobCategory.MISC, b -> b.sized(0.9F, 0.9F).clientTrackingRange(8).updateInterval(20));
 
     public static final GameRuleCategory RULE_CATEGORY = new GameRuleCategory(Identifier.fromNamespaceAndPath(MODID, "goo"));
-    public static final DeferredRegister<GameRule<?>> GAME_RULES = DeferredRegister.create(Registries.GAME_RULE, MODID);
+    private static GameRule<Boolean> physicalGoo;
     /** {@code /gamerule physicsbruhh:physical_goo false} turns honey and slime back into ordinary blocks. */
-    public static final DeferredHolder<GameRule<?>, GameRule<Boolean>> PHYSICAL_GOO = GAME_RULES.register(
-            "physical_goo", id -> GameRules.registerBoolean(id.toString(), RULE_CATEGORY, true));
+    public static final Supplier<GameRule<Boolean>> PHYSICAL_GOO = () -> physicalGoo;
 
     public PhysicsBruhh(IEventBus modBus, ModContainer container) {
         ENTITIES.register(modBus);
-        GAME_RULES.register(modBus);
+        // GameRules.registerBoolean puts the rule into the registry itself, so it must not go through a DeferredRegister
+        modBus.addListener((RegisterEvent e) -> {
+            if (e.getRegistryKey().equals(Registries.GAME_RULE)) {
+                physicalGoo = GameRules.registerBoolean(MODID + ":physical_goo", RULE_CATEGORY, true);
+            }
+        });
         modBus.addListener((RegisterGameRuleCategoryEvent e) -> e.register(RULE_CATEGORY));
         NeoForge.EVENT_BUS.register(GooEvents.class);
         SelfTest.register();
