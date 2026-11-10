@@ -9,6 +9,8 @@ A NeoForge mod for Minecraft 26.3. Honey and slime blocks stop being rigid cubes
 - **You and the mobs** push the goo aside when walking through it, and it still does what the
   blocks did: honey slows you down and halves your jump, slime throws you back up when you fall
   into it and takes the fall damage away.
+- **Dispensers and hands** pour and throw it: a honey bottle becomes a stream of honey, a slime
+  ball a flying lump of slime, and both can be taken up again.
 
 Everything is on by default for the vanilla `honey_block` and `slime_block`.
 
@@ -16,16 +18,36 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 
 - Place a honey or slime block, or let a piston push or pull one: it turns into goo.
 - Punch the goo anywhere to get the block back as an item (with the block's own breaking sound
-  and particles).
+  and particles). Less than a block of slime comes back as slime balls; less than a block of honey
+  is lost, honey needs a bottle.
+- Right click the goo, anywhere on it:
+
+  | In hand | On honey | On slime |
+  | --- | --- | --- |
+  | empty bottle | fills it (a quarter of a block) | — |
+  | honey bottle | pours it in | — |
+  | slime ball | — | presses it on (a ninth of a block) |
+  | nothing | a taste: a little food | tears a slime ball off |
+
+- Sneak and use a honey bottle to pour it out where you look (the bottle stays); use a slime
+  ball to throw it as a lump of slime. Goo that lands on goo of its kind joins it, up to a block's
+  worth per piece: four bottles of honey or nine slime balls punched afterwards give the block.
+- Dispensers: a honey bottle is poured out as a stream and the empty bottle stays inside; a slime
+  ball is shot out as a lump; a honey or slime block comes out as a whole block of goo; an empty
+  bottle is filled from honey lying in front of the dispenser. With the rule off, or when none of
+  that is possible, dispensers do what they always did.
 - `/goo clear` removes all goo in the world, `/goo clear <radius>` only what lies within that many
   blocks of you. Nothing is dropped. Needs the same permission as `/gamerule`.
 - `/gamerule physicsbruhh:physical_goo false` switches the mod off (blocks behave as in vanilla
   again; goo that already exists stays until it is punched or cleared).
 - `/gamerule physicsbruhh:clear_goo true` changes the look: instead of the blocks' pixel textures,
-  honey and slime are drawn as clear liquid (amber and green) that is darker where it is thick.
-  Off by default; applies to all goo at once.
-- `/goolook plain` (this client only, remembered) draws the goo without the mod's own shader, in
-  case that shader misbehaves on some machine; `/goolook shader` switches back.
+  honey and slime are drawn as real clear liquid. You see the world through it, bent by its
+  surface and tinted by how much of it the light crossed (thin honey is pale gold, thick honey
+  deep amber); the sky and the sun mirror in it. Off by default; applies to all goo at once.
+- `/goolook` (this client only, remembered) picks how that is drawn: `liquid` (the default) as
+  described; `shader` as a glossy tinted surface, which is cheaper and is also what the game falls
+  back to by itself if the liquid look does not work on a machine; `plain` without any shader of
+  the mod's own.
 - `/goolook info` says what the simulation is doing on this client: Rust or Java core, how many
   threads, how many pieces of goo and how many of them are moving, how long an update takes, and
   whether it keeps up with real time.
@@ -53,7 +75,9 @@ drag neighbouring blocks along with it.
 | Simulation core | `native/` (Rust) | Position-based fluid with a spring network on top: springs that creep and tear make honey, permanent springs make slime. Collides with block boxes, moving piston parts and creatures, sticks to surfaces, builds the surface mesh. Runs on several threads; the result does not depend on how many. |
 | Java twin | `src/main/java/physicsbruhh/sim/JavaSim.java` | The same algorithm in plain Java, single-threaded. Used when the native library cannot be loaded. CI checks that the two agree on the scenarios in `src/simcheck`. |
 | Server side | `GooEvents`, `GooEntity`, `GooCommands` | Decides when a block becomes goo (placement, piston about to move it), keeps a small marker entity so it is saved and synced, applies the blocks' effects to mobs and falls, runs `/goo clear`. |
-| Client side | `client/` | Runs the simulation on its own thread at 60 Hz, feeds it the blocks, pistons and creatures around the goo, draws the surface with its own shader (gloss, sky reflection, colour by depth; works with and without "improved transparency"), applies the blocks' effects to the player. |
+| Server side, hands and dispensers | `GooEntity`, `GooEvents`, `GooDispense` | A marker also knows how much goo its piece holds. Pouring, throwing and scooping change that amount and say where and with what velocity; clients let the same happen to their simulated goo (a stream or a lump out of a spout, particles taken away near a point). |
+| Client side | `client/` | Runs the simulation on its own thread at 60 Hz, feeds it the blocks, pistons and creatures around the goo, draws it, applies the blocks' effects to the player. |
+| Drawing | `client/GooRenderer`, `client/GooFluid`, `assets/.../shaders` | Textured goo is a surface mesh with the mod's shader (gloss, sky reflection, colour by depth; works with and without "improved transparency"). Clear goo is drawn from the particles themselves, after the world: discs into a nearest-surface texture and an amount texture, an edge-keeping blur that turns the heap of discs into one surface, then one pass that bends the picture behind it, lets the goo absorb light by its thickness, and adds the mirrored sky and the sun's glint. |
 
 The mod jar carries the native library for Windows x64, Linux x64 and macOS (Intel and Apple
 silicon). On anything else, or if loading fails, it falls back to the Java simulation and says so in
@@ -75,14 +99,16 @@ the `physicsbruhh-jar` artifact:
    threads, and a benchmark that must give bit-identical results for 1, 2 and 4 threads),
 2. checks that the Java and Rust simulations agree,
 3. builds the mod against NeoForge,
-4. boots a dedicated server and runs real piston contraptions, placement, falls and `/goo clear`
-   against the hooks,
-5. opens the world in a real client (software rendering) four times: the default graphics backend,
-   "improved transparency" on, the OpenGL backend, and the shader-less fallback. Each run drives
-   pistons against honey and slime in both looks, checks that the slime ends up stretched between
-   the retracted sticky pistons, removes one piece while others move, stands a pig in the slime,
-   walks the player into honey and drops them onto slime, and saves screenshots (artifact
-   `clienttest`; a commit message containing `[shots]` also prints them into the log as text).
+4. boots a dedicated server and runs real piston contraptions, placement, falls, dispensers,
+   right clicks and `/goo clear` against the hooks,
+5. opens the world in a real client (software rendering) five times: the default graphics backend,
+   "improved transparency" on, the OpenGL backend, clear goo as a surface instead of a liquid, and
+   the shader-less fallback. Each run drives pistons against honey and slime in both looks, checks
+   that the slime ends up stretched between the retracted sticky pistons, removes one piece while
+   others move, stands a pig in the slime, walks the player into honey and drops them onto slime,
+   lets dispensers pour honey bottles and shoot slime balls, fills a bottle from the puddle, pours
+   it out again and throws a slime ball, and saves screenshots (artifact `clienttest`; a commit
+   message containing `[shots]` also prints them into the log as text).
 
 Locally: JDK 25 and a Rust toolchain, then `./gradlew build`. The jar lands in `build/libs/`.
 Without Rust the build still works; that jar only has the Java simulation.
@@ -94,6 +120,7 @@ cd native
 cargo test --release
 cargo run --release --example bench                            # step time, where it goes, threads
 cargo run --release --example viz -- game_pull_slime out.ppm   # honey, slime, slime_push, honey_push, pull, pull_slime, game_pull, game_pull_slime
+cargo run --release --example dump -- particles.bin            # a scene with a band, a puddle, a stream and lumps, as particles
 ```
 
 ## Limits
@@ -104,7 +131,15 @@ cargo run --release --example viz -- game_pull_slime out.ppm   # honey, slime, s
 - The shape of the goo is simulated separately on every client, so two players see slightly
   different puddles. The server only knows roughly where each piece is (a marker that follows
   pistons), which is what mobs, items and fall damage go by.
-- At most 24 pieces of goo are simulated around a player at once.
+- At most 24 pieces of goo are simulated around a player at once. Poured and thrown goo joins a
+  piece of its kind lying within a block and a half of where it comes down; further away it
+  starts a piece of its own.
+- The server does not simulate goo, so where a stream or a thrown lump ends up is its estimate
+  (a throw followed until it meets a block). Mobs and falls go by that estimate; what you see and
+  wade through is the real thing on your client.
+- The liquid look draws the goo after everything else in the world: goo behind stained glass or
+  water is drawn over them or hidden by them, depending on the graphics settings. It costs a few
+  full-screen passes; `/goolook shader` is the cheaper way.
 - Vanilla pistons move a block in a tenth of a second. Slime holds on and stays stretched between
   two sticky pistons as a band. Honey cannot follow that fast: it tears into strands, and what is
   left sags into a strand or a puddle between the pistons.

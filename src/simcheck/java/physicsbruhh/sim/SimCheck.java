@@ -128,6 +128,24 @@ public final class SimCheck {
             run(s, 3f);
             float[] d = body(s, back);
             check("goo seen again lies at rest", d[6] < 0.4f && s.count(4, back) == 2 * GooSim.BOTTLE, "top " + d[6]);
+            // what the liquid look is drawn from: every particle once, slime marked as slime, all inside the bounds of the goo
+            ByteBuffer small = buf(8);
+            int need = s.particles(small);
+            ByteBuffer all = buf(Math.max(8, -need));
+            int count = s.particles(all);
+            FloatBuffer pf = all.asFloatBuffer();
+            int honeyParticles = 0, slimeParticles = 0, outside = 0;
+            for (int i = 0; i < count; i++) {
+                float w = pf.get(i * 4 + 3);
+                if (w >= 4f) continue; // a filler between particles pulled apart
+                boolean isSlime = w >= 2f;
+                if (isSlime) slimeParticles++; else honeyParticles++;
+                float[] bb = isSlime ? c : d;
+                if (pf.get(i * 4) < bb[2] - 0.2f || pf.get(i * 4) > bb[5] + 0.2f || pf.get(i * 4 + 1) < bb[3] - 0.2f || pf.get(i * 4 + 1) > bb[6] + 0.2f) outside++;
+            }
+            check("particles for drawing: too small a buffer is refused, then all of them come", need < 0 && count > 0 && -need >= count * 4, "need " + need + ", count " + count);
+            check("particles for drawing: all the honey and all the slime, where the goo is", honeyParticles == 2 * GooSim.BOTTLE && slimeParticles == 3 * GooSim.BALL && outside == 0,
+                    honeyParticles + " honey, " + slimeParticles + " slime, " + outside + " outside");
         }
         double ms = (System.nanoTime() - t0) / 1e6;
         try (GooSim s = f.make(12, 4)) {
