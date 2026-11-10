@@ -1,15 +1,18 @@
 package physicsbruhh;
 
+import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonStructureResolver;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.PistonEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 /** Decides when a vanilla honey or slime block becomes goo. Runs on the logical server only. */
 public final class GooEvents {
@@ -35,21 +38,36 @@ public final class GooEvents {
         return true;
     }
 
+    private record Placed(ServerLevel level, BlockPos pos, float leanX, float leanZ) {}
+
+    private static final List<Placed> PLACED = new ArrayList<>();
+
     /** A placed honey or slime block melts / comes alive right away. */
     @SubscribeEvent
     public static void onPlace(BlockEvent.EntityPlaceEvent event) {
         if (!(event.getLevel() instanceof ServerLevel level) || !enabled(level)) return;
-        if (!isGooBlock(event.getPlacedBlock())) return;
-        BlockPos pos = event.getPos().immutable();
         Entity placer = event.getEntity();
+        // for players the event carries the new block; for anything else only what was there before,
+        // so those positions are simply looked at again once the placement is over
+        if (placer instanceof Player && !isGooBlock(event.getPlacedBlock())) return;
+        BlockPos pos = event.getPos().immutable();
         // lean away from whoever placed it, with some variety
         double ang = level.getRandom().nextDouble() * Math.PI * 2.0;
         if (placer != null) {
             ang = Math.atan2(pos.getZ() + 0.5 - placer.getZ(), pos.getX() + 0.5 - placer.getX()) + (level.getRandom().nextDouble() - 0.5) * 1.9;
         }
-        float lx = (float) Math.cos(ang), lz = (float) Math.sin(ang);
-        // swap it once the placement has fully gone through (the event can still be cancelled by others)
-        level.getServer().execute(() -> convert(level, pos, lx, lz));
+        // swapped at the end of the tick, when the placement has fully gone through (or was cancelled)
+        PLACED.add(new Placed(level, pos, (float) Math.cos(ang), (float) Math.sin(ang)));
+    }
+
+    @SubscribeEvent
+    public static void onServerTick(ServerTickEvent.Post event) {
+        if (PLACED.isEmpty()) return;
+        List<Placed> batch = List.copyOf(PLACED);
+        PLACED.clear();
+        for (Placed p : batch) {
+            if (p.level().getServer() == event.getServer() && enabled(p.level())) convert(p.level(), p.pos(), p.leanX(), p.leanZ());
+        }
     }
 
     /**

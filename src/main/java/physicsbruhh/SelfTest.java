@@ -18,6 +18,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 /**
@@ -84,10 +85,10 @@ public final class SelfTest {
                 // C: honey in front of the extended sticky head, then retract
                 level.setBlock(new BlockPos(0, Y, 6), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
                 level.setBlock(new BlockPos(-3, Y, 6), Blocks.AIR.defaultBlockState(), 3);
-                // F: a honey block placed the ordinary way (using the item on the floor)
+                // F: a honey block placed the ordinary way (a player using the item on the floor)
                 BlockPos floor = new BlockPos(4, Y - 1, 10);
                 ItemStack stack = new ItemStack(Items.HONEY_BLOCK);
-                stack.useOn(new UseOnContext(level, null, InteractionHand.MAIN_HAND, stack,
+                stack.useOn(new UseOnContext(level, FakePlayerFactory.getMinecraft(level), InteractionHand.MAIN_HAND, stack,
                         new BlockHitResult(Vec3.atCenterOf(floor).add(0.0, 0.5, 0.0), Direction.UP, floor, false)));
             } else if (tick == 100) {
                 expect("C: sticky piston retracted", !level.getBlockState(new BlockPos(-2, Y, 6)).getValue(PistonBaseBlock.EXTENDED));
