@@ -12,5 +12,7 @@
   "gamerule.physicsbruhh:clear_goo.description": "Мёд и слизь рисуются полупрозрачной жидкостью (янтарной и зелёной), а не с текстурами блоков.",
   "commands.physicsbruhh.clear": "Убрано кусков массы: %s",
   "commands.physicsbruhh.look.shader": "Масса рисуется своим шейдером",
-  "commands.physicsbruhh.look.plain": "Масса рисуется по-простому, без своего шейдера"
+  "commands.physicsbruhh.look.plain": "Масса рисуется по-простому, без своего шейдера",
+  "commands.physicsbruhh.look.info": "Масса: ядро %s, потоков: %s, кусков: %s (движутся: %s), %s мс на обновление, скорость %s %% от реальной",
+  "commands.physicsbruhh.look.info.off": "Сейчас ничего не симулируется"
 }

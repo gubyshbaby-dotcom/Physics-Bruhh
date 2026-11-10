@@ -133,6 +133,8 @@ public final class JavaSim implements GooSim {
         int n = 0;
         if (what == 0) { for (int i = 0; i < maxp; i++) if (alive[i] != 0 && ancKind[i] == 2 && ancId[i] == arg) n++; }
         else if (what == 1 && arg >= 0 && arg < slots) { for (int i = arg * nb; i < (arg + 1) * nb; i++) if (alive[i] != 0 && ancKind[i] == 1) n++; }
+        else if (what == 2) n = ticks & 0x3fffffff;
+        else if (what == 3) n = 1;
         return n;
     }
 
@@ -397,9 +399,12 @@ public final class JavaSim implements GooSim {
         pi[nPair] = i; pj[nPair] = j; nPair++;
     }
 
+    private int ticks;
+
     private void stepOnce() {
         final float dt = DT;
         clock += dt;
+        ticks++;
         for (KBox b : kin) {
             if (!b.moving()) continue;
             for (Body bd : bodies) {

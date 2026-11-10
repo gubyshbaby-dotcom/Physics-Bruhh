@@ -26,6 +26,9 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
   Off by default; applies to all goo at once.
 - `/goolook plain` (this client only, remembered) draws the goo without the mod's own shader, in
   case that shader misbehaves on some machine; `/goolook shader` switches back.
+- `/goolook info` says what the simulation is doing on this client: Rust or Java core, how many
+  threads, how many pieces of goo and how many of them are moving, how long an update takes, and
+  whether it keeps up with real time.
 
 Slime and honey contraptions (flying machines, block conveyors) do not work while
 `physical_goo` is on, because the blocks they rely on are no longer blocks.
@@ -105,8 +108,11 @@ cargo run --release --example viz -- game_pull_slime out.ppm   # honey, slime, s
 - Vanilla pistons move a block in a tenth of a second. Slime holds on and stays stretched between
   two sticky pistons as a band. Honey cannot follow that fast: it tears into strands, and what is
   left sags into a strand or a puddle between the pistons.
-- A piece of goo is 1728 particles. A machine that cannot keep up shows the goo in slow motion
-  rather than skipping steps.
+- A piece of goo is 1728 particles, and only pieces that are moving cost anything: slime comes to
+  rest about three seconds after it was last disturbed, honey about seven. A moving piece takes
+  roughly 3 to 4 ms of one core per step, 60 steps a second, so a big puddle that is still
+  spreading needs several cores. A machine that cannot keep up shows the goo in slow motion
+  rather than skipping steps (`/goolook info` shows the percentage).
 
 ## License
 

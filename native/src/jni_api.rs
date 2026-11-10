@@ -62,11 +62,18 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nProbe(_env: JNIEnv, _c: 
     })
 }
 
-/// Diagnostics: `what` 0 = particles stuck to the moving box with id `arg`, 1 = particles of body `arg` stuck to blocks.
+/// Diagnostics: `what` 0 = particles stuck to the moving box with id `arg`, 1 = particles of body `arg` stuck to blocks,
+/// 2 = fixed steps taken so far (wraps), 3 = threads the solver uses.
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCount(_env: JNIEnv, _c: JClass, h: jlong, what: jint, arg: jint) -> jint {
     guard(|| match unsafe { handle(h) } {
-        Some(hd) => match what { 0 => hd.world.anchors_on(arg) as jint, 1 => hd.world.anchors_of(arg.max(0) as usize) as jint, _ => 0 },
+        Some(hd) => match what {
+            0 => hd.world.anchors_on(arg) as jint,
+            1 => hd.world.anchors_of(arg.max(0) as usize) as jint,
+            2 => (hd.world.ticks & 0x3fff_ffff) as jint,
+            3 => crate::sim::threads() as jint,
+            _ => 0,
+        },
         None => ERR,
     })
 }

@@ -12,7 +12,9 @@ import physicsbruhh.PhysicsBruhh;
 /**
  * {@code /goolook shader} and {@code /goolook plain}: a switch on this client only, kept in
  * {@code config/physicsbruhh-client.properties}. "plain" draws the goo without the mod's own shader,
- * for the machine on which that shader does not work.
+ * for the machine on which that shader does not work. {@code /goolook info} says what the simulation
+ * is doing: which core, how many threads, how many pieces, how long an update takes and whether it
+ * keeps up with real time.
  */
 final class GooLook {
     private GooLook() {}
@@ -51,6 +53,19 @@ final class GooLook {
                 .then(Commands.literal("shader").executes(context -> {
                     context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.shader", "Goo is drawn with its own shader"), false);
                     return set(true);
+                }))
+                .then(Commands.literal("info").executes(context -> {
+                    Object[] info = GooClient.info();
+                    if (info[0] == null) {
+                        context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info.off", "No goo is being simulated right now"), false);
+                    } else {
+                        String ms = String.format(java.util.Locale.ROOT, "%.1f", (Float) info[4]);
+                        String speed = String.valueOf(Math.round((Float) info[5] * 100.0F));
+                        context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info",
+                                "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
+                                info[0], info[1], info[2], info[3], ms, speed), false);
+                    }
+                    return 1;
                 }))
                 .then(Commands.literal("plain").executes(context -> {
                     context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.plain", "Goo is drawn the plain way, without its own shader"), false);

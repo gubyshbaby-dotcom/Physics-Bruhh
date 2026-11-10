@@ -27,11 +27,12 @@ fn main() {
     let mut quads = 0;
     for _ in 0..20 { out.clear(); quads = mesh::build(&w, HONEY, &mut out) + mesh::build(&w, SLIME, &mut out); }
     let mesh_ms = t1.elapsed().as_secs_f64() * 1e3 / 20.0;
-    let total: f64 = w.prof.iter().sum();
+    let total: f64 = w.prof[..7].iter().sum();
     let names = ["predict+collide", "pairs", "springs form", "constraints", "anchors/springs post", "velocity/visc/commit", "sleep"];
     println!("{} threads, {} bodies, {} awake at the end, {:.0} pairs/step, {} quads", threads(), bodies, w.awake_count(), pairs as f64 / steps as f64, quads);
     println!("step {:.2} ms, mesh {:.2} ms", step_ms, mesh_ms);
     for (k, n) in names.iter().enumerate() { println!("  {:<22} {:5.1} %", n, w.prof[k] / total * 100.0); }
+    for (k, n) in ["density", "correction", "springs", "anchors+collide"].iter().enumerate() { println!("    of constraints: {:<16} {:5.1} %", n, w.prof[7 + k] / total * 100.0); }
 
     // every bit of every position: the same whatever the number of threads
     let mut sum = 0xcbf29ce484222325u64;

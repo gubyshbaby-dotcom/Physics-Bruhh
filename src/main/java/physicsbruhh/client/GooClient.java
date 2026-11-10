@@ -644,6 +644,18 @@ public final class GooClient {
     static int quadCount(int material) { synchronized (MESH_LOCK) { return meshQuads[material]; } }
 
     private static volatile float stepMillis;
+    /** Simulated time per real time over the last second or so (1 = keeping up), and the threads the solver uses. */
+    private static volatile float simSpeed = 1.0F;
+    private static volatile int simThreads = 1;
+
+    /** What the simulation is doing, for {@code /goolook info}: backend (null if it is not running), threads, pieces, pieces moving, ms per update, speed. */
+    static Object[] info() {
+        GooSim s = sim;
+        float[] info = bodyInfo;
+        int bodies = 0, awake = 0;
+        for (int b = 0; b + 8 <= info.length; b += 8) { if (info[b] != 0.0F) { bodies++; if (info[b + 1] != 0.0F) awake++; } }
+        return new Object[] { s == null || !running ? null : s.backend(), simThreads, bodies, awake, stepMillis, simSpeed };
+    }
 
     // ------------------------------------------------------------------ simulation thread
 
@@ -651,7 +663,8 @@ public final class GooClient {
         ByteBuffer staticBuf = direct(MAX_STATIC * GooSim.STATIC_FLOATS), kinBuf = direct(MAX_KINEMATIC * GooSim.KINEMATIC_FLOATS);
         ByteBuffer infoBuf = direct(MAX_BODIES * GooSim.BODY_FLOATS);
         ByteBuffer meshBuf = direct(1 << 18);
-        long last = System.nanoTime();
+        long last = System.nanoTime(), speedFrom = 0L;
+        int speedSteps = 0;
         boolean dirty = true, hadAwake = false;
         try {
             while (running) {
@@ -708,6 +721,13 @@ public final class GooClient {
                 }
                 long spent = System.nanoTime() - now;
                 stepMillis += (spent / 1.0e6F - stepMillis) * 0.05F;
+                // how much simulated time went by per real time, about once a second
+                if (speedFrom == 0L) { speedFrom = now; speedSteps = s.count(2, 0); simThreads = Math.max(1, s.count(3, 0)); }
+                else if (now - speedFrom > 1_000_000_000L) {
+                    int steps = s.count(2, 0);
+                    simSpeed = Math.min(1.0F, ((steps - speedSteps) & 0x3fffffff) / 60.0F / ((now - speedFrom) / 1.0e9F));
+                    speedFrom = now; speedSteps = steps;
+                }
                 if (LOCKSTEP) { STEP_DONE.release(); continue; }
                 long budget = 16_666_666L - spent;
                 if (budget > 200_000L) LockSupport.parkNanos(budget); else Thread.onSpinWait();

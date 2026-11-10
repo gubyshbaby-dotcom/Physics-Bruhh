@@ -1,21 +1,23 @@
-//! When does a lone block of honey / slime come to rest? `cargo run --release --example sleep`
+//! How long a freshly placed block stays awake (simulated seconds), and how fast it still moves on the way.
 use physicsbruhh_native::sim::*;
 fn main() {
-    for mat in [HONEY, SLIME] {
-        let mut w = World::new(12, 2);
-        let mut floor = Vec::new();
-        for x in -6..7 { for z in -6..7 { floor.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } }
-        w.set_static(&floor, floor.len() / 7);
+    for (name, mat) in [("honey", HONEY), ("slime", SLIME)] {
+        let mut w = World::new(12, 4);
+        let mut f = Vec::new();
+        for x in -5..6 { for z in -3..4 { f.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } }
+        w.set_static(&f, f.len() / 7);
         w.add_body(mat, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
-        let mut asleep_at = -1.0f32;
-        for step in 0..3600 {
-            w.step(DT + 1e-6);
-            if step % 120 == 119 || (asleep_at < 0.0 && w.awake_count() == 0) {
-                let b = w.bodies[0].bb;
-                if asleep_at < 0.0 && w.awake_count() == 0 { asleep_at = (step + 1) as f32 * DT; }
-                if step % 120 == 119 && (step + 1) / 60 <= 20 { println!("mat {} t={:>2}s width {:.2} x {:.2} height {:.2} awake {}", mat, (step + 1) / 60, b[3] - b[0], b[5] - b[2], b[4], w.awake_count()); }
-            }
+        let mut t = 0.0f32;
+        let mut line = String::new();
+        while w.bodies[0].awake && t < 120.0 {
+            let before = w.p.clone();
+            for _ in 0..60 { w.step(DT + 1e-6); }
+            t += 1.0;
+            let mut far = 0.0f32;
+            for i in 0..w.maxp { if w.alive[i] != 0 { let d = (0..3).map(|a| (w.p[i * 3 + a] - before[i * 3 + a]).powi(2)).sum::<f32>().sqrt(); far = far.max(d); } }
+            let bb = w.bodies[0].bb;
+            if (t as i32) % 2 == 0 || !w.bodies[0].awake { line += &format!(" {}s:{:.3}/{:.2}", t as i32, far, bb[3] - bb[0]); }
         }
-        println!("mat {} asleep at {:.1} s", mat, asleep_at);
+        println!("{} sleeps after about {} s; fastest particle's travel per second / width:{}", name, t, line);
     }
 }
