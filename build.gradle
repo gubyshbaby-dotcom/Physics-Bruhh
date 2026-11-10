@@ -92,11 +92,12 @@ abstract class CargoNative extends DefaultTask {
     }
 }
 
+def skipCargo = providers.gradleProperty('skipCargo').isPresent()
 def cargoNative = tasks.register('cargoNative', CargoNative) {
     crateDir = layout.projectDirectory.dir('native')
     outDir = layout.buildDirectory.dir('generated/natives')
     outputs.upToDateWhen { false }
-    onlyIf { !providers.gradleProperty('skipCargo').isPresent() }
+    enabled = !skipCargo
 }
 sourceSets.main.resources.srcDir(cargoNative)
 
