@@ -169,7 +169,6 @@ jobs:
           run_client opengl 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1"
           run_client surface "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid=false"
           run_client plain "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.shader=false"
-          run_client debug "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid.debug=true"
           echo "=== summary"
           for name in vulkan oit opengl surface plain; do
             echo "$name: $(grep -o 'Using graphics backend [A-Za-z]*' clienttest-$name.log | head -1) / $(grep -o 'CLIENTTEST \(PASS\|FAIL.*\)' clienttest-$name.log | head -1)"
@@ -182,15 +181,14 @@ jobs:
       - name: Screenshots as text (commits tagged [shots])
         if: always() && contains(github.event.head_commit.message, '[shots]')
         run: |
-          for name in vulkan oit opengl surface plain debug; do
+          for name in vulkan oit opengl surface plain; do
             n=0
             for f in shots/$name/*.jpg; do
               [ -e "$f" ] || continue
               n=$((n + 1))
               # every second frame of the default run, every sixth of the others
               if [ "$name" = "vulkan" ] && [ $((n % 2)) -ne 0 ]; then continue; fi
-              if [ "$name" != "vulkan" ] && [ "$name" != "debug" ] && [ $((n % 6)) -ne 0 ]; then continue; fi
-              if [ "$name" = "debug" ] && [ $((n % 3)) -ne 0 ]; then continue; fi
+              if [ "$name" != "vulkan" ] && [ $((n % 6)) -ne 0 ]; then continue; fi
               echo "SHOT-BEGIN ${name}_$(basename "$f")"
               convert "$f" -resize 854x480 -quality 72 jpg:- | base64 -w 160
               echo "SHOT-END"

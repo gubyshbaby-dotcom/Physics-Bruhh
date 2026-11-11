@@ -23,7 +23,7 @@ layout(location = 0) out vec4 fragColor;
 
 // Honey is a clear liquid: it hardly scatters light, it swallows it, blue first, then green, next
 // to no red (per block of honey). A film of it is pale gold, a finger's width amber, a block deep orange.
-const vec3 HONEY_ABSORB = vec3(0.38, 1.8, 6.5);
+const vec3 HONEY_ABSORB = vec3(0.26, 1.1, 6.5);
 // the little that is scattered on the way and comes back out warm (per block)
 const float HONEY_CLOUD = 2.2;
 // Slime is cloudy: light that goes in is thrown about and comes out green, and a finger's width of
@@ -226,7 +226,7 @@ void main() {
     vec3 skyAndLamps = skyShare * (pow(GooSky.rgb, vec3(2.2)) * 0.45 + vec3(0.04)) + lamp + vec3(0.012);
 
     // honey: clear; only a little warm light comes back out of it, more when the sun stands behind it
-    vec3 honeyGlow = vec3(1.0, 0.52, 0.05) * (1.0 - exp(-honey * HONEY_CLOUD)) * (sunLight * (0.28 + 0.55 * shining) + skyAndLamps * 0.5);
+    vec3 honeyGlow = vec3(1.0, 0.60, 0.06) * (1.0 - exp(-honey * HONEY_CLOUD)) * (sunLight * (0.34 + 0.55 * shining) + skyAndLamps * 0.5);
     // slime: a cloudy body of its own colour, pale and letting light through where thin, deep where thick
     float clouded = (1.0 - exp(-slime * SLIME_CLOUD)) * slimeShare;
     vec3 slimeBody = mix(vec3(0.40, 0.86, 0.18), vec3(0.07, 0.44, 0.035), smoothstep(0.08, 0.75, slime));
