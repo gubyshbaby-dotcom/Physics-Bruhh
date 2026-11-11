@@ -41,9 +41,12 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 - `/gamerule physicsbruhh:physical_goo false` switches the mod off (blocks behave as in vanilla
   again; goo that already exists stays until it is punched or cleared).
 - `/gamerule physicsbruhh:clear_goo true` changes the look: instead of the blocks' pixel textures,
-  honey and slime are drawn as real clear liquid. You see the world through it, bent by its
-  surface and tinted by how much of it the light crossed (thin honey is pale gold, thick honey
-  deep amber); the sky and the sun mirror in it. Off by default; applies to all goo at once.
+  honey and slime are drawn the way the real things look. Honey is a clear liquid: you see the
+  world through it, bent by its surface and coloured by how much of it the light crossed (a film
+  is pale gold, a puddle amber, a block's depth deep orange), with a dark outline, a small sharp
+  glint of the sun and the sky mirrored in it at a glancing angle. Slime is a cloudy, glossy
+  jelly that only lets light through where it is thin. Both throw a shade of their own colour on
+  the ground. Off by default; applies to all goo at once.
 - `/goolook` (this client only, remembered) picks how that is drawn: `liquid` (the default) as
   described; `shader` as a glossy tinted surface, which is cheaper and is also what the game falls
   back to by itself if the liquid look does not work on a machine; `plain` without any shader of
@@ -77,7 +80,7 @@ drag neighbouring blocks along with it.
 | Server side | `GooEvents`, `GooEntity`, `GooCommands` | Decides when a block becomes goo (placement, piston about to move it), keeps a small marker entity so it is saved and synced, applies the blocks' effects to mobs and falls, runs `/goo clear`. |
 | Server side, hands and dispensers | `GooEntity`, `GooEvents`, `GooDispense` | A marker also knows how much goo its piece holds. Pouring, throwing and scooping change that amount and say where and with what velocity; clients let the same happen to their simulated goo (a stream or a lump out of a spout, particles taken away near a point). |
 | Client side | `client/` | Runs the simulation on its own thread at 60 Hz, feeds it the blocks, pistons and creatures around the goo, draws it, applies the blocks' effects to the player. |
-| Drawing | `client/GooRenderer`, `client/GooFluid`, `assets/.../shaders` | Textured goo is a surface mesh with the mod's shader (gloss, sky reflection, colour by depth; works with and without "improved transparency"). Clear goo is drawn from the particles themselves, after the world: discs into a nearest-surface texture and an amount texture, an edge-keeping blur that turns the heap of discs into one surface, then one pass that bends the picture behind it, lets the goo absorb light by its thickness, and adds the mirrored sky and the sun's glint. |
+| Drawing | `client/GooRenderer`, `client/GooFluid`, `assets/.../shaders` | Textured goo is a surface mesh with the mod's shader (gloss, sky reflection, colour by depth; works with and without "improved transparency"). Clear goo is drawn from the particles themselves, after the world: discs into a nearest-surface texture and an amount texture, an edge-keeping blur that turns the heap of discs into one surface, then one pass that bends the picture behind it, lets the goo absorb light by its thickness, and adds the mirrored sky and the sun's glint; a pass from straight above gives the shade on the ground. The colours and the way light behaves were set against photographs of honey, poured caramel, toy slime and jelly. |
 
 The mod jar carries the native library for Windows x64, Linux x64 and macOS (Intel and Apple
 silicon). On anything else, or if loading fails, it falls back to the Java simulation and says so in

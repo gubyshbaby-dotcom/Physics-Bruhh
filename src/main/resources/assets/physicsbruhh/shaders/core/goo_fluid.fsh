@@ -23,9 +23,9 @@ layout(location = 0) out vec4 fragColor;
 
 // Honey is a clear liquid: it hardly scatters light, it swallows it, blue first, then green, next
 // to no red (per block of honey). A film of it is pale gold, a finger's width amber, a block deep orange.
-const vec3 HONEY_ABSORB = vec3(0.26, 1.45, 5.6);
+const vec3 HONEY_ABSORB = vec3(0.38, 1.8, 6.5);
 // the little that is scattered on the way and comes back out warm (per block)
-const float HONEY_CLOUD = 1.4;
+const float HONEY_CLOUD = 2.2;
 // Slime is cloudy: light that goes in is thrown about and comes out green, and a finger's width of
 // it hides what is behind. How soon it does that (per block), and what it does to light that passes straight through:
 const float SLIME_CLOUD = 9.0;
@@ -204,7 +204,7 @@ void main() {
     // saturated outline every drop of honey has.
     float slant = (1.0 - nv) * (1.0 - nv);
     // (a finger's width of honey already has its full amber: a thread or a thin stream of it is not pale)
-    float honeyWay = honey + 0.25 * (1.0 - exp(-honey * 12.0)) + (1.0 - slimeShare) * 0.30 * slant;
+    float honeyWay = honey + 0.30 * (1.0 - exp(-honey * 14.0)) + (1.0 - slimeShare) * 0.30 * slant;
     vec3 through = exp(-(HONEY_ABSORB * honeyWay + SLIME_ABSORB * (slime + slimeShare * (0.02 + 0.10 * slant))));
     // just inside the rim the curved edge gathers light into a brighter band
     float band = smoothstep(0.10, 0.40, rim) * (1.0 - smoothstep(0.45, 0.85, rim));
@@ -224,12 +224,25 @@ void main() {
     vec3 slimeLit = slimeBody * (sunLight * (0.10 + 0.74 * around * around + 0.35 * shining * exp(-slime * 2.5)) + skyAndLamps * 0.9);
     vec3 colour = behind * through * (1.0 - clouded) + honeyGlow * (1.0 - slimeShare) + slimeLit * clouded;
 
-    // the sky in the surface: little of it seen straight on, all of it at a glancing angle; and the sun's glint, small and sharp
-    vec3 mirrored = skyLight(reflect(-VW, nW), sun) * max(skyShare, 0.04) + lamp * 0.15;
+    // the surface as a mirror: little seen straight on, everything at a glancing angle. It shows the sky,
+    // or the world behind the goo where the mirrored line of sight runs on into it. And the sun's glint, small and sharp.
+    vec3 bounce = reflect(-V, n);
+    vec3 mirrored = skyLight(toWorld * bounce, sun) * max(skyShare, 0.04) + lamp * 0.15;
+    if (bounce.z < 0.0) {
+        // the mirrored line of sight goes on into the picture: what it meets there is on the screen already
+        vec4 on = ProjMat * vec4(P + bounce * 0.6, 1.0);
+        vec2 at = on.xy / on.w * 0.5 + 0.5;
+        if (on.w > 0.0 && at.x > 0.002 && at.x < 0.998 && at.y > 0.002 && at.y < 0.998) {
+            float there = sceneAlong(unproject, at);
+            if (there > along && there < 2000.0) {
+                mirrored = mix(mirrored, pow(texture(SceneSampler, at).rgb, vec3(2.2)), smoothstep(0.0, 0.4, -bounce.z));
+            }
+        }
+    }
     float fresnel = (0.04 + 0.96 * pow(1.0 - nv, 5.0)) * (0.25 + 0.75 * smoothstep(0.02, 0.10, thick));
     colour = mix(colour, mirrored, clamp(fresnel, 0.0, 1.0));
     float ndh = max(dot(nW, normalize(sun + VW)), 0.0);
-    colour += sunLight * (pow(ndh, 2600.0) * 7.0 + pow(ndh, 320.0) * 0.14);
+    colour += sunLight * (pow(ndh, 2600.0) * 7.0 + pow(ndh, 520.0) * 0.40);
 
     // the outline is one pixel soft: there the goo is mixed with the (shaded) world beside it by hand, the pixel is replaced
     colour = mix(shaded * shade, clamp(colour, 0.0, 1.0), cover);
