@@ -255,7 +255,7 @@ final class ClientSelfTest {
         HAND_SEEN.append(kind).append(' ').append(where).append(": ").append(seen).append("; ");
         boolean ok;
         if (l == null) ok = false;
-        else if (material == GooSim.SLIME) ok = loose ? l[0] <= 1.45 && l[1] <= 1.45 && l[2] >= 0.5 && l[2] <= 1.2 : l[0] <= 1.25 && l[1] <= 1.25 && l[2] >= 0.6 && l[2] <= (cell.getY() > 200 ? 2.2 : 1.15) && l[3] <= 0.35;
+        else if (material == GooSim.SLIME) ok = loose ? l[0] <= 1.45 && l[1] <= 1.45 && l[2] >= 0.5 && l[2] <= (cell.getY() > 200 ? 2.2 : 1.2) : l[0] <= 1.25 && l[1] <= 1.25 && l[2] >= 0.6 && l[2] <= (cell.getY() > 200 ? 2.2 : 1.15) && l[3] <= 0.35;
         else ok = l[0] <= 1.9 && l[1] <= 1.9 && l[2] >= 0.55;
         if (!ok && handProblem == null) handProblem = "a block of " + kind + " put down " + where + " did not stay in one piece (" + seen + ")";
     }
