@@ -43,7 +43,7 @@ public final class SimCheck {
 
     static float[] scenarios(String name, Factory f) {
         System.out.println(name + ":");
-        float[] sig = new float[16];
+        float[] sig = new float[14];
         long t0 = System.nanoTime();
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
@@ -159,24 +159,6 @@ public final class SimCheck {
             check("thin slime sags more than thick slime", c[6] < d[6] - 0.04f, "thin " + c[6] + " high, thick " + d[6] + " high");
             sig[10] = a[6]; sig[11] = b[6]; sig[12] = c[6]; sig[13] = d[6];
         }
-        // a block put where a puddle of honey lies: the honey is squeezed out of it, and none of it goes down through the floor
-        try (GooSim s = f.make(12, 4)) {
-            s.setStatic(floor(), floorCount(0));
-            int honey = s.addBody(GooSim.HONEY, 0, 0, 0, 1, 0, 0);
-            run(s, 10f);
-            int there = s.probe(0.02f, 0f, 0.02f, 0.98f, 0.98f, 0.98f) & 0xFFFF;
-            for (int k = 0; k < 240; k++) {
-                if (k % 3 == 0) s.setStatic(floor(new float[] { 0, 0, 0, 1, 1, 1, 1 }), floorCount(1));
-                if (k == 0) s.wake(honey);
-                s.step(1f / 60f + 1e-6f);
-            }
-            float[] b = body(s, honey);
-            int inside = s.probe(0.02f, 0.02f, 0.02f, 0.98f, 0.98f, 0.98f) & 0xFFFF, under = s.probe(-9f, -9f, -9f, 9f, -0.01f, 9f) & 0xFFFF, all = s.probe(-9f, -9f, -9f, 9f, 9f, 9f) & 0xFFFF;
-            check("a block put into a puddle squeezes the honey out", there > 400 && inside == 0 && all == GooSim.BLOCK, there + " there before, " + inside + " inside after, " + all + " in all");
-            check("... and none of it goes through the floor", under == 0, under + " under the floor");
-            check("... and it stays around the block", b[5] - b[2] < 3f && b[7] - b[4] < 3f && b[6] < 1.3f, (b[5] - b[2]) + " x " + (b[7] - b[4]) + " wide, " + b[6] + " high");
-            sig[14] = b[5] - b[2]; sig[15] = b[6];
-        }
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
             s.addBody(GooSim.HONEY, 0, 0, 0, 1, 0, 0);
@@ -200,7 +182,6 @@ public final class SimCheck {
             check("the honey stream lands in the same place", Math.abs(j[6] - r[6]) < 0.5f && Math.abs(j[7] - r[7]) < 0.6f, "middle " + j[6] + " vs " + r[6] + ", width " + j[7] + " vs " + r[7]);
             check("the slime heap lands in the same place", Math.abs(j[8] - r[8]) < 0.5f, j[8] + " vs " + r[8]);
             check("thin and thick honey agree", Math.abs(j[10] - r[10]) < 0.1f && Math.abs(j[11] - r[11]) < 0.15f, "thin " + j[10] + " vs " + r[10] + ", thick " + j[11] + " vs " + r[11]);
-            check("honey squeezed out of a block agrees", Math.abs(j[14] - r[14]) < 0.4f && Math.abs(j[15] - r[15]) < 0.2f, "width " + j[14] + " vs " + r[14] + ", top " + j[15] + " vs " + r[15]);
             check("thin and thick slime agree", Math.abs(j[12] - r[12]) < 0.08f && Math.abs(j[13] - r[13]) < 0.08f, "thin " + j[12] + " vs " + r[12] + ", thick " + j[13] + " vs " + r[13]);
         } else {
             System.out.println("Rust simulation skipped: " + NativeSim.loadMessage());

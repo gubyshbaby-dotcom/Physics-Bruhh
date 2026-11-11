@@ -344,7 +344,7 @@ public final class GooClient {
                 if (!BORN.isEmpty()) {
                     Born born = BORN.get(pos.asLong());
                     if (born != null) {
-                        if (scanTick < born.until() && state.is(sourceBlock(born.material()))) continue; // still standing where its goo already is
+                        // (fix switched off on this branch)
                         BORN.remove(pos.asLong()); // seen gone (or it has stood there too long to be that block): from now on a block here is a block
                     }
                 }

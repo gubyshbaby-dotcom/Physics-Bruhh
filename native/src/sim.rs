@@ -213,20 +213,11 @@ const PISTON: u8 = 1;
 /// under its feet is squeezed out sideways instead.
 const CREATURE: u8 = 2;
 
-/// Furthest a particle that finds itself inside a block is moved towards the way out in one step
-/// (2.4 blocks a second). A block that turns up where goo is squeezes the goo out of itself; it
-/// does not fire it out, which is what putting every particle on the nearest face at once did.
-const EJECT: f32 = 0.04;
-/// What [`resolve_box`] returns for a particle that is inside a block and on its way out of it.
-const LEAVING: u8 = 4;
-
 /// Push `q` out of the box if it is inside (box grown by `rc`). The exit face is the one the
 /// particle came from last step when that is known, so fast pistons shove goo ahead of them
-/// instead of letting it tunnel out the back. Returns the axis of the face it was put on, 3 if
-/// the box was not touched, [`LEAVING`] if it is still inside a block. `solid` says whether a
-/// point lies inside some (other) block.
+/// instead of letting it tunnel out the back.
 #[inline]
-fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3], pmin: &[f32; 3], pmax: &[f32; 3], rc: f32, front: u8, kind: u8, solid: impl Fn(&[f32; 3]) -> bool) -> u8 {
+fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3], pmin: &[f32; 3], pmax: &[f32; 3], rc: f32, front: u8, kind: u8) -> u8 {
     // swept part: a particle that started beyond a face may not end up behind that face while it
     // is within the box's cross-section, however far a spring or anchor tried to drag it. When
     // several faces qualify (e.g. sagging a hair below a floor while crossing a block seam) the
@@ -255,34 +246,9 @@ fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3],
                 let pen_lo = q[a] - (bmin[a] - rc); if pen_lo < best && !(kind == CREATURE && a == 1) { best = pen_lo; ba = a; hi = false; }
                 let pen_hi = (bmax[a] + rc) - q[a]; if pen_hi < best { best = pen_hi; ba = a; hi = true; }
             }
-            if kind == BLOCK {
-                // ... of a block: the nearest face with open space beyond it. The way out of a block that
-                // stands on the floor is not down into the floor, where the floor would send it straight back.
-                let mut e = *q;
-                e[ba] = if hi { bmax[ba] + 1.5 * rc } else { bmin[ba] - 1.5 * rc };
-                if solid(&e) {
-                    let (mut open, mut oa, mut oh) = (f32::MAX, 3usize, false);
-                    for a in 0..3 { for side in 0..2 {
-                        let up = side == 1;
-                        let pen = if up { (bmax[a] + rc) - q[a] } else { q[a] - (bmin[a] - rc) };
-                        if pen >= open { continue; }
-                        let mut e = *q;
-                        e[a] = if up { bmax[a] + 1.5 * rc } else { bmin[a] - 1.5 * rc };
-                        if !solid(&e) { open = pen; oa = a; oh = up; }
-                    } }
-                    if oa < 3 { ba = oa; hi = oh; } // walled in on every side: the nearest face after all
-                }
-            }
         } // else: a block being pushed carries it along on its leading face
     }
-    let face = if hi { bmax[ba] + rc } else { bmin[ba] - rc };
-    if kind == BLOCK {
-        // out of a block at a walk: at least EJECT further than where the step began, never past the face
-        q[ba] = if hi { face.min((p[ba] + EJECT).max(q[ba])) } else { face.max((p[ba] - EJECT).min(q[ba])) };
-        if q[ba] != face { return LEAVING; }
-    } else {
-        q[ba] = face;
-    }
+    q[ba] = if hi { bmax[ba] + rc } else { bmin[ba] - rc };
     ba as u8
 }
 
@@ -341,21 +307,6 @@ struct Walls<'a> { st: &'a [SBox], st_org: [i32; 3], st_dim: [i32; 3], st_start:
 #[derive(Clone, Copy)]
 struct Anchors { kind: Shared<u8>, id: Shared<i32>, pt: Shared<f32>, loc: Shared<f32>, stick: Shared<f32>, axis: Shared<u8>, fly: Shared<u8> }
 
-impl Walls<'_> {
-    /// Whether the point lies inside a block. A box is listed in every cell it lies in, so the point's own cell is enough.
-    #[inline]
-    fn solid(&self, pt: &[f32; 3]) -> bool {
-        let mut c = [0i32; 3];
-        for a in 0..3 { c[a] = pt[a].floor() as i32 - self.st_org[a]; if c[a] < 0 || c[a] >= self.st_dim[a] { return false; } }
-        let ci = (c[0] + self.st_dim[0] * (c[1] + self.st_dim[1] * c[2])) as usize;
-        for k in self.st_start[ci]..self.st_start[ci + 1] {
-            let b = &self.st[self.st_items[k as usize] as usize];
-            if (0..3).all(|a| pt[a] > b.min[a] && pt[a] < b.max[a]) { return true; }
-        }
-        false
-    }
-}
-
 /// Pushes particle `i` out of the colliders and lets it stick to the last one it touched.
 /// Safety: writes only particle `i`'s own position and anchor.
 #[inline]
@@ -365,7 +316,6 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
     let p = [p[o], p[o + 1], p[o + 2]];
     let rc = w.rc;
     let mut hit: u8 = 0; let mut hit_id = 0i32; let mut hit_stick = 0.0f32; let mut hit_min = [0.0f32; 3]; let mut hit_axis = 3u8;
-    let mut leaving = false; // inside a block and on its way out: it has touched something, but that is no place to stick
     if !w.st.is_empty() {
         let mut r = [[0i32; 2]; 3]; let mut inside = true;
         for a in 0..3 {
@@ -378,8 +328,8 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
                 let ci = (x + w.st_dim[0] * (y + w.st_dim[1] * z)) as usize;
                 for k in w.st_start[ci]..w.st_start[ci + 1] {
                     let b = &w.st[w.st_items[k as usize] as usize];
-                    let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, BLOCK, |pt| w.solid(pt));
-                    if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; } else if ax == LEAVING { leaving = true; }
+                    let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, BLOCK);
+                    if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; }
                 }
             } } }
         }
@@ -387,12 +337,12 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
     let near = w.kin_near[i / w.nb];
     for (k, b) in w.kin.iter().enumerate() {
         if k < 64 && near >> k & 1 == 0 { continue; } // nowhere near this particle's body during this step
-        let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc, b.front, if b.id > 0 { PISTON } else { CREATURE }, |_| false);
+        let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc, b.front, if b.id > 0 { PISTON } else { CREATURE });
         if ax < 3 { hit = 2; hit_id = b.id; hit_stick = b.stick; hit_min = b.min; hit_axis = ax; }
     }
     *qs.at(o) = q[0]; *qs.at(o + 1) = q[1]; *qs.at(o + 2) = q[2];
-    if hit != 0 || leaving { *an.fly.at(i) = 0; } // it has touched something: no longer in free flight
-    if hit != 0 && !leaving && *an.kind.at(i) == 0 && cool <= 0.0 && hit_stick > 0.0 && rho < w.rho_max {
+    if hit != 0 { *an.fly.at(i) = 0; } // it has touched something: no longer in free flight
+    if hit != 0 && *an.kind.at(i) == 0 && cool <= 0.0 && hit_stick > 0.0 && rho < w.rho_max {
         *an.kind.at(i) = hit; *an.id.at(i) = hit_id; *an.stick.at(i) = hit_stick; *an.axis.at(i) = hit_axis;
         for a in 0..3 { *an.pt.at(o + a) = q[a]; *an.loc.at(o + a) = q[a] - hit_min[a]; }
     }
