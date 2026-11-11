@@ -161,14 +161,34 @@ simulated: how it moves, how hot it is, how much smoke and unburnt fuel it carri
 | `/gaslook high` | 32 x 24 x 32 blocks, 8 cells to the block (12.6 million cells) |
 | `/gaslook ultra` | 40 x 28 x 40 blocks, 8 cells to the block (22.9 million cells) |
 | `/gaslook off` | fire and smoke as the game draws them, on this client only |
-| `/gaslook solver auto\|gpu\|cpu` | where it is computed (see below) |
-| `/gaslook info` | which solver, how many cells, how long a step and the drawing take |
+| `/gaslook solver auto\|gpu\|compute\|cpu` | where it is computed (see below) |
+| `/gaslook info` | which solver, how many cells, how long a step and the drawing take, how much of the box is being computed |
 
 **Where it is computed.** On the graphics card: every step of the solver is a pass over a texture
 (`shaders/core/gas_*.fsh`), and so is the drawing. Where those passes do not work, the Rust core
 computes a coarser box (24 x 16 x 24 blocks, 2 cells to the block) on a thread of its own and the
 graphics card only draws it. If that does not work either, fire and smoke stay as the game draws
 them, and the log says why.
+
+`/gaslook solver compute` runs the same steps as compute shaders instead of drawing them: the
+game's graphics layer has no such thing, so they are run by what is under it (Vulkan, or OpenGL
+4.5). The programs are the passes' own shaders, called for every cell instead of for every pixel,
+so the numbers are the same; what is saved is setting up and clearing a render target for every
+pass. It is asked for and not chosen because it has never run on a real graphics card (see
+Limits): if it fails to start, the passes are drawn as before and the log says why;
+`/gaslook solver gpu` goes back.
+
+**What is not computed.** Gas is seldom everywhere in the box: a campfire and its smoke fill a few
+dozen blocks of thousands. The solver on the graphics card works only on a smaller box round what
+there is (the gas last seen and three blocks more, the blocks that feed it and the room over
+them, burning creatures, for three seconds the place of an explosion); `/gaslook info` says how
+much of the whole that is. `-Dphysicsbruhh.gas.whole=true` computes everything always.
+
+**The pressure.** What keeps gas from piling up is found in steps down and up four grids, each
+twice as coarse as the one before, instead of by many rounds on one: measured against the exact
+answer in the Rust core (`examples/gas_pressure.rs`), sixteen rounds left what is taken off the
+velocity 11 % off over a campfire and 53 % off in an explosion; two rounds before and two after on
+every grid leave it 4 % and 8 % off for less than half the work.
 
 **How fast.** `/gaslook info` shows the time a step takes by the graphics card's own clock (and the
 time the drawing takes), so it can be compared with other solvers on the same machine at the same
@@ -246,6 +266,7 @@ cargo run --release --example bench                            # step time, wher
 cargo run --release --example viz -- game_pull_slime out.ppm   # honey, slime, slime_push, honey_push, pull, pull_slime, game_pull, game_pull_slime
 cargo run --release --example dump -- particles.bin            # a scene with a band, a puddle, a stream and lumps, as particles
 cargo run --release --example gas_preview -- close 4 fire      # pictures of the gas solver without the game: close, closecamp, fires, room, blast, runner; add "night"
+cargo run --release --example gas_pressure -- camp 4           # how far off the pressure solve is, for ways of solving it and guesses to start from: camp, fire, room, blast
 ```
 
 ## Limits
@@ -257,7 +278,10 @@ cargo run --release --example gas_preview -- close 4 fire      # pictures of the
 - The gas solver's passes have been run on the software renderers of the build machines (Vulkan
   and OpenGL) and in a browser's WebGL, where they give the same numbers as the Rust solver to
   four digits; they have never been run on a real graphics card. How fast they are there is not
-  known. The model itself is the common one for real-time smoke (velocity and pressure on a coarse
+  known. The same holds for the compute shaders (`/gaslook solver compute`), with more at stake:
+  they go round the game's graphics layer, and a mistake there that a software renderer forgives
+  can take the game down on a real driver instead of being caught. That is why they are not the
+  default. The model itself is the common one for real-time smoke (velocity and pressure on a coarse
   grid, smoke carried on a finer one): it is not a model of chemistry, of soot or of radiation.
 - Torches get a thread of smoke but no flame of gas (a torch's flame is smaller than a cell), and
   the flat flames on a burning creature are still the game's.
