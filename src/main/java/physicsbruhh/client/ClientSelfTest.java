@@ -216,7 +216,7 @@ final class ClientSelfTest {
     };
     /** Where the test keeps a block standing in this client's world although the server has long made goo of it, and until when. */
     private static final java.util.Map<BlockPos, net.minecraft.world.level.block.Block> LINGER = new java.util.HashMap<>();
-    private static int lingerUntil, bornBefore, bornByHand = -1, bornLingering = -1;
+    private static int lingerFrom, lingerUntil, lingerOver = -1, bornBefore, bornByHand = -1, bornLingering = -1;
     private static String handProblem;
     private static final StringBuilder HAND_SEEN = new StringBuilder();
 
@@ -224,9 +224,11 @@ final class ClientSelfTest {
     private static void beforeTick() {
         Minecraft mc = Minecraft.getInstance();
         if (LINGER.isEmpty() || mc.level == null) return;
+        // the blocks stay until the goo of each has arrived (however long the server's answer takes on a slow machine) and six ticks more
+        if (lingerUntil == Integer.MAX_VALUE && (GooClient.bornInsideBlock - bornBefore >= LINGER.size() || tick > lingerFrom + 200)) lingerUntil = tick + 6;
         boolean over = tick >= lingerUntil;
         for (var e : LINGER.entrySet()) mc.level.setBlock(e.getKey(), (over ? net.minecraft.world.level.block.Blocks.AIR : e.getValue()).defaultBlockState(), 18);
-        if (over) LINGER.clear();
+        if (over) { LINGER.clear(); lingerOver = tick; }
     }
 
     /** How a piece of goo that came from a block lies: x and z extent, height, and how far its middle is from the middle of its cell. */
@@ -297,7 +299,7 @@ final class ClientSelfTest {
                     bornBefore = GooClient.bornInsideBlock;
                     LINGER.put(new BlockPos(33, 200, 5), net.minecraft.world.level.block.Blocks.SLIME_BLOCK);
                     LINGER.put(new BlockPos(33, 200, 7), net.minecraft.world.level.block.Blocks.HONEY_BLOCK);
-                    lingerUntil = tick + 7;
+                    lingerFrom = tick; lingerUntil = Integer.MAX_VALUE; lingerOver = -1;
                     commands(server, "setblock 33 200 5 minecraft:slime_block", "setblock 33 200 7 minecraft:honey_block");
                     server.execute(() -> {
                         GooEvents.convert(server.overworld(), new BlockPos(33, 200, 5), 0.0F, 1.0F);
@@ -307,8 +309,9 @@ final class ClientSelfTest {
                 }
             }
             case 44 -> {
-                if (into == 26) whole(GooSim.HONEY, new BlockPos(33, 200, 7), "with its block lingering", false);
-                if (into == 46) {
+                // a second after the blocks are gone the honey must still stand as a block, and two seconds after it the slime
+                if (lingerOver >= 0 && tick == lingerOver + 20) whole(GooSim.HONEY, new BlockPos(33, 200, 7), "with its block lingering", false);
+                if (lingerOver >= 0 && tick == lingerOver + 40) {
                     whole(GooSim.SLIME, new BlockPos(33, 200, 5), "with its block lingering", false);
                     bornLingering = GooClient.bornInsideBlock - bornBefore;
                     PhysicsBruhh.LOGGER.info("CLIENTTEST by hand: {} of 8 pieces arrived while their block was still standing here, {} of 2 with the block made to linger; {}", bornByHand, bornLingering, HAND_SEEN);
