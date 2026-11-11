@@ -145,7 +145,7 @@ simulated: how it moves, how hot it is, how much smoke and unburnt fuel it carri
 - **What it looks like**: flames glow in the colour of their temperature (yellow-white where
   hottest, orange, dark red at the tips), brighter the hotter; smoke is lit by the sun and the sky,
   shaded by the smoke between it and the sun, and lit from below by the flames under it. At night
-  the fire is what lights its smoke.
+  the fire is what lights its smoke. What is seen through a flame and the hot air over it wavers.
 - **The game's own fire** is left out where the gas is drawn: the flat flames of fire blocks and
   campfires (the logs stay), the puffs of smoke over them, the puff of an explosion, the flames
   across the screen when you burn. Outside the box, and with the rule off, all of that is as ever.
@@ -243,6 +243,7 @@ cargo test --release
 cargo run --release --example bench                            # step time, where it goes, threads
 cargo run --release --example viz -- game_pull_slime out.ppm   # honey, slime, slime_push, honey_push, pull, pull_slime, game_pull, game_pull_slime
 cargo run --release --example dump -- particles.bin            # a scene with a band, a puddle, a stream and lumps, as particles
+cargo run --release --example gas_preview -- close 4 fire      # pictures of the gas solver without the game: close, closecamp, fires, room, blast, runner; add "night"
 ```
 
 ## Limits

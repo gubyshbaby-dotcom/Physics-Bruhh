@@ -138,7 +138,7 @@ jobs:
           key: debs-${{ steps.image.outputs.name }}
           restore-keys: debs-
       - name: Client smoke test (software rendering, screenshots)
-        timeout-minutes: 40
+        timeout-minutes: 55
         run: |
           # The runners' name service drops out for the package mirrors now and then, for many minutes at a time. What came
           # down once is kept (the cache above) and installed from there; the mirrors are only asked when that does not work.
@@ -191,7 +191,8 @@ jobs:
             echo "screenshots: $(ls shots/$name | wc -l)"
           }
           run_client vulkan "" ""
-          run_client oit "improvedTransparency:true\n" ""
+          # (this one also has smoke and fire on a finer grid: 6 cells to the block instead of 4)
+          run_client oit "improvedTransparency:true\n" "PHYSICSBRUHH_GAS=medium"
           run_client opengl 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1"
           # (this one also has smoke and fire computed by the Rust core instead of the graphics card)
           run_client surface "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid=false PHYSICSBRUHH_GAS_SOLVER=cpu"

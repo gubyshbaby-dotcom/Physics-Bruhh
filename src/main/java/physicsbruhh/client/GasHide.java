@@ -90,6 +90,8 @@ final class GasHide {
         }
     }
 
+    private static final Object NOTHING = new Object();
+
     /** A block's model that, where the gas draws the fire, shows another model instead (a campfire that is out), or nothing. */
     private record Hiding(BlockStateModel shown, BlockStateModel instead) implements BlockStateModel {
         @Override
@@ -107,9 +109,12 @@ final class GasHide {
             else if (instead != null) instead.collectParts(level, pos, state, random, parts);
         }
 
-        /** No key: what this model shows depends on more than the block. */
+        /** What this model shows depends on where it is: the key is that of whichever model it shows there. */
         @Override
-        public Object createGeometryKey(BlockAndTintGetter level, BlockPos pos, BlockState state, RandomSource random) { return null; }
+        public Object createGeometryKey(BlockAndTintGetter level, BlockPos pos, BlockState state, RandomSource random) {
+            if (!GasHide.hides(pos)) return shown.createGeometryKey(level, pos, state, random);
+            return instead == null ? NOTHING : instead.createGeometryKey(level, pos, state, random);
+        }
 
         @Override
         public Material.Baked particleMaterial(BlockAndTintGetter level, BlockPos pos, BlockState state) { return shown.particleMaterial(level, pos, state); }
@@ -133,12 +138,14 @@ final class GasHide {
             if (resources == null) throw new IllegalStateException("the event does not hold the game's particles");
             Map<Identifier, ParticleProvider<?>> providers = resources.getProviders();
             int wrapped = 0;
-            for (ParticleType<?> type : List.of(ParticleTypes.CAMPFIRE_COSY_SMOKE, ParticleTypes.CAMPFIRE_SIGNAL_SMOKE, ParticleTypes.LARGE_SMOKE, ParticleTypes.EXPLOSION, ParticleTypes.EXPLOSION_EMITTER)) {
+            for (ParticleType<?> type : List.of(ParticleTypes.CAMPFIRE_COSY_SMOKE, ParticleTypes.CAMPFIRE_SIGNAL_SMOKE, ParticleTypes.LARGE_SMOKE, ParticleTypes.EXPLOSION, ParticleTypes.EXPLOSION_EMITTER, ParticleTypes.POOF)) {
                 Identifier id = BuiltInRegistries.PARTICLE_TYPE.getKey(type);
                 final ParticleProvider usual = providers.get(id);
                 if (usual == null) continue;
+                // the white puffs are many things' (a creature dying, too): they are only left out where an explosion has just gone off
+                final boolean ofBlast = type == ParticleTypes.POOF;
                 providers.put(id, (ParticleProvider) (options, level, x, y, z, xa, ya, za, random) -> {
-                    if (GasClient.draws(x, y, z)) { particlesLeftOut++; return null; }
+                    if (ofBlast ? GasClient.blastAt(x, y, z) : GasClient.draws(x, y, z)) { particlesLeftOut++; return null; }
                     return usual.createParticle(options, level, x, y, z, xa, ya, za, random);
                 });
                 wrapped++;

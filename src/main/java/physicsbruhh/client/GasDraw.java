@@ -45,7 +45,9 @@ import physicsbruhh.sim.GasParams;
  *       steps over empty blocks; the game reads the sums back now and then);</li>
  *   <li>every frame, at half the screen's size: along the line of sight of each pixel, the light
  *       the gas adds and how much of what is behind it still shows;</li>
- *   <li>that, put into the picture.</li>
+ *   <li>at a quarter of the screen's size: how much hot gas lies along each line of sight;</li>
+ *   <li>all that put into the picture: what is behind, shifted a little where it is seen through
+ *       hot gas, dimmed by the smoke, plus the gas's own light.</li>
  * </ol>
  */
 final class GasDraw {
@@ -63,41 +65,51 @@ final class GasDraw {
         return builder.build();
     }
 
-    private static RenderPipeline march(String name, boolean coded) {
+    /** A pass over the screen that looks through the box along each pixel's line of sight. */
+    private static RenderPipeline along(String name, String fragment, boolean coded, GpuFormat format, String... textures) {
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "pipeline/" + name))
                 .withVertexShader("core/screenquad")
-                .withFragmentShader(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "core/gas_march"))
+                .withFragmentShader(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "core/" + fragment))
                 .withBindGroupLayout(BindGroupLayouts.PROJECTION)
                 .withBindGroupLayout(GRID)
                 .withBindGroupLayout(VIEW)
-                .withBindGroupLayout(GasGpu.samplers("SceneDepthSampler", "GasSampler", "InfoSampler", "LightSampler"))
+                .withBindGroupLayout(GasGpu.samplers(textures))
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
-                .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA16_FLOAT, ColorTargetState.WRITE_ALL));
+                .withColorTargetState(new ColorTargetState(Optional.empty(), format, ColorTargetState.WRITE_ALL));
         if (coded) builder.withShaderDefine("CODED");
         return builder.build();
+    }
+
+    private static RenderPipeline march(String name, boolean coded) {
+        return along(name, "gas_march", coded, GpuFormat.RGBA16_FLOAT, "SceneDepthSampler", "GasSampler", "InfoSampler", "LightSampler");
+    }
+
+    private static RenderPipeline haze(String name, boolean coded) {
+        return along(name, "gas_haze", coded, GpuFormat.R16_FLOAT, "SceneDepthSampler", "GasSampler", "InfoSampler");
     }
 
     /** The grid as the graphics card's solver leaves it, and as the processor's hands it over (bytes: CODED). */
     private static final RenderPipeline WHERE = where("gas_where", false), WHERE_CODED = where("gas_where_coded", true);
     private static final RenderPipeline MARCH = march("gas_march", false), MARCH_CODED = march("gas_march_coded", true);
+    private static final RenderPipeline HAZE = haze("gas_haze", false), HAZE_CODED = haze("gas_haze_coded", true);
     /** What is behind (a copy of the picture so far), dimmed by how much the gas lets through, plus the gas's own light. */
     private static final RenderPipeline SHOW = RenderPipeline.builder()
             .withLocation(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "pipeline/gas_show"))
             .withVertexShader("core/screenquad")
             .withFragmentShader(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "core/gas_show"))
-            .withBindGroupLayout(GasGpu.samplers("InSampler", "SceneSampler"))
+            .withBindGroupLayout(GasGpu.samplers("InSampler", "HazeSampler", "SceneSampler"))
             .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
             .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
             .build();
-    private static final RenderPipeline[] ALL = { WHERE, WHERE_CODED, MARCH, MARCH_CODED, SHOW };
+    private static final RenderPipeline[] ALL = { WHERE, WHERE_CODED, MARCH, MARCH_CODED, HAZE, HAZE_CODED, SHOW };
 
     static void register(RegisterRenderPipelinesEvent event) {
         for (RenderPipeline pipeline : ALL) event.registerOptionalPipeline(pipeline);
     }
 
     static boolean available(boolean coded) {
-        for (RenderPipeline pipeline : new RenderPipeline[] { coded ? WHERE_CODED : WHERE, coded ? MARCH_CODED : MARCH, SHOW }) {
+        for (RenderPipeline pipeline : new RenderPipeline[] { coded ? WHERE_CODED : WHERE, coded ? MARCH_CODED : MARCH, coded ? HAZE_CODED : HAZE, SHOW }) {
             var compiled = RenderSystem.getCompiledPipelineNullable(pipeline);
             if (compiled == null || compiled.isClosed()) return false;
         }
@@ -107,7 +119,7 @@ final class GasDraw {
     private GasDraw() {}
 
     private static MappableRingBuffer gridBuffer, viewBuffer;
-    private static TextureTarget info, light, scene;
+    private static TextureTarget info, light, shimmer, scene;
     private static GasBox infoBox;
     private static GpuTexture worldTexture;
     private static GpuTextureView worldView;
@@ -236,6 +248,11 @@ final class GasDraw {
             if (light != null) light.destroyBuffers();
             light = new TextureTarget("Gas: light along each line of sight", width, height, GpuFormat.RGBA16_FLOAT, null);
         }
+        int quarterWidth = Math.max(1, main.width / 4), quarterHeight = Math.max(1, main.height / 4);
+        if (shimmer == null || shimmer.width != quarterWidth || shimmer.height != quarterHeight) {
+            if (shimmer != null) shimmer.destroyBuffers();
+            shimmer = new TextureTarget("Gas: hot gas along each line of sight", quarterWidth, quarterHeight, GpuFormat.R16_FLOAT, null);
+        }
         if (scene == null || scene.width != main.width || scene.height != main.height) {
             if (scene != null) scene.destroyBuffers();
             scene = new TextureTarget("Gas: the picture behind", main.width, main.height, GpuFormat.RGBA8_UNORM, null);
@@ -253,11 +270,22 @@ final class GasDraw {
             pass.setUniform("LightSampler", world, linear);
             pass.draw(3, 1, 0, 0);
         }
+        try (RenderPass pass = encoder.createRenderPass(() -> "Gas: hot gas along each line of sight", shimmer.getColorTextureView(), Optional.empty())) {
+            pass.setPipeline(GasGpu.compiled(coded ? HAZE_CODED : HAZE));
+            pass.setUniform("Projection", projection);
+            pass.setUniform("GasGrid", grid);
+            pass.setUniform("GasView", view);
+            pass.setUniform("SceneDepthSampler", mainDepth, nearest);
+            pass.setUniform("GasSampler", gas, linear);
+            pass.setUniform("InfoSampler", info.getColorTextureView(), nearest);
+            pass.draw(3, 1, 0, 0);
+        }
         scene.copyColorFrom(main);
         try (RenderPass pass = encoder.createRenderPass(() -> "Gas", mainColor, Optional.empty())) {
             pass.setPipeline(GasGpu.compiled(SHOW));
             pass.setUniform("InSampler", light.getColorTextureView(), linear);
-            pass.setUniform("SceneSampler", scene.getColorTextureView(), nearest);
+            pass.setUniform("HazeSampler", shimmer.getColorTextureView(), linear);
+            pass.setUniform("SceneSampler", scene.getColorTextureView(), linear);
             pass.draw(3, 1, 0, 0);
         }
         drawn++;
@@ -315,7 +343,8 @@ final class GasDraw {
         if (info != null) info.destroyBuffers();
         if (light != null) light.destroyBuffers();
         if (scene != null) scene.destroyBuffers();
-        info = null; light = null; scene = null; infoBox = null;
+        if (shimmer != null) shimmer.destroyBuffers();
+        info = null; light = null; scene = null; shimmer = null; infoBox = null;
         closeWorld();
         if (readBuffer != null && !reading) { readBuffer.close(); readBuffer = null; }
         sums = new float[0];

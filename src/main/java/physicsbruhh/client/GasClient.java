@@ -117,7 +117,19 @@ final class GasClient {
         ruleOn = state.on();
     }
 
+    private static volatile double lastBlastX, lastBlastY, lastBlastZ;
+    private static volatile float lastBlastPower;
+    private static volatile long lastBlast;
+
+    /** Whether an explosion has just gone off about here, and the gas is drawing it: the game's own white puffs of it are then left out. */
+    static boolean blastAt(double x, double y, double z) {
+        if (!draws(x, y, z) || System.nanoTime() - lastBlast > 1_500_000_000L) return false;
+        double dx = x - lastBlastX, dy = y - lastBlastY, dz = z - lastBlastZ, reach = 3.0 + 2.0 * lastBlastPower;
+        return dx * dx + dy * dy + dz * dz < reach * reach;
+    }
+
     static void onBlast(GasRules.Blast blast) {
+        lastBlastX = blast.x(); lastBlastY = blast.y(); lastBlastZ = blast.z(); lastBlastPower = blast.power(); lastBlast = System.nanoTime();
         synchronized (BLASTS) {
             if (BLASTS.size() < 8) BLASTS.add(new Blast(blast.x(), blast.y(), blast.z(), blast.power(), System.nanoTime()));
         }
@@ -367,6 +379,7 @@ final class GasClient {
 
     private static void frame(Minecraft mc, RenderLevelStageEvent.AfterLevel event) {
         boolean onCard = useGpu();
+        if (gpu == null && cpu == null && !alive()) return; // nothing burns here: nothing to set up yet
         if (onCard && gpu == null && box.same(quality.box())) {
             if (cpu != null) { cpu.close(); cpu = null; }
             gpu = new GasGpu(box);
@@ -515,7 +528,8 @@ final class GasClient {
     }
 
     static void load() {
-        String fine = System.getProperty("physicsbruhh.gas"), by = System.getProperty("physicsbruhh.gas.solver", System.getenv("PHYSICSBRUHH_GAS_SOLVER"));
+        String fine = System.getenv("PHYSICSBRUHH_GAS") != null ? System.getenv("PHYSICSBRUHH_GAS") : System.getProperty("physicsbruhh.gas");
+        String by = System.getProperty("physicsbruhh.gas.solver", System.getenv("PHYSICSBRUHH_GAS_SOLVER"));
         try {
             Path file = file();
             if (Files.exists(file)) {

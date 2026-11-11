@@ -22,7 +22,7 @@ layout(location = 0) in vec2 texCoord;
 layout(location = 0) out vec4 fragColor;
 
 // Steps along the ray, in fine cells.
-const float STRIDE = 0.75;
+const float STRIDE = 0.6;
 
 vec4 gasHere(vec3 blocks, float fpb) {
     return gasValue(gasAt(GasSampler, GasFine, blocks * fpb));
