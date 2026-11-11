@@ -561,10 +561,34 @@ public final class JavaSim implements GooSim {
 
     private final float[] tq = new float[3], tp = new float[3];
 
-    /** Returns the face axis that pushed the particle out, or 3 if the box was not touched. */
     /** What a box is, as far as pushing goo out of it goes: a block; a piston part (carries goo on its leading face); a creature (never presses goo downwards). */
     private static final int BLOCK = 0, PISTON = 1, CREATURE = 2;
+    /**
+     * Furthest a particle that finds itself inside a block is moved towards the way out in one step
+     * (2.4 blocks a second). A block that turns up where goo is squeezes the goo out of itself; it
+     * does not fire it out, which is what putting every particle on the nearest face at once did.
+     */
+    private static final float EJECT = 0.04f;
+    /** What {@link #resolveBox} returns for a particle that is inside a block and on its way out of it. */
+    private static final int LEAVING = 4;
 
+    /** Whether the point lies inside a block. A box is listed in every cell it lies in, so the point's own cell is enough. */
+    private boolean solid(float px, float py, float pz) {
+        int c0 = ifloor(px) - stOrg[0], c1 = ifloor(py) - stOrg[1], c2 = ifloor(pz) - stOrg[2];
+        if (c0 < 0 || c1 < 0 || c2 < 0 || c0 >= stDim[0] || c1 >= stDim[1] || c2 >= stDim[2]) return false;
+        int ci = c0 + stDim[0] * (c1 + stDim[1] * c2);
+        for (int k = stStart[ci]; k < stStart[ci + 1]; k++) {
+            int o = stItems[k] * 7;
+            if (px > st[o] && px < st[o + 3] && py > st[o + 1] && py < st[o + 4] && pz > st[o + 2] && pz < st[o + 5]) return true;
+        }
+        return false;
+    }
+
+    private boolean solidBeyond(float[] bq, int a, float at) {
+        return solid(a == 0 ? at : bq[0], a == 1 ? at : bq[1], a == 2 ? at : bq[2]);
+    }
+
+    /** Returns the axis of the face the particle was put on, 3 if the box was not touched, {@link #LEAVING} if it is still inside a block. */
     private int resolveBox(float[] bq, float[] bp, float n0, float n1, float n2, float x0, float x1, float x2, float pn0, float pn1, float pn2, float px0, float px1, float px2, int front, int kind) {
         float best = Float.MAX_VALUE; int ba = 3; boolean hi = false;
         for (int a = 0; a < 3; a++) {
@@ -596,10 +620,33 @@ public final class JavaSim implements GooSim {
                     float penLo = bq[a] - (mn - rc); if (penLo < best && !(kind == CREATURE && a == 1)) { best = penLo; ba = a; hi = false; }
                     float penHi = (mx + rc) - bq[a]; if (penHi < best) { best = penHi; ba = a; hi = true; }
                 }
+                if (kind == BLOCK) {
+                    // ... of a block: the nearest face with open space beyond it. The way out of a block that
+                    // stands on the floor is not down into the floor, where the floor would send it straight back.
+                    float mn = ba == 0 ? n0 : ba == 1 ? n1 : n2, mx = ba == 0 ? x0 : ba == 1 ? x1 : x2;
+                    if (solidBeyond(bq, ba, hi ? mx + 1.5f * rc : mn - 1.5f * rc)) {
+                        float open = Float.MAX_VALUE; int oa = 3; boolean oh = false;
+                        for (int a = 0; a < 3; a++) for (int side = 0; side < 2; side++) {
+                            boolean up = side == 1;
+                            float amn = a == 0 ? n0 : a == 1 ? n1 : n2, amx = a == 0 ? x0 : a == 1 ? x1 : x2;
+                            float pen = up ? (amx + rc) - bq[a] : bq[a] - (amn - rc);
+                            if (pen >= open) continue;
+                            if (!solidBeyond(bq, a, up ? amx + 1.5f * rc : amn - 1.5f * rc)) { open = pen; oa = a; oh = up; }
+                        }
+                        if (oa < 3) { ba = oa; hi = oh; } // walled in on every side: the nearest face after all
+                    }
+                }
             } // else: a block being pushed carries it along on its leading face
         }
         float mn = ba == 0 ? n0 : ba == 1 ? n1 : n2, mx = ba == 0 ? x0 : ba == 1 ? x1 : x2;
-        bq[ba] = hi ? mx + rc : mn - rc;
+        float face = hi ? mx + rc : mn - rc;
+        if (kind == BLOCK) {
+            // out of a block at a walk: at least EJECT further than where the step began, never past the face
+            bq[ba] = hi ? Math.min(face, Math.max(bp[ba] + EJECT, bq[ba])) : Math.max(face, Math.min(bp[ba] - EJECT, bq[ba]));
+            if (bq[ba] != face) return LEAVING;
+        } else {
+            bq[ba] = face;
+        }
         return ba;
     }
 
@@ -607,6 +654,7 @@ public final class JavaSim implements GooSim {
         int o = i * 3;
         tq[0] = q[o]; tq[1] = q[o + 1]; tq[2] = q[o + 2]; tp[0] = p[o]; tp[1] = p[o + 1]; tp[2] = p[o + 2];
         int hit = 0, hitId = 0, hitAxis = 3; float hitStick = 0f, hm0 = 0f, hm1 = 0f, hm2 = 0f;
+        boolean leaving = false; // inside a block and on its way out: it has touched something, but that is no place to stick
         if (stCount > 0) {
             int ax0 = ifloor(tq[0] - rc) - stOrg[0], ax1 = ifloor(tq[0] + rc) - stOrg[0], ay0 = ifloor(tq[1] - rc) - stOrg[1], ay1 = ifloor(tq[1] + rc) - stOrg[1], az0 = ifloor(tq[2] - rc) - stOrg[2], az1 = ifloor(tq[2] + rc) - stOrg[2];
             boolean inside = !(ax1 < 0 || ax0 >= stDim[0] || ay1 < 0 || ay0 >= stDim[1] || az1 < 0 || az0 >= stDim[2]);
@@ -617,7 +665,7 @@ public final class JavaSim implements GooSim {
                     for (int k = stStart[ci]; k < stStart[ci + 1]; k++) {
                         int b = stItems[k] * 7;
                         int ax = resolveBox(tq, tp, st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], st[b], st[b + 1], st[b + 2], st[b + 3], st[b + 4], st[b + 5], 0, BLOCK);
-                        if (ax < 3) { hit = 1; hitStick = st[b + 6]; hitAxis = ax; }
+                        if (ax < 3) { hit = 1; hitStick = st[b + 6]; hitAxis = ax; } else if (ax == LEAVING) leaving = true;
                     }
                 }
             }
@@ -627,8 +675,8 @@ public final class JavaSim implements GooSim {
             if (ax < 3) { hit = 2; hitId = b.id; hitStick = b.stick; hm0 = b.min[0]; hm1 = b.min[1]; hm2 = b.min[2]; hitAxis = ax; }
         }
         q[o] = tq[0]; q[o + 1] = tq[1]; q[o + 2] = tq[2];
-        if (hit != 0) fly[i] = 0; // it has touched something: no longer in free flight
-        if (hit != 0 && ancKind[i] == 0 && ancCool[i] <= 0f && hitStick > 0f && rho[i] < 1.25f * rho0) {
+        if (hit != 0 || leaving) fly[i] = 0; // it has touched something: no longer in free flight
+        if (hit != 0 && !leaving && ancKind[i] == 0 && ancCool[i] <= 0f && hitStick > 0f && rho[i] < 1.25f * rho0) {
             ancKind[i] = (byte) hit; ancId[i] = hitId; ancStick[i] = hitStick; ancAxis[i] = (byte) hitAxis;
             ancPt[o] = tq[0]; ancPt[o + 1] = tq[1]; ancPt[o + 2] = tq[2];
             ancLoc[o] = tq[0] - hm0; ancLoc[o + 1] = tq[1] - hm1; ancLoc[o + 2] = tq[2] - hm2;

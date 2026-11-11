@@ -182,6 +182,136 @@ final class ClientSelfTest {
             case 25 -> {
                 if (tick >= stepTick + 30) step(27);
             }
+            default -> {
+                // ---- blocks put down by hand, the way a player builds: in the open, at the feet, against a wall, in a pit, next to and on top of other goo
+                stage("by hand: slime blocks in every sort of place");
+                commands(server, "goo clear", "gamemode creative @a", "clear @a",
+                        "fill 26 198 0 34 199 8 minecraft:grass_block", "fill 26 200 0 34 204 8 minecraft:air",
+                        "fill 32 200 1 32 201 3 minecraft:stone", "fill 27 200 2 27 201 2 minecraft:stone",
+                        "setblock 29 199 6 minecraft:air",
+                        "fill 30 200 -2 30 202 -2 minecraft:oak_planks",
+                        "item replace entity @a weapon.mainhand with minecraft:slime_block 16", "tp @a 29.5 200 3.5 0 40");
+                step(40);
+            }
+        }
+    }
+
+    /** One block put down by hand: when (ticks into its stage), the point clicked, on which face of which block, and the cell the new block takes. */
+    private record Put(int at, Vec3 hit, net.minecraft.core.Direction face, BlockPos on, BlockPos cell, String where) {}
+
+    private static final net.minecraft.core.Direction UP = net.minecraft.core.Direction.UP;
+    private static final Put[] SLIME_PUTS = {
+        new Put(0, new Vec3(30.5, 200.0, 5.5), UP, new BlockPos(30, 199, 5), new BlockPos(30, 200, 5), "on open ground"),
+        new Put(5, new Vec3(29.5, 200.0, 2.5), UP, new BlockPos(29, 199, 2), new BlockPos(29, 200, 2), "at the player's feet"),
+        new Put(10, new Vec3(32.0, 200.5, 2.5), net.minecraft.core.Direction.WEST, new BlockPos(32, 200, 2), new BlockPos(31, 200, 2), "against a wall"),
+        new Put(15, new Vec3(29.5, 199.0, 6.5), UP, new BlockPos(29, 198, 6), new BlockPos(29, 199, 6), "in a pit"),
+        new Put(20, new Vec3(28.5, 200.0, 2.5), UP, new BlockPos(28, 199, 2), new BlockPos(28, 200, 2), "between a post and other slime"),
+        new Put(45, new Vec3(28.0, 201.5, 2.5), net.minecraft.core.Direction.EAST, new BlockPos(27, 201, 2), new BlockPos(28, 201, 2), "on top of other slime"),
+    };
+    private static final Put[] HONEY_PUTS = {
+        new Put(0, new Vec3(27.5, 200.0, 5.5), UP, new BlockPos(27, 199, 5), new BlockPos(27, 200, 5), "on open ground"),
+        new Put(12, new Vec3(27.5, 200.0, 6.5), UP, new BlockPos(27, 199, 6), new BlockPos(27, 200, 6), "next to fresh honey"),
+    };
+    /** Where the test keeps a block standing in this client's world although the server has long made goo of it, and until when. */
+    private static final java.util.Map<BlockPos, net.minecraft.world.level.block.Block> LINGER = new java.util.HashMap<>();
+    private static int lingerUntil, bornBefore, bornByHand = -1, bornLingering = -1;
+    private static String handProblem;
+    private static final StringBuilder HAND_SEEN = new StringBuilder();
+
+    /** Before the mod's own tick: the lingering blocks are (still) there when it looks. */
+    private static void beforeTick() {
+        Minecraft mc = Minecraft.getInstance();
+        if (LINGER.isEmpty() || mc.level == null) return;
+        boolean over = tick >= lingerUntil;
+        for (var e : LINGER.entrySet()) mc.level.setBlock(e.getKey(), (over ? net.minecraft.world.level.block.Blocks.AIR : e.getValue()).defaultBlockState(), 18);
+        if (over) LINGER.clear();
+    }
+
+    /** How a piece of goo that came from a block lies: x and z extent, height, and how far its middle is from the middle of its cell. */
+    private static double[] lies(int material, BlockPos cell) {
+        double[] b = GooClient.boundsAt(material, cell);
+        if (b == null) return null;
+        return new double[] { b[3] - b[0], b[5] - b[2], b[4] - b[1], Math.max(Math.abs((b[0] + b[3]) / 2 - cell.getX() - 0.5), Math.abs((b[2] + b[5]) / 2 - cell.getZ() - 0.5)) };
+    }
+
+    /** Checks one piece: slime is still a cube where it was put, fresh honey still stands as a block. */
+    private static void whole(int material, BlockPos cell, String where, boolean loose) {
+        double[] l = lies(material, cell);
+        String kind = material == GooSim.SLIME ? "slime" : "honey";
+        String seen = l == null ? "no goo there" : String.format(java.util.Locale.ROOT, "%.2f x %.2f wide, %.2f high, %.2f off its cell", l[0], l[1], l[2], l[3]);
+        HAND_SEEN.append(kind).append(' ').append(where).append(": ").append(seen).append("; ");
+        boolean ok;
+        if (l == null) ok = false;
+        else if (material == GooSim.SLIME) ok = loose ? l[0] <= 1.45 && l[1] <= 1.45 && l[2] >= 0.5 && l[2] <= 1.2 : l[0] <= 1.25 && l[1] <= 1.25 && l[2] >= 0.6 && l[2] <= 1.15 && l[3] <= 0.35;
+        else ok = l[0] <= 1.9 && l[1] <= 1.9 && l[2] >= 0.55;
+        if (!ok && handProblem == null) handProblem = "a block of " + kind + " put down " + where + " did not stay in one piece (" + seen + ")";
+    }
+
+    private static void put(Minecraft mc, Put p) {
+        mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, new net.minecraft.world.phys.BlockHitResult(p.hit(), p.face(), p.on(), false));
+    }
+
+    /** Blocks put down by hand in every sort of place, then two that are made to linger in this client's world after they have turned into goo. */
+    private static void byHand(Minecraft mc, MinecraftServer server) {
+        var held = mc.player.getMainHandItem();
+        boolean late = tick > stepTick + 200;
+        int into = tick - stepTick - 1; // ticks since the first one of this step
+        switch (step) {
+            case 40 -> { // the place is built, the player stands in it with slime blocks in hand
+                boolean built = mc.level.getBlockState(new BlockPos(32, 201, 2)).is(net.minecraft.world.level.block.Blocks.STONE) && mc.level.getBlockState(new BlockPos(29, 199, 6)).isAir()
+                        && mc.level.getBlockState(new BlockPos(29, 198, 6)).is(net.minecraft.world.level.block.Blocks.GRASS_BLOCK);
+                if (into > 10 && built && held.is(Items.SLIME_BLOCK) && standsAt(mc, 29.5, 3.5)) { bornBefore = GooClient.bornInsideBlock; step(41); }
+                else if (late) { handProblem = "the place for putting blocks down by hand was never ready"; step(46); }
+            }
+            case 41 -> { // six slime blocks, a few ticks apart; two seconds after the last one they must all be cubes still
+                for (Put p : SLIME_PUTS) if (p.at() == into) put(mc, p);
+                if (into == SLIME_PUTS[SLIME_PUTS.length - 1].at() + 40) {
+                    for (Put p : SLIME_PUTS) whole(GooSim.SLIME, p.cell(), p.where(), p.cell().getY() == 201);
+                    stage("by hand: honey blocks");
+                    commands(server, "item replace entity @a weapon.mainhand with minecraft:honey_block 16");
+                    step(42);
+                }
+            }
+            case 42 -> {
+                if (into > 5 && held.is(Items.HONEY_BLOCK)) step(43);
+                else if (late) { handProblem = "the player never got honey blocks in hand"; step(46); }
+            }
+            case 43 -> { // two honey blocks side by side; a second after each it must still stand as a block
+                for (Put p : HONEY_PUTS) {
+                    if (p.at() == into) put(mc, p);
+                    if (p.at() + 20 == into) whole(GooSim.HONEY, p.cell(), p.where(), false);
+                }
+                if (into == HONEY_PUTS[HONEY_PUTS.length - 1].at() + 2) commands(server, "tp @a 30.5 203 -1.5 0 50");
+                if (into == HONEY_PUTS[HONEY_PUTS.length - 1].at() + 21) {
+                    bornByHand = GooClient.bornInsideBlock - bornBefore;
+                    // Whether the block is still there when its goo arrives is a matter of a few milliseconds between the server's
+                    // tick and this client's. So once more with the block made to stay: six ticks after the goo is already there.
+                    stage("by hand: a block that lingers where its goo already is");
+                    bornBefore = GooClient.bornInsideBlock;
+                    LINGER.put(new BlockPos(33, 200, 5), net.minecraft.world.level.block.Blocks.SLIME_BLOCK);
+                    LINGER.put(new BlockPos(33, 200, 7), net.minecraft.world.level.block.Blocks.HONEY_BLOCK);
+                    lingerUntil = tick + 7;
+                    commands(server, "setblock 33 200 5 minecraft:slime_block", "setblock 33 200 7 minecraft:honey_block");
+                    server.execute(() -> {
+                        GooEvents.convert(server.overworld(), new BlockPos(33, 200, 5), 0.0F, 1.0F);
+                        GooEvents.convert(server.overworld(), new BlockPos(33, 200, 7), 0.0F, 1.0F);
+                    });
+                    step(44);
+                }
+            }
+            case 44 -> {
+                if (into == 26) whole(GooSim.HONEY, new BlockPos(33, 200, 7), "with its block lingering", false);
+                if (into == 46) {
+                    whole(GooSim.SLIME, new BlockPos(33, 200, 5), "with its block lingering", false);
+                    bornLingering = GooClient.bornInsideBlock - bornBefore;
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST by hand: {} of 8 pieces arrived while their block was still standing here, {} of 2 with the block made to linger; {}", bornByHand, bornLingering, HAND_SEEN);
+                    if (bornLingering != 2 && handProblem == null) handProblem = "the test did not manage to keep a block standing where its goo arrived (" + bornLingering + " of 2)";
+                    step(45);
+                }
+            }
+            case 45 -> {
+                if (into >= 30) step(46);
+            }
             default -> step(9);
         }
     }
@@ -203,6 +333,7 @@ final class ClientSelfTest {
     static void register() {
         if (!Boolean.getBoolean("physicsbruhh.clienttest")) return;
         PhysicsBruhh.LOGGER.info("CLIENTTEST enabled");
+        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Pre e) -> beforeTick());
         NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> run());
     }
 
@@ -361,6 +492,8 @@ final class ClientSelfTest {
                 step(1);
             } else if (step > 0 && step < 9) {
                 hands(mc, server);
+            } else if (step >= 40) {
+                byHand(mc, server);
             } else if (step >= 20) {
                 thickness(mc, server);
             } else if (step == 9 && tick == stepTick + 5) {
@@ -395,6 +528,8 @@ final class ClientSelfTest {
                 else if (!pouredBack || honeyAfterPour != 2 * GooSim.BOTTLE) problem = "a honey bottle used while sneaking was not poured out (" + honeyAfterBottle + " -> " + honeyAfterPour + ")";
                 else if (Math.abs(honeySimulated - honeyAfterPour) > 60) problem = "the simulated honey did not follow the markers (" + honeySimulated + " particles, the markers say " + honeyAfterPour + ")";
                 else if (!thrown) problem = "a slime ball was not thrown";
+                else if (handProblem != null) problem = handProblem;
+                else if (bornLingering < 0) problem = "the blocks put down by hand were never looked at";
                 else if (!wheelTurned) problem = "sneaking and turning the wheel did not change the thickness of the block in hand";
                 else if (!placedThick) problem = "the thick block placed by hand did not become thick goo";
                 else if (!thicknessShows) problem = "thin, usual and thick goo did not come out different (" + thicknessSeen + ")";

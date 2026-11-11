@@ -35,6 +35,8 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 - Sneak and use a honey bottle to pour it out where you look (the bottle stays); use a slime
   ball to throw it as a lump of slime. Goo that lands on goo of its kind joins it, up to a block's
   worth per piece: four bottles of honey or nine slime balls punched afterwards give the block.
+- A solid block placed where goo lies squeezes the goo out of itself, sideways and upwards, over a
+  fraction of a second. (A honey or slime block placed there turns into goo itself.)
 - A stream of honey is not a smooth rod: it starts as a thread, swells, wavers from side to side,
   comes in thicker and thinner gulps and thins out to a thread again before it breaks off. No two
   streams are alike.
@@ -160,7 +162,10 @@ the `physicsbruhh-jar` artifact:
    others move, stands a pig in the slime, walks the player into honey and drops them onto slime,
    lets dispensers pour honey bottles and shoot slime balls, fills a bottle from the puddle, pours
    it out again and throws a slime ball, sneaks and turns the wheel on a block of honey, places
-   it and compares it with thin and usual honey and with thin and thick slime, and saves
+   it and compares it with thin and usual honey and with thin and thick slime, puts slime and
+   honey blocks down by hand the way a player builds (in the open, at the feet, against a wall,
+   in a pit, next to and on top of other goo) and checks that each stays in one piece, also when
+   the block is made to linger in the client's world after its goo has arrived, and saves
    screenshots (artifact `clienttest`; a commit message containing `[shots]` also prints them
    into the log as text).
 

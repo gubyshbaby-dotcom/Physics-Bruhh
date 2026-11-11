@@ -88,6 +88,20 @@ public final class GooClient {
     static volatile boolean clearLook;
     /** Cells of bodies added this tick: their surroundings are scanned at once, so they never spend a tick without a floor. */
     private static final List<BlockPos> NEW_CELLS = new ArrayList<>();
+    /**
+     * Cells where a block has just turned into goo, and what goo. The block itself may still be there
+     * in this game's own picture of the world: a block placed by hand is put there by the client at
+     * once, on its own guess, the goo arrives as soon as the server has made it, and the word that the
+     * block is gone only comes with the server's next round of block changes, a tick later. Scanned as
+     * a block, it would be a solid cube exactly where the new goo is, and the goo would be thrown out
+     * of it through all six faces. So until it has been seen gone it is not a collider.
+     */
+    private record Born(int material, int until) {}
+    private static final Long2ObjectOpenHashMap<Born> BORN = new Long2ObjectOpenHashMap<>();
+    /** Client ticks a block goo came from may linger before it counts as a real block after all (ten seconds: lag). */
+    private static final int BORN_GRACE = 200;
+    /** How many pieces of goo have arrived while the block they came from was still standing in this client's world (smoke test). */
+    static volatile int bornInsideBlock;
     /** The local player's box, widened a little (relative to {@link #origin}), and how much goo is in it: honey in the low 16 bits, slime above. */
     private static volatile float[] probeBox;
     private static volatile int probeResult;
@@ -129,7 +143,7 @@ public final class GooClient {
         sim = null;
         if (s != null) s.close();
         COMMANDS.clear(); COLLIDERS.set(null); SLOT_OF_ENTITY.clear(); PENDING.clear();
-        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); TOLD.clear(); clearLook = false; NEW_CELLS.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
+        bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); TOLD.clear(); clearLook = false; NEW_CELLS.clear(); BORN.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         PART_IDS.clear(); HEADS.clear();
         synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
@@ -178,7 +192,10 @@ public final class GooClient {
         for (GooEntity goo : LIVE.values()) { if (goo.clear()) { clear = true; break; } }
         clearLook = clear;
         wantParticles = clear && GooFluid.inUse();
-        if (!PENDING.isEmpty()) {
+        // What this tick has to tell the simulation is held back until the colliders it scanned are out: goo must not be
+        // simulated for even one step against colliders from before it existed, which may hold the block it came from.
+        List<Runnable> orders = new ArrayList<>();
+        if (!PENDING.isEmpty() && !paused) {
             if (sim == null) start();
             for (GooEntity goo : PENDING) {
                 if (goo.isRemoved()) continue;
@@ -186,6 +203,10 @@ public final class GooClient {
                 if (KNOWN.isEmpty()) origin = cell; // rebase so local coordinates stay small
                 KNOWN.add(goo.getId());
                 NEW_CELLS.add(cell);
+                if (!goo.poured()) {
+                    BORN.put(cell.asLong(), new Born(goo.material(), scanTick + BORN_GRACE));
+                    if (level.getBlockState(cell).is(sourceBlock(goo.material()))) bornInsideBlock++;
+                }
                 BlockPos o = origin;
                 final int id = goo.getId(), mat = goo.material();
                 final float x = cell.getX() - o.getX(), y = cell.getY() - o.getY(), z = cell.getZ() - o.getZ();
@@ -196,7 +217,7 @@ public final class GooClient {
                 final float thick = goo.thick();
                 final int how = !goo.poured() ? 0 : goo.spawnAgeTicks() <= 2 ? 1 : 2;
                 TOLD.put(id, how == 0 ? GooSim.BLOCK : how == 1 ? 0 : amount);
-                COMMANDS.add(() -> {
+                orders.add(() -> {
                     GooSim s = sim;
                     if (s == null) return;
                     s.setKillY(killY);
@@ -219,7 +240,7 @@ public final class GooClient {
             final float vx = goo.push().x(), vy = goo.push().y(), vz = goo.push().z();
             final boolean lump = goo.lump();
             NEW_CELLS.add(BlockPos.containing(spot));
-            COMMANDS.add(() -> {
+            orders.add(() -> {
                 GooSim s = sim;
                 Integer slot = SLOT_OF_ENTITY.get(id);
                 if (s == null || slot == null) return;
@@ -241,6 +262,7 @@ public final class GooClient {
                 probeBox = null; probeResult = 0;
             }
         }
+        COMMANDS.addAll(orders);
         if (LOCKSTEP && sim != null && running && !paused) {
             STEP_DONE.drainPermits();
             STEP_REQUEST.release();
@@ -319,6 +341,13 @@ public final class GooClient {
                 boolean inner = x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1;
                 if (inner && !seen.add(pos.asLong())) continue;
                 BlockState state = level.getBlockState(pos);
+                if (!BORN.isEmpty()) {
+                    Born born = BORN.get(pos.asLong());
+                    if (born != null) {
+                        if (scanTick < born.until() && state.is(sourceBlock(born.material()))) continue; // still standing where its goo already is
+                        BORN.remove(pos.asLong()); // seen gone (or it has stood there too long to be that block): from now on a block here is a block
+                    }
+                }
                 if (state.isAir()) continue;
                 VoxelShape shape = null;
                 if (isPistonPart(state)) {
@@ -344,7 +373,13 @@ public final class GooClient {
             }
         }
         nk = moveHeads(level, o, kin, nk);
+        if (scanTick % 200 == 0 && !BORN.isEmpty()) BORN.values().removeIf(born -> scanTick >= born.until()); // cells no scan came by again
         return any ? new Colliders(st, ns, kin, nk) : null; // nothing awake: leave the simulation's colliders alone
+    }
+
+    /** The block a piece of goo of this material comes from. */
+    private static net.minecraft.world.level.block.Block sourceBlock(int material) {
+        return material == GooSim.HONEY ? Blocks.HONEY_BLOCK : Blocks.SLIME_BLOCK;
     }
 
     /** A body's bounds as reported by the simulation: real numbers, the right way round, not absurdly large or far away. */
@@ -748,6 +783,20 @@ public final class GooClient {
         if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) return null;
         int b = slot * 8;
         return new double[] { Math.max(info[b + 5] - info[b + 2], info[b + 7] - info[b + 4]), info[b + 6] - info[b + 3] };
+    }
+
+    /** The simulated bounds, in the world, of the goo of one kind whose marker sits in this cell (min x, y, z, max x, y, z); null if there is none (smoke test). */
+    static double[] boundsAt(int material, BlockPos cell) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != material || goo.isRemoved() || !BlockPos.containing(goo.getX(), goo.getY() + 0.01, goo.getZ()).equals(cell)) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) return null;
+            int b = slot * 8;
+            return new double[] { info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ() };
+        }
+        return null;
     }
 
     /** The piece of one kind whose marker is nearest to (x, z), within two blocks; null if none (smoke test). */

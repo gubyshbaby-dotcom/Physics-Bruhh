@@ -110,7 +110,7 @@ jobs:
             pkill -f devlaunch.Main 2> /dev/null || true
             for f in shots/$name/*.xwd; do [ -e "$f" ] || continue; convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
             echo "=== client test on NeoForge $2 with $(ls run/clienttest/mods | tr '\n' ' '), shader pack: ${3:-none} ${4}: $name"
-            grep -E "CLIENTTEST (wheel|thickness|final|PASS|FAIL)|graphics backend|Failed to create backend|Using shaderpack|[Ss]hader pack is|shaders are|Shaders are|physicsbruhh.*(rror|ailed)|Goo .*(stopped|failed|error)|liquid look|The reason is|Crash report saved" "$log" | cut -c1-400 | head -40 || true
+            grep -E "CLIENTTEST (wheel|thickness|by hand|final|PASS|FAIL)|graphics backend|Failed to create backend|Using shaderpack|[Ss]hader pack is|shaders are|Shaders are|physicsbruhh.*(rror|ailed)|Goo .*(stopped|failed|error)|liquid look|The reason is|Crash report saved" "$log" | cut -c1-400 | head -40 || true
             for f in run/clienttest/crash-reports/*.txt; do [ -e "$f" ] && grep -v "^$" "$f" | grep -v "at org.spongepowered\|at java.base\|at net.neoforged.fml" | sed -n "1,16p" | cut -c1-400; done
             if ! grep -q "CLIENTTEST world joined" "$log"; then
               echo "--- never got into the world; the end of the log:"

@@ -1,3 +1,0 @@
-grepsrc net/minecraft/client/Options.java preferredGraphicsBackend|PreferredGraphicsApi|keyShift
-grepsrc net/minecraft/client/multiplayer/MultiPlayerGameMode.java public .*useItemOn|public .*useItem\(
-grepsrc net/minecraft/world/item/context/UseOnContext.java public UseOnContext
