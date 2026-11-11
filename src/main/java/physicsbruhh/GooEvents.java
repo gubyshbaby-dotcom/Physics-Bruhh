@@ -9,6 +9,7 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
@@ -50,10 +51,16 @@ public final class GooEvents {
 
     /** Replaces the block at {@code pos} with a goo marker and returns it, or null if it was not a goo block. */
     public static GooEntity convertToGoo(ServerLevel level, BlockPos pos, float leanX, float leanZ) {
+        return convertToGoo(level, pos, leanX, leanZ, 1.0F);
+    }
+
+    /** {@link #convertToGoo(ServerLevel, BlockPos, float, float)} for a block whose item said how thick its goo is to be. */
+    public static GooEntity convertToGoo(ServerLevel level, BlockPos pos, float leanX, float leanZ, float thick) {
         BlockState state = level.getBlockState(pos);
         if (!isGooBlock(state)) return null;
         GooEntity goo = new GooEntity(state.is(Blocks.SLIME_BLOCK) ? PhysicsBruhh.SLIME_GOO.get() : PhysicsBruhh.HONEY_GOO.get(), level);
         goo.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+        goo.setThick(thick);
         goo.setLean(leanX, leanZ);
         goo.applyLook(level);
         level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
@@ -68,9 +75,10 @@ public final class GooEvents {
     }
 
     /** A whole block's worth of goo in the cell {@code pos}, as if a block had just turned into goo there. */
-    public static GooEntity spawnBlock(ServerLevel level, BlockPos pos, int material, float leanX, float leanZ) {
+    public static GooEntity spawnBlock(ServerLevel level, BlockPos pos, int material, float leanX, float leanZ, float thick) {
         GooEntity goo = new GooEntity(material == GooSim.SLIME ? PhysicsBruhh.SLIME_GOO.get() : PhysicsBruhh.HONEY_GOO.get(), level);
         goo.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+        goo.setThick(thick);
         goo.setLean(leanX, leanZ);
         goo.applyLook(level);
         level.addFreshEntity(goo);
@@ -172,7 +180,7 @@ public final class GooEvents {
         else if (honey) event.setDamageMultiplier(event.getDamageMultiplier() * 0.2F);
     }
 
-    private record Placed(ServerLevel level, BlockPos pos, float leanX, float leanZ) {}
+    private record Placed(ServerLevel level, BlockPos pos, float leanX, float leanZ, float thick) {}
 
     private static final List<Placed> PLACED = new ArrayList<>();
 
@@ -190,8 +198,17 @@ public final class GooEvents {
         if (placer != null) {
             ang = Math.atan2(pos.getZ() + 0.5 - placer.getZ(), pos.getX() + 0.5 - placer.getX()) + (level.getRandom().nextDouble() - 0.5) * 1.9;
         }
+        // how thick the goo is to be stands on the block's item: while this event runs, the placer still holds the stack as it was
+        float thick = 1.0F;
+        if (placer instanceof LivingEntity living) {
+            for (InteractionHand hand : InteractionHand.values()) {
+                ItemStack held = living.getItemInHand(hand);
+                boolean same = held.is(Items.HONEY_BLOCK) && event.getPlacedBlock().is(Blocks.HONEY_BLOCK) || held.is(Items.SLIME_BLOCK) && event.getPlacedBlock().is(Blocks.SLIME_BLOCK);
+                if (same) { thick = GooThickness.of(held); break; }
+            }
+        }
         // swapped at the end of the tick, when the placement has fully gone through (or was cancelled)
-        PLACED.add(new Placed(level, pos, (float) Math.cos(ang), (float) Math.sin(ang)));
+        PLACED.add(new Placed(level, pos, (float) Math.cos(ang), (float) Math.sin(ang), thick));
     }
 
     @SubscribeEvent
@@ -200,7 +217,7 @@ public final class GooEvents {
         List<Placed> batch = List.copyOf(PLACED);
         PLACED.clear();
         for (Placed p : batch) {
-            if (p.level().getServer() == event.getServer() && enabled(p.level())) convert(p.level(), p.pos(), p.leanX(), p.leanZ());
+            if (p.level().getServer() == event.getServer() && enabled(p.level())) convertToGoo(p.level(), p.pos(), p.leanX(), p.leanZ(), p.thick());
         }
     }
 

@@ -492,9 +492,9 @@ fn honey_stream_flies_and_gathers_into_a_puddle() {
     assert_eq!(w.amount(0), BOTTLE, "all of it counts from the start, also what has not come out yet");
     run(&mut w, 0.25);
     let out = w.bodies[0].count;
-    assert!(out > 40 && out < BOTTLE, "it comes out bit by bit: {} particles after a quarter of a second", out);
+    assert!(out > 12 && out < BOTTLE / 2, "it comes out bit by bit, as a thread at first: {} particles after a quarter of a second", out);
     let (in_air, front) = airborne(&w, 0.6);
-    assert!(in_air > 30 && front > 0.6, "the stream is under way: {} in the air, front at {:.2}", in_air, front);
+    assert!(in_air > 10 && front > 0.6, "the stream is under way: {} in the air, front at {:.2}", in_air, front);
     run(&mut w, 6.0);
     assert_eq!(w.bodies[0].count, BOTTLE, "every particle came out");
     assert_eq!(w.bodies[0].pending, 0);
@@ -591,4 +591,76 @@ fn goo_seen_again_is_put_down_at_rest() {
     run(&mut w, 8.0);
     assert!(!w.bodies[0].awake && !w.bodies[1].awake);
     all_finite_above_floor(&w);
+}
+
+/// A stream of honey is not an even rod: it starts as a thread, runs fuller and thinner in turns,
+/// sways a little, and ends in a thread again. Counted here by how many particles leave the spout
+/// in each tenth of a second, and by how far the stream strays from its straight line.
+#[test]
+fn a_stream_of_honey_is_uneven() {
+    const BOTTLE: u32 = 432;
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    w.add_empty(HONEY, 0.0, 3.0, 0.0);
+    assert_eq!(w.emit(0, [0.5, 3.5, 0.5], [0.0, -2.5, 0.0], BOTTLE, false), BOTTLE);
+    let mut per_tenth: Vec<u32> = Vec::new();
+    let (mut last, mut astray) = (0u32, 0.0f32);
+    while w.bodies[0].pending > 0 && per_tenth.len() < 100 {
+        run(&mut w, 0.1);
+        let out = BOTTLE - w.bodies[0].pending;
+        per_tenth.push(out - last);
+        last = out;
+        // sideways drift of what is still falling, well above the floor
+        for i in 0..w.nb {
+            if w.alive[i] == 0 || w.p[i * 3 + 1] < 1.0 { continue; }
+            astray = astray.max((w.p[i * 3] - 0.5).abs().max((w.p[i * 3 + 2] - 0.5).abs()));
+        }
+    }
+    let steady = &per_tenth[1..per_tenth.len() - 1];
+    let (least, most) = (*steady.iter().min().unwrap(), *steady.iter().max().unwrap());
+    assert!(per_tenth.len() >= 8, "a bottle takes its time to run out: {} tenths of a second", per_tenth.len());
+    assert!(most >= least * 2 && most >= least + 8, "the stream runs fuller and thinner in turns: between {} and {} particles a tenth of a second ({:?})", least, most, per_tenth);
+    assert!(per_tenth[0] < most && *per_tenth.last().unwrap() < most, "it starts and ends thin: {:?}", per_tenth);
+    assert!(astray > 0.12 && astray < 0.8, "it sways, but stays a stream: up to {:.2} off its line", astray);
+    run(&mut w, 8.0);
+    assert_eq!(w.bodies[0].count, BOTTLE, "and all of it arrives");
+    all_finite_above_floor(&w);
+}
+
+/// How thick a piece is, is its own: thin honey runs out wide and flat, thick honey is still a
+/// heap after the same time; thin slime sags, thick slime keeps its shape and hardly wobbles.
+/// A thickness of 1 is exactly the usual goo.
+#[test]
+fn each_piece_is_as_thick_as_it_was_made() {
+    let spread = |mat: u8, thick: f32, secs: f32| -> (f32, f32) {
+        let mut w = World::new(12, 2);
+        let f = floor(); w.set_static(&f, f.len() / 7);
+        assert_eq!(w.add_body_thick(mat, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, thick), 0);
+        run(&mut w, secs);
+        all_finite_above_floor(&w);
+        let bb = w.bodies[0].bb;
+        ((bb[3] - bb[0]).max(bb[5] - bb[2]), bb[4])
+    };
+    let (thin_w, thin_h) = spread(HONEY, 0.25, 8.0);
+    let (usual_w, usual_h) = spread(HONEY, 1.0, 8.0);
+    let (thick_w, thick_h) = spread(HONEY, 4.0, 8.0);
+    assert!(thin_w > usual_w + 0.25 && thin_h < usual_h, "thin honey runs further and lies flatter: {:.2} wide, {:.2} high against {:.2}, {:.2}", thin_w, thin_h, usual_w, usual_h);
+    assert!(thick_w < usual_w - 0.15 && thick_h > usual_h + 0.1, "thick honey is still a heap: {:.2} wide, {:.2} high against {:.2}, {:.2}", thick_w, thick_h, usual_w, usual_h);
+
+    let (_, soft_h) = spread(SLIME, 0.25, 4.0);
+    let (_, usual_slime_h) = spread(SLIME, 1.0, 4.0);
+    let (_, stiff_h) = spread(SLIME, 4.0, 4.0);
+    assert!(soft_h < usual_slime_h - 0.03, "thin slime sags: {:.2} high against {:.2}", soft_h, usual_slime_h);
+    assert!(stiff_h > usual_slime_h + 0.01 && stiff_h < 1.1, "thick slime stands up: {:.2} high against {:.2}", stiff_h, usual_slime_h);
+
+    // 1 is the usual goo, to the last bit
+    let mut a = World::new(12, 2); let mut b = World::new(12, 2);
+    let f = floor(); a.set_static(&f, f.len() / 7); b.set_static(&f, f.len() / 7);
+    a.add_body(HONEY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    b.add_body_thick(HONEY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+    run(&mut a, 2.0); run(&mut b, 2.0);
+    assert!(a.p == b.p, "thickness 1 changes nothing");
+    // nonsense is taken as the usual, out-of-range values are brought into range
+    assert_eq!(Material::honey().thick(f32::NAN).melt_time, Material::honey().melt_time);
+    assert_eq!(Material::honey().thick(100.0).melt_time, Material::honey().thick(THICK_MAX).melt_time);
 }

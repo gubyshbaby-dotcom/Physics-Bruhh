@@ -1,0 +1,224 @@
+name: Shader packs
+
+# The client test with Sodium, with Iris, and with real shader packs under Iris (OpenGL, software
+# rendering). Other people's mods decide whether this works, so it is not part of the build: run it
+# by hand (Actions, "Run workflow"), or push to a branch whose name starts with "iris".
+on:
+  push:
+    branches: ['iris**']
+  workflow_dispatch:
+
+concurrency:
+  group: shaderpacks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packs:
+    name: Sodium, Iris, shader packs
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    env:
+      # NeoForge builds to try Iris on after the one this mod is built for (a released Iris may be for an older NeoForge than that)
+      IRIS_NEOFORGE: 26.3.0.7-beta
+      # shader packs on Modrinth to try, lightest first
+      SHADER_PACKS: makeup-ultra-fast-shaders complementary-reimagined
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: cargo-x86_64-unknown-linux-gnu-${{ hashFiles('native/Cargo.toml') }}
+      - name: Rust core for this machine
+        run: |
+          (cd native && cargo build --release)
+          mkdir -p src/main/resources/natives/linux-x86_64
+          cp native/target/release/libphysicsbruhh_native.so src/main/resources/natives/linux-x86_64/
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build
+        run: ./gradlew build -PskipCargo=true
+      - name: A world to play in (the server self test makes it)
+        timeout-minutes: 12
+        run: |
+          mkdir -p run/selftest
+          echo "eula=true" > run/selftest/eula.txt
+          printf 'level-type=minecraft\\:flat\nspawn-protection=0\nonline-mode=false\nmax-tick-time=-1\n' > run/selftest/server.properties
+          ./gradlew runSelfTest -PskipCargo=true > selftest.log 2>&1 || true
+          grep -o "SELFTEST \(PASS\|FAIL.*\)" selftest.log | head -1
+          test -e run/selftest/world/level.dat
+      - name: Client tests (tell, never fail)
+        timeout-minutes: 90
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgl1-mesa-dri libegl1 libgles2 mesa-vulkan-drivers imagemagick x11-apps > /dev/null
+          Xvfb :99 -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
+          export DISPLAY=:99
+          sleep 3
+          MC=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2)
+          NEO=$(grep '^neo_version=' gradle.properties | cut -d= -f2)
+          api="https://api.modrinth.com/v2"; agent="User-Agent: physics-bruhh-ci"
+          pick='"\(.version_number) \(.files | (map(select(.primary))[0] // .[0]) | .url)"'
+          # "version url" of a Modrinth project's files, newest first: project, query
+          versions() { curl -fsSL -H "$agent" "$api/project/$1/version?$2" | jq -r ".[] | $pick" 2> /dev/null; }
+          # url, folder
+          get() { file="$2/$(basename "$1" | sed 's/%2B/+/g; s/%20/ /g')"; curl -fsSL -o "$file" "$1" && echo "PACKS: got $file ($(stat -c %s "$file") bytes)"; }
+          forgame="loaders=%5B%22neoforge%22%5D&game_versions=%5B%22$MC%22%5D"
+          mkdir -p run/clienttest/mods run/clienttest/shaderpacks run/clienttest/config
+          cp -r build/classes/java/main classes-built
+          # a screenshot into the log, as text
+          show() { echo "SHOT-BEGIN $1"; convert "$2" -resize 854x480 -quality 72 jpg:- | base64 -w 160; echo "SHOT-END"; }
+          # one run of the client test on OpenGL: name, NeoForge version, shader pack file ("" for none), extra java options
+          run_with() {
+            name=$1
+            find run/clienttest/saves/selftest run/clienttest/crash-reports -delete 2> /dev/null || true
+            mkdir -p run/clienttest/saves "shots/$name"
+            cp -r run/selftest/world run/clienttest/saves/selftest
+            printf 'pauseOnLostFocus:false\nonboardAccessibility:false\ntutorialStep:none\nrenderDistance:4\nsimulationDistance:5\nskipMultiplayerWarning:true\njoinedFirstServer:true\npreferredGraphicsBackend:"opengl"\n' > run/clienttest/options.txt
+            if [ -n "$3" ]; then printf 'shaderPack=%s\nenableShaders=true\ndisableUpdateMessage=true\n' "$3" > run/clienttest/config/iris.properties; else printf 'enableShaders=false\ndisableUpdateMessage=true\n' > run/clienttest/config/iris.properties; fi
+            # NeoForge puts a screen of warnings about other mods' metadata in front of the world otherwise (Iris has one)
+            printf 'showLoadWarnings = false\n' > run/clienttest/config/neoforge-client.toml
+            log="clienttest-$name.log"; : > "$log"
+            (
+              while true; do
+                if grep -q "CLIENTTEST world joined" "$log"; then
+                  xwd -root -silent -display :99 -out "shots/$name/scene_$(date +%H%M%S_%3N).xwd" 2> /dev/null || true
+                  sleep 0.8
+                else
+                  sleep 1
+                fi
+              done
+            ) &
+            SHOTS=$!
+            # a game that has not got into the world after three minutes is not going to: a picture of where it is, and stop
+            (
+              sleep 180
+              if ! grep -q "CLIENTTEST world joined" "$log"; then
+                xwd -root -silent -display :99 -out "shots/$name/stuck.xwd" 2> /dev/null || true
+                pkill -f devlaunch.Main
+              fi
+            ) &
+            WATCH=$!
+            env SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1 JAVA_TOOL_OPTIONS="$4" timeout 900 ./gradlew runClientTest -PskipCargo=true -Pneo_version="$2" > "$log" 2>&1 || true
+            pkill -P $WATCH 2> /dev/null || true
+            kill $SHOTS $WATCH 2> /dev/null || true
+            pkill -f devlaunch.Main 2> /dev/null || true
+            for f in shots/$name/*.xwd; do [ -e "$f" ] || continue; convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
+            echo "=== client test on NeoForge $2 with $(ls run/clienttest/mods | tr '\n' ' '), shader pack: ${3:-none} ${4}: $name"
+            grep -E "CLIENTTEST (wheel|thickness|final|PASS|FAIL)|graphics backend|Failed to create backend|Using shaderpack|[Ss]hader pack is|shaders are|Shaders are|physicsbruhh.*(rror|ailed)|Goo .*(stopped|failed|error)|liquid look|The reason is|Crash report saved" "$log" | cut -c1-400 | head -40 || true
+            for f in run/clienttest/crash-reports/*.txt; do [ -e "$f" ] && grep -v "^$" "$f" | grep -v "at org.spongepowered\|at java.base\|at net.neoforged.fml" | sed -n "1,16p" | cut -c1-400; done
+            if ! grep -q "CLIENTTEST world joined" "$log"; then
+              echo "--- never got into the world; the end of the log:"
+              grep -v "^$\|Picked up JAVA_TOOL_OPTIONS\|^> Task\|^BUILD\|actionable task" "$log" | tail -45 | cut -c1-420
+              [ -e "shots/$name/stuck.jpg" ] && show "${name}_stuck_$(date +%H%M%S).jpg" "shots/$name/stuck.jpg"
+            fi
+            echo "screenshots: $(ls shots/$name | wc -l); status lines: $(grep -c 'CLIENTTEST t=' "$log"); $(grep -o 'CLIENTTEST \(PASS\|FAIL.*\)' "$log" | head -1)"
+          }
+
+          # ---- Sodium alone, the newest for this game, on the NeoForge the mod is built for
+          newest=$(versions sodium "$forgame" | head -1)
+          if [ -n "$newest" ]; then
+            get "${newest#* }" run/clienttest/mods
+            run_with sodium "$NEO" "" ""
+          else
+            echo "PACKS: no Sodium for NeoForge on Minecraft $MC on Modrinth"
+          fi
+
+          # ---- Iris: the newest for this game, with the Sodium it asks for (then the two newest)
+          find run/clienttest/mods -type f -delete
+          iris=$(versions iris "$forgame" | head -1)
+          if [ -z "$iris" ]; then echo "PACKS: no Iris for NeoForge on Minecraft $MC on Modrinth"; exit 0; fi
+          echo "PACKS: Iris ${iris%% *}"
+          get "${iris#* }" run/clienttest/mods
+          : > sodium-all.txt
+          for id in $(curl -fsSL -H "$agent" "$api/project/iris/version?$forgame" | jq -r '.[0].dependencies[]? | select(.dependency_type == "required" and .version_id != null) | .version_id' 2> /dev/null); do
+            curl -fsSL -H "$agent" "$api/version/$id" | jq -r "select(.loaders | index(\"neoforge\")) | $pick" >> sodium-all.txt 2> /dev/null || true
+          done
+          versions sodium "$forgame" | head -2 >> sodium-all.txt || true
+          awk '!seen[$0]++' sodium-all.txt > sodium.txt
+          echo "PACKS: Sodium to try, in this order:"; cut -d' ' -f1 sodium.txt
+          : > packs.txt
+          for slug in $SHADER_PACKS; do
+            pack=$(versions $slug "" | head -1)
+            if [ -n "$pack" ]; then
+              get "${pack#* }" run/clienttest/shaderpacks && basename "${pack#* }" | sed 's/%2B/+/g; s/%20/ /g' >> packs.txt
+            else
+              echo "PACKS: no shader pack $slug on Modrinth"
+            fi
+          done
+          # In a development environment the game checks every draw strictly, and Iris with a pack on does not pass
+          # that check (its own development runs switch it off). The game people play does not check, so neither do these runs.
+          unchecked="-Dneoforge.disableBlaze3DValidation=true -Dneoforge.disableGlValidation=true"
+          tag=a
+          for neo in $NEO $IRIS_NEOFORGE; do
+            if [ "$neo" != "$NEO" ]; then
+              # an older NeoForge gets a world of its own making, and the server test along with it
+              find run/selftest/world -delete 2> /dev/null || true
+              ./gradlew runSelfTest -PskipCargo=true -Pneo_version="$neo" > "selftest-$neo.log" 2>&1 || true
+              echo "PACKS: server self test on NeoForge $neo: $(grep -c 'SELFTEST ok' "selftest-$neo.log") checks ok, $(grep -o 'SELFTEST \(PASS\|FAIL.*\)' "selftest-$neo.log" | head -1)"
+              [ -e run/selftest/world/level.dat ] || { echo "PACKS: no world on NeoForge $neo"; tail -20 "selftest-$neo.log"; continue; }
+              if diff -rq classes-built build/classes/java/main > classes-differ.txt 2>&1; then
+                echo "PACKS: compiled against NeoForge $neo, the mod's classes are byte for byte those compiled against $NEO ($(find classes-built -name '*.class' | wc -l) class files)"
+              else
+                echo "PACKS: the mod's classes compiled against NeoForge $neo differ from those compiled against $NEO:"; head -30 classes-differ.txt
+              fi
+            fi
+            started=""
+            while read -r version url; do
+              [ -n "$url" ] || continue
+              find run/clienttest/mods -type f -name 'sodium*' -delete
+              get "$url" run/clienttest/mods > /dev/null || continue
+              run_with "iris-$tag-off" "$neo" "" "" < /dev/null
+              if grep -q "CLIENTTEST world joined" "clienttest-iris-$tag-off.log"; then started="$version"; break; fi
+            done < sodium.txt
+            if [ -n "$started" ]; then
+              echo "PACKS: the game runs with Iris ${iris%% *} and Sodium $started on NeoForge $neo"
+              # real shader packs, the way the mod behaves under them by itself (clear goo as a liquid over the pack's picture,
+              # goo with the block textures handed to the pack); then the first pack once more with everything handed over
+              while read -r pack; do
+                [ -n "$pack" ] || continue
+                run_with "iris-$tag-$(echo "$pack" | tr 'A-Z' 'a-z' | sed 's/[^a-z]//g' | cut -c1-12)" "$neo" "$pack" "$unchecked" < /dev/null
+              done < packs.txt
+              first=$(head -1 packs.txt)
+              if [ -n "$first" ]; then run_with "iris-$tag-handover" "$neo" "$first" "$unchecked -Dphysicsbruhh.packs.liquid=false"; fi
+            else
+              echo "PACKS: on NeoForge $neo, Iris ${iris%% *} gets into a world with none of these Sodium versions"
+            fi
+            tag=b
+          done
+          echo "=== summary"
+          for log in clienttest-sodium.log clienttest-iris-*.log; do
+            [ -e "$log" ] || continue
+            echo "$log: $(grep -o 'Using graphics backend [A-Za-z]*' "$log" | head -1) / $(grep -o 'Using shaderpack: .*' "$log" | head -1) / $(grep -o 'A shader pack is on' "$log" | head -1) / $(grep -o 'CLIENTTEST \(PASS\|FAIL.*\)' "$log" | head -1)"
+          done
+      - name: Screenshots as text
+        if: always()
+        run: |
+          for name in $(ls shots 2> /dev/null); do
+            n=0
+            # some forty of each run
+            every=$(( $(ls shots/$name | wc -l) / 40 + 1 ))
+            for f in shots/$name/scene_*.jpg; do
+              [ -e "$f" ] || continue
+              n=$((n + 1))
+              if [ $((n % every)) -ne 0 ]; then continue; fi
+              echo "SHOT-BEGIN ${name}_$(basename "$f")"
+              convert "$f" -resize 854x480 -quality 72 jpg:- | base64 -w 160
+              echo "SHOT-END"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shaderpacks
+          path: |
+            clienttest-*.log
+            selftest*.log
+            shots/
+          retention-days: 7
+          if-no-files-found: ignore

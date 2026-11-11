@@ -18,14 +18,27 @@ public interface GooSim extends AutoCloseable {
     int BLOCK = 1728, BOTTLE = 432, BALL = 192;
     int BODY_FLOATS = 8;        // state, awake, bounds min xyz, bounds max xyz
 
-    /** Adds a body filling the block cell whose minimum corner is (x, y, z). Returns its slot or -1. */
-    int addBody(int material, float x, float y, float z, float dirX, float dirZ, float ageSeconds);
+    /**
+     * How thick a piece of goo may be, as a factor on the usual (1). Thick honey melts later, flows
+     * more slowly and holds a heap, thin honey runs like syrup; thick slime is a stiff jelly, thin
+     * slime soft and saggy. Every piece has its own.
+     */
+    float THICK_MIN = 0.25F, THICK_MAX = 4.0F;
+
+    /** Adds a body filling the block cell whose minimum corner is (x, y, z), as thick as {@code thick} says. Returns its slot or -1. */
+    int addBody(int material, float x, float y, float z, float dirX, float dirZ, float ageSeconds, float thick);
+
+    default int addBody(int material, float x, float y, float z, float dirX, float dirZ, float ageSeconds) { return addBody(material, x, y, z, dirX, dirZ, ageSeconds, 1.0F); }
 
     /** Adds a body with nothing in it yet at the block cell (x, y, z); goo arrives through {@link #emit}. Returns its slot or -1. */
-    int addEmpty(int material, float x, float y, float z);
+    int addEmpty(int material, float x, float y, float z, float thick);
+
+    default int addEmpty(int material, float x, float y, float z) { return addEmpty(material, x, y, z, 1.0F); }
 
     /** Adds {@code count} particles already lying at rest in the cell (x, y, z): a piece that comes back into view. Returns its slot or -1. */
-    int addResting(int material, float x, float y, float z, int count);
+    int addResting(int material, float x, float y, float z, int count, float thick);
+
+    default int addResting(int material, float x, float y, float z, int count) { return addResting(material, x, y, z, count, 1.0F); }
 
     /**
      * Lets {@code count} more particles into a body, leaving the point p with velocity v: as a stream

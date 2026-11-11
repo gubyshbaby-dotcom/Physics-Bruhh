@@ -262,6 +262,48 @@ public final class SelfTest {
                     if (stack.is(Items.SLIME_BALL)) balls += stack.getCount();
                 }
                 expect("K: a punched lump of slime came back as a slime ball (" + balls + ")", balls == 1);
+                // L: how thick the goo will be stands on the block's item, is turned with the wheel, and goes with the block
+                run(server, "goo clear", "kill @e[type=minecraft:item]");
+                var player = FakePlayerFactory.getMinecraft(level);
+                player.setShiftKeyDown(false);
+                player.setPos(2.5, Y, 4.5);
+                ItemStack honeyBlock = new ItemStack(Items.HONEY_BLOCK, 3);
+                player.setItemInHand(InteractionHand.MAIN_HAND, honeyBlock);
+                expect("L: a block of honey is of the usual thickness to begin with", GooThickness.of(honeyBlock) == 1.0F && honeyBlock.get(PhysicsBruhh.THICKNESS.get()) == null);
+                float turned = GooThickness.turn(player, 4);
+                expect("L: four notches of the wheel make it four times as thick (" + turned + ")", turned == 4.0F && GooThickness.of(player.getItemInHand(InteractionHand.MAIN_HAND)) == 4.0F);
+                expect("L: ... and no further than that", GooThickness.turn(player, 3) == 4.0F);
+                GooThickness.turn(player, -4);
+                expect("L: turned back, the stack is an ordinary one again", player.getItemInHand(InteractionHand.MAIN_HAND).get(PhysicsBruhh.THICKNESS.get()) == null);
+                GooThickness.turn(player, -8);
+                expect("L: the other way it stops at a quarter", GooThickness.of(player.getItemInHand(InteractionHand.MAIN_HAND)) == 0.25F);
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.STICK));
+                expect("L: a stick has no thickness to turn", GooThickness.turn(player, 1) == 0.0F);
+                // placed by hand: the goo is as thick as the item said
+                ItemStack thickHoney = new ItemStack(Items.HONEY_BLOCK, 2);
+                GooThickness.set(thickHoney, 4.0F);
+                player.setItemInHand(InteractionHand.MAIN_HAND, thickHoney);
+                BlockPos floorUnder = new BlockPos(2, Y - 1, 6);
+                var placed = thickHoney.useOn(new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND,
+                        new net.minecraft.world.phys.BlockHitResult(new Vec3(2.5, Y, 6.5), Direction.UP, floorUnder, false)));
+                expect("L: the block was placed (" + placed + ", " + thickHoney.getCount() + " left)", placed.consumesAction() && thickHoney.getCount() == 1);
+                // out of a dispenser: the same
+                run(server, "setblock -6 " + Y + " 0 minecraft:air", "setblock -5 " + Y + " 0 minecraft:air",
+                        "setblock -5 " + Y + " 0 minecraft:dispenser[facing=east]{Items:[{Slot:0b,id:\"minecraft:slime_block\",count:1,components:{\"physicsbruhh:thickness\":0.5f}}]}",
+                        "setblock -6 " + Y + " 0 minecraft:redstone_block");
+            } else if (tick == 244) {
+                GooEntity honey = nearest(level, PhysicsBruhh.HONEY_GOO.get(), 2.5, 6.5);
+                expect("L: honey placed from a stack turned thick is thick goo (" + (honey == null ? "nothing" : "thickness " + honey.thick()) + ")", honey != null && honey.thick() == 4.0F && !honey.poured());
+                GooEntity slime = nearest(level, PhysicsBruhh.SLIME_GOO.get(), -3.5, 0.5);
+                expect("L: a thin slime block out of a dispenser is thin goo (" + (slime == null ? "nothing" : "thickness " + slime.thick()) + ")", slime != null && slime.thick() == 0.5F);
+                if (honey != null) honey.hurtServer(level, level.damageSources().generic(), 1.0F);
+            } else if (tick == 248) {
+                float back = -1.0F;
+                for (Entity e : level.getEntities((Entity) null, new AABB(-6, Y - 1, -1, 7, Y + 3, 14), e -> e instanceof net.minecraft.world.entity.item.ItemEntity)) {
+                    ItemStack stack = ((net.minecraft.world.entity.item.ItemEntity) e).getItem();
+                    if (stack.is(Items.HONEY_BLOCK)) back = GooThickness.of(stack);
+                }
+                expect("L: punched, thick goo comes back as a block that is still thick (" + back + ")", back == 4.0F);
                 // tidy up, and leave something for the client test that opens this world next
                 run(server, "goo clear", "kill @e[type=minecraft:item]",
                         "setblock 1 " + Y + " 0 minecraft:air", "setblock 0 " + Y + " 0 minecraft:air", "setblock 1 " + Y + " 12 minecraft:air", "setblock 0 " + Y + " 12 minecraft:air",
@@ -270,7 +312,7 @@ public final class SelfTest {
                 GooEvents.convert(level, new BlockPos(-1, Y, 3), 1, 0);
                 level.setBlock(new BlockPos(4, Y, 10), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
                 GooEvents.convert(level, new BlockPos(4, Y, 10), 1, 0);
-            } else if (tick == 240) {
+            } else if (tick == 254) {
                 finish(server);
             }
         } catch (Throwable t) {

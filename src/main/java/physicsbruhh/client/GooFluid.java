@@ -180,7 +180,7 @@ final class GooFluid {
 
     /** Whether clear goo is drawn as liquid (rather than with the surface shader). */
     static boolean inUse() {
-        return chosen && !broken && GooRenderer.shader;
+        return chosen && !broken && GooRenderer.shader && (!Packs.active || Packs.LIQUID_ON_TOP);
     }
 
     static void register(RegisterRenderPipelinesEvent event) {

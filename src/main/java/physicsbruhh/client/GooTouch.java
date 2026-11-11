@@ -15,6 +15,7 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.InputEvent;
 import physicsbruhh.GooEntity;
+import physicsbruhh.GooThickness;
 import physicsbruhh.sim.GooSim;
 
 /**
@@ -58,8 +59,8 @@ final class GooTouch {
             // falling through it, or having just hit the ground under it at speed (goo is not solid: a fast fall goes straight through)
             double fall = v.y < -0.25 ? v.y : player.onGround() && !wasOnGround && lastFall < -0.25 ? lastFall : 0.0;
             if (fall < 0.0 && bounceWait == 0 && !player.isSuppressingBounce()) {
-                // SlimeBlock.updateEntityMovementAfterFallOn
-                player.setDeltaMovement(v.x, -fall, v.z);
+                // SlimeBlock.updateEntityMovementAfterFallOn; soft slime swallows part of the fall
+                player.setDeltaMovement(v.x, -fall * GooThickness.slimeBounce(GooClient.thickAt(player.getBoundingBox().inflate(0.3), GooSim.SLIME)), v.z);
                 player.resetFallDistance();
                 bounceWait = 5;
                 bounces++;
@@ -73,9 +74,11 @@ final class GooTouch {
         }
         if (inHoney) {
             double in = Math.min(1.0, honey / (double) DEEP_HONEY);
-            double speed = 1.0 - 0.6 * in;                 // HoneyBlock speed factor 0.4
+            // the honey block's own factors (speed 0.4, jump 0.5) for honey of the usual thickness; thick honey holds on harder
+            float thick = GooClient.thickAt(player.getBoundingBox().inflate(0.3), GooSim.HONEY);
+            double speed = 1.0 - (1.0 - GooThickness.honeySpeed(thick)) * in;
             double vy = v.y;
-            if (wasOnGround && !player.onGround() && vy > 0.2) vy *= 1.0 - 0.5 * in; // HoneyBlock jump factor 0.5
+            if (wasOnGround && !player.onGround() && vy > 0.2) vy *= 1.0 - (1.0 - GooThickness.honeyJump(thick)) * in;
             player.setDeltaMovement(v.x * speed, vy, v.z * speed);
             double moved = Math.sqrt(v.x * v.x + v.z * v.z);
             if (moved > 0.03 && slideWait == 0) {

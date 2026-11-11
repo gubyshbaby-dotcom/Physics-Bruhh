@@ -16,5 +16,14 @@
   "commands.physicsbruhh.look.shader": "Goo is drawn as a glossy surface",
   "commands.physicsbruhh.look.plain": "Goo is drawn the plain way, without its own shader",
   "commands.physicsbruhh.look.info": "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
-  "commands.physicsbruhh.look.info.off": "No goo is being simulated right now"
+  "commands.physicsbruhh.look.info.off": "No goo is being simulated right now",
+  "commands.physicsbruhh.look.info.pack": "A shader pack is on: goo is handed to it as ordinary translucent geometry, and the pack lights it",
+  "commands.physicsbruhh.look.info.pack.liquid": "A shader pack is on: clear goo is drawn as a liquid over the pack's picture; goo with the block textures is handed to the pack (/goolook shader hands over both)",
+  "physicsbruhh.thickness": "Thickness: %s (%s)",
+  "physicsbruhh.thickness.usual": "usual",
+  "physicsbruhh.thickness.thicker": "thicker",
+  "physicsbruhh.thickness.much_thicker": "much thicker",
+  "physicsbruhh.thickness.thinner": "thinner",
+  "physicsbruhh.thickness.much_thinner": "much thinner",
+  "physicsbruhh.thickness.hint": "Sneak + mouse wheel in hand: thicker or thinner goo"
 }

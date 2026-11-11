@@ -1,5 +1,5 @@
 //! Writes the particles of a small show scene to a file (x, y, z, size + 2 for slime; little-endian
-//! floats), for looking at the liquid shaders outside the game: `cargo run --release --example dump -- out.bin [seconds]`
+//! floats), for looking at the liquid shaders outside the game: `cargo run --release --example dump -- out.bin [seconds] [steps the last stream has been running]`
 use physicsbruhh_native::sim::*;
 use std::io::Write;
 
@@ -7,6 +7,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).cloned().unwrap_or_else(|| "particles.bin".into());
     let seconds: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(6.0);
+    // how many steps before the end the second bottle starts to run (the first one a second and a half earlier)
+    let lead: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
     let mut w = World::new(12, 8);
     let mut st = Vec::new();
     for x in -6..10 { for z in -6..8 { st.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } }
@@ -40,7 +42,7 @@ fn main() {
             w.set_kinematic(&kin, kin.len() / KIN_FLOATS);
         }
         // two bottles of honey from the dispenser, a little before the end; three slime balls earlier
-        if step + 100 == steps || step + 190 == steps {
+        if step + lead == steps || step + lead + 90 == steps {
             if stream == usize::MAX { stream = w.add_empty(HONEY, -2.0, 1.0, 3.0) as usize; }
             w.emit(stream, [-1.95, 1.5, 3.5], [3.2, 0.4, 0.3], 432, false);
         }

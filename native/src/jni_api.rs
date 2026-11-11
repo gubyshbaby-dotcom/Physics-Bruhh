@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 4;
+pub const ABI_VERSION: jint = 5;
 const ERR: jint = -9999;
 
 struct Handle { world: World, mesh: Vec<f32> }
@@ -39,18 +39,18 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nDestroy(_env: JNIEnv, _c
 }
 
 #[no_mangle]
-pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddBody(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat, dirx: jfloat, dirz: jfloat, age: jfloat) -> jint {
-    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_body(mat as u8, x, y, z, dirx, dirz, age), None => ERR })
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddBody(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat, dirx: jfloat, dirz: jfloat, age: jfloat, thick: jfloat) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_body_thick(mat as u8, x, y, z, dirx, dirz, age, thick), None => ERR })
 }
 
 #[no_mangle]
-pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddEmpty(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat) -> jint {
-    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_empty(mat as u8, x, y, z), None => ERR })
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddEmpty(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat, thick: jfloat) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_empty_thick(mat as u8, x, y, z, thick), None => ERR })
 }
 
 #[no_mangle]
-pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddResting(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat, count: jint) -> jint {
-    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_resting(mat as u8, x, y, z, count.max(0) as u32), None => ERR })
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nAddResting(_env: JNIEnv, _c: JClass, h: jlong, mat: jint, x: jfloat, y: jfloat, z: jfloat, count: jint, thick: jfloat) -> jint {
+    guard(|| match unsafe { handle(h) } { Some(hd) => hd.world.add_resting_thick(mat as u8, x, y, z, count.max(0) as u32, thick), None => ERR })
 }
 
 /// Stream (`lump` false) or lump of `count` particles into `body`, from a point with a velocity. Returns how many it had room for.

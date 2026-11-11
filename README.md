@@ -1,6 +1,7 @@
 # Physics Bruhh
 
-A NeoForge mod for Minecraft 26.3. Honey and slime blocks stop being rigid cubes:
+A NeoForge mod for Minecraft 26.3 (NeoForge 26.3.0.7-beta and later). Honey and slime blocks stop
+being rigid cubes:
 
 - **Honey** melts a few seconds after it is placed, tips over and spreads into a thick puddle.
 - **Slime** stays a wobbly jelly cube that sags, bounces back and sticks to what it touches.
@@ -11,6 +12,8 @@ A NeoForge mod for Minecraft 26.3. Honey and slime blocks stop being rigid cubes
   into it and takes the fall damage away.
 - **Dispensers and hands** pour and throw it: a honey bottle becomes a stream of honey, a slime
   ball a flying lump of slime, and both can be taken up again.
+- **Every block can be made thicker or thinner** before it is placed: sneak and turn the mouse
+  wheel with the block in hand.
 
 Everything is on by default for the vanilla `honey_block` and `slime_block`.
 
@@ -32,6 +35,24 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 - Sneak and use a honey bottle to pour it out where you look (the bottle stays); use a slime
   ball to throw it as a lump of slime. Goo that lands on goo of its kind joins it, up to a block's
   worth per piece: four bottles of honey or nine slime balls punched afterwards give the block.
+- A stream of honey is not a smooth rod: it starts as a thread, swells, wavers from side to side,
+  comes in thicker and thinner gulps and thins out to a thread again before it breaks off. No two
+  streams are alike.
+- Thickness. Hold a honey or slime block, sneak and turn the mouse wheel (the hotbar stays where
+  it is meanwhile): up is thicker, down is thinner, four notches either way, from a quarter to
+  four times the usual. The setting belongs to that stack of items (it is shown in the tooltip
+  and above the hotbar, stacks of different thickness do not merge) and goes with the block:
+  placed by hand or by a dispenser it becomes goo of that thickness, and punched as a whole it
+  comes back as a block that still has it.
+
+  | | Thinner | Thicker |
+  | --- | --- | --- |
+  | Honey | melts sooner, runs out fast into a wide, flat puddle, tears into strands easily | keeps its shape for a long time, creeps slowly, stays a heap, pulls longer strands |
+  | Slime | soft and floppy: sags, wobbles long, stretches far | stiff and springy: barely sags, snaps back at once |
+  | You in it | honey slows you less; slime throws you back up less | honey slows you more and lets you jump less; slime bounces fully |
+
+  Bottles and slime balls carry no thickness; what they add takes on the thickness of the piece
+  it lands on.
 - Dispensers: a honey bottle is poured out as a stream and the empty bottle stays inside; a slime
   ball is shot out as a lump; a honey or slime block comes out as a whole block of goo; an empty
   bottle is filled from honey lying in front of the dispenser. With the rule off, or when none of
@@ -54,6 +75,33 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 - `/goolook info` says what the simulation is doing on this client: Rust or Java core, how many
   threads, how many pieces of goo and how many of them are moving, how long an update takes, and
   whether it keeps up with real time.
+
+### Shader packs and Sodium
+
+Sodium needs nothing: with it the mod looks and works as without it.
+
+With Iris and a shader pack switched on, the pack draws the whole world its own way, and a shader
+that a mod brings along for things in the world does not fit into that. So while a pack is on:
+
+- Goo with the blocks' textures is handed to the game as ordinary translucent geometry (position,
+  colour, light, normal, texture), and the pack lights it like everything else.
+- Clear goo (`clear_goo`) stays a liquid. The liquid look is drawn after the world, over the
+  picture the pack has finished, so it does not depend on the pack. It is lit by the mod's own
+  idea of sun and sky, not by the pack's: the pack's shadows do not fall on it and its effects
+  (bloom, fog, depth of field) do not include it.
+- `/goolook shader` or `/goolook plain` hands the clear goo to the pack as well, as plainly
+  tinted translucent geometry: less of a liquid, but all of it lit by the pack.
+
+Switch the pack off and everything is as before; nothing needs setting, and `/goolook info` says
+what is happening. Two switches for the game's start: `-Dphysicsbruhh.packs.liquid=false` always
+hands everything over, `-Dphysicsbruhh.packs=true` makes the mod behave as if a pack were on.
+
+Which versions go together is not up to this mod. The jar runs on NeoForge 26.3.0.7-beta and
+later. When this was written, the released Iris (1.11.7) asked for Sodium 0.9.2, and those two
+only start on an early NeoForge 26.3 (they were tried on 26.3.0.7-beta); on NeoForge 26.3.0.101
+Sodium 0.9.2 crashes at start by itself, Iris 1.11.7 does start there with Sodium 0.9.3-beta.3,
+and the newest Sodium (0.9.3-beta.4) asks for an Iris that is not out yet. The "Shader packs"
+workflow (see Building) finds out afresh what starts with what.
 
 Slime and honey contraptions (flying machines, block conveyors) do not work while
 `physical_goo` is on, because the blocks they rely on are no longer blocks.
@@ -104,14 +152,28 @@ the `physicsbruhh-jar` artifact:
 3. builds the mod against NeoForge,
 4. boots a dedicated server and runs real piston contraptions, placement, falls, dispensers,
    right clicks and `/goo clear` against the hooks,
-5. opens the world in a real client (software rendering) five times: the default graphics backend,
-   "improved transparency" on, the OpenGL backend, clear goo as a surface instead of a liquid, and
-   the shader-less fallback. Each run drives pistons against honey and slime in both looks, checks
+5. opens the world in a real client (software rendering) six times: the default graphics backend,
+   "improved transparency" on, the OpenGL backend, clear goo as a surface instead of a liquid, the
+   shader-less fallback, and the hand-over to shader packs. Each run drives pistons against honey
+   and slime in both looks, checks
    that the slime ends up stretched between the retracted sticky pistons, removes one piece while
    others move, stands a pig in the slime, walks the player into honey and drops them onto slime,
    lets dispensers pour honey bottles and shoot slime balls, fills a bottle from the puddle, pours
-   it out again and throws a slime ball, and saves screenshots (artifact `clienttest`; a commit
-   message containing `[shots]` also prints them into the log as text).
+   it out again and throws a slime ball, sneaks and turns the wheel on a block of honey, places
+   it and compares it with thin and usual honey and with thin and thick slime, and saves
+   screenshots (artifact `clienttest`; a commit message containing `[shots]` also prints them
+   into the log as text).
+
+A second workflow, "Shader packs" (`.github/workflows/shaderpacks.yml`), is run by hand from the
+Actions page or by pushing to a branch whose name starts with `iris`. It downloads Sodium, Iris
+and shader packs from Modrinth and runs the same client test with them on OpenGL: Sodium alone,
+Iris with the pack off, each pack, and one pack with everything handed over. For Iris it tries the
+Sodium versions Iris may accept, first on the NeoForge the mod is built for and then on the older
+one named in the workflow, where it also runs the server test and checks that the mod compiles to
+the very same class files. It reports and never fails: whether those mods exist for the game
+version, and start, is not in this repository's hands. (In a development environment the game
+checks every draw strictly; Iris with a pack on does not pass that check and runs its own
+development game with it switched off, so the runs with a pack switch it off too.)
 
 Locally: JDK 25 and a Rust toolchain, then `./gradlew build`. The jar lands in `build/libs/`.
 Without Rust the build still works; that jar only has the Java simulation.
@@ -140,6 +202,10 @@ cargo run --release --example dump -- particles.bin            # a scene with a 
 - The server does not simulate goo, so where a stream or a thrown lump ends up is its estimate
   (a throw followed until it meets a block). Mobs and falls go by that estimate; what you see and
   wade through is the real thing on your client.
+- Under a shader pack, goo that is handed to the pack is plain translucent geometry: no bending
+  of what lies behind it, no amber deepening per pixel; how it is lit is the pack's doing. Clear
+  goo drawn as a liquid over the pack's picture is the other way round: it looks as it does
+  without a pack, and the pack's light, shadows and effects pass it by.
 - The liquid look draws the goo after everything else in the world: goo behind stained glass or
   water is drawn over them or hidden by them, depending on the graphics settings. It costs a few
   full-screen passes; `/goolook shader` is the cheaper way.

@@ -9,7 +9,7 @@ import java.util.Locale;
 
 /** Rust core through JNI. Use {@link #available()} before constructing. */
 public final class NativeSim implements GooSim {
-    public static final int ABI_VERSION = 4;
+    public static final int ABI_VERSION = 5;
     private static final int ERR = -9999;
     private static Boolean loaded;
     private static String loadMessage = "not tried";
@@ -60,9 +60,9 @@ public final class NativeSim implements GooSim {
 
     private int check(int r) { if (r == ERR) broken = true; return r; }
 
-    @Override public int addBody(int material, float x, float y, float z, float dirX, float dirZ, float age) { return check(nAddBody(handle, material, x, y, z, dirX, dirZ, age)); }
-    @Override public int addEmpty(int material, float x, float y, float z) { return check(nAddEmpty(handle, material, x, y, z)); }
-    @Override public int addResting(int material, float x, float y, float z, int count) { return check(nAddResting(handle, material, x, y, z, count)); }
+    @Override public int addBody(int material, float x, float y, float z, float dirX, float dirZ, float age, float thick) { return check(nAddBody(handle, material, x, y, z, dirX, dirZ, age, thick)); }
+    @Override public int addEmpty(int material, float x, float y, float z, float thick) { return check(nAddEmpty(handle, material, x, y, z, thick)); }
+    @Override public int addResting(int material, float x, float y, float z, int count, float thick) { return check(nAddResting(handle, material, x, y, z, count, thick)); }
     @Override public int emit(int body, float px, float py, float pz, float vx, float vy, float vz, int count, boolean lump) { return check(nEmit(handle, body, px, py, pz, vx, vy, vz, count, lump)); }
     @Override public int take(int body, float x, float y, float z, int count) { return check(nTake(handle, body, x, y, z, count)); }
     @Override public void removeBody(int body, boolean fade) { check(nRemoveBody(handle, body, fade)); }
@@ -82,9 +82,9 @@ public final class NativeSim implements GooSim {
     private static native int nVersion();
     private static native long nCreate(int n, int maxBodies);
     private static native void nDestroy(long h);
-    private static native int nAddBody(long h, int mat, float x, float y, float z, float dirX, float dirZ, float age);
-    private static native int nAddEmpty(long h, int mat, float x, float y, float z);
-    private static native int nAddResting(long h, int mat, float x, float y, float z, int count);
+    private static native int nAddBody(long h, int mat, float x, float y, float z, float dirX, float dirZ, float age, float thick);
+    private static native int nAddEmpty(long h, int mat, float x, float y, float z, float thick);
+    private static native int nAddResting(long h, int mat, float x, float y, float z, int count, float thick);
     private static native int nEmit(long h, int body, float px, float py, float pz, float vx, float vy, float vz, int count, boolean lump);
     private static native int nTake(long h, int body, float x, float y, float z, int count);
     private static native int nRemoveBody(long h, int body, boolean fade);

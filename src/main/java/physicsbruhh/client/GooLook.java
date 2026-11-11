@@ -78,6 +78,13 @@ final class GooLook {
                                 "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
                                 info[0], info[1], info[2], info[3], ms, speed), false);
                     }
+                    if (Packs.active) {
+                        context.getSource().sendSuccess(() -> GooFluid.inUse()
+                                ? Component.translatableWithFallback("commands.physicsbruhh.look.info.pack.liquid",
+                                        "A shader pack is on: clear goo is drawn as a liquid over the pack's picture; goo with the block textures is handed to the pack (/goolook shader hands over both)")
+                                : Component.translatableWithFallback("commands.physicsbruhh.look.info.pack",
+                                        "A shader pack is on: goo is handed to it as ordinary translucent geometry, and the pack lights it"), false);
+                    }
                     return 1;
                 }))
                 .then(Commands.literal("plain").executes(context -> {

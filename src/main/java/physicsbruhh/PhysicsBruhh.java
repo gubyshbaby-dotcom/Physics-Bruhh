@@ -1,5 +1,9 @@
 package physicsbruhh;
 
+import com.mojang.serialization.Codec;
+import net.minecraft.core.component.DataComponentType;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import com.mojang.logging.LogUtils;
 import java.util.function.Supplier;
 import net.minecraft.core.registries.Registries;
@@ -38,6 +42,11 @@ public class PhysicsBruhh {
     public static final DeferredHolder<EntityType<?>, EntityType<GooEntity>> SLIME_GOO = ENTITIES.registerEntityType(
             "slime_goo", GooEntity::new, MobCategory.MISC, b -> b.sized(0.9F, 0.9F).clientTrackingRange(8).updateInterval(20));
 
+    public static final DeferredRegister.DataComponents COMPONENTS = DeferredRegister.createDataComponents(Registries.DATA_COMPONENT_TYPE, MODID);
+    /** On a block of honey or slime as an item: how thick the goo it turns into will be, see {@link GooThickness}. */
+    public static final DeferredHolder<DataComponentType<?>, DataComponentType<Float>> THICKNESS = COMPONENTS.registerComponentType(
+            "thickness", builder -> builder.persistent(Codec.FLOAT).networkSynchronized(ByteBufCodecs.FLOAT));
+
     public static final GameRuleCategory RULE_CATEGORY = new GameRuleCategory(Identifier.fromNamespaceAndPath(MODID, "goo"));
     private static GameRule<Boolean> physicalGoo;
     /** {@code /gamerule physicsbruhh:physical_goo false} turns honey and slime back into ordinary blocks. */
@@ -48,6 +57,8 @@ public class PhysicsBruhh {
 
     public PhysicsBruhh(IEventBus modBus, ModContainer container) {
         ENTITIES.register(modBus);
+        COMPONENTS.register(modBus);
+        modBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("1").playToServer(GooThickness.Turn.TYPE, GooThickness.Turn.CODEC, GooThickness::handle));
         // GameRules.registerBoolean puts the rule into the registry itself, so it must not go through a DeferredRegister
         modBus.addListener((RegisterEvent e) -> {
             if (e.getRegistryKey().equals(Registries.GAME_RULE)) {

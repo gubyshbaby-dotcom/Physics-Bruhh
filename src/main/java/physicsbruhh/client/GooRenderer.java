@@ -7,6 +7,7 @@ import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
@@ -27,6 +28,10 @@ import physicsbruhh.sim.GooSim;
  * depth, material and the light level. The game rule {@code clear_goo} picks between the block's
  * pixel texture and a clear liquid as the body colour.
  *
+ * <p>While a shader pack is on (see {@link Packs}) none of the mod's shaders are used: the quads go
+ * out as ordinary translucent geometry with the light at their place and their normals, and the
+ * pack lights them, mirrors in them and throws their shadow as it does with everything else.
+ *
  * <p>{@code /goolook plain} (or {@code -Dphysicsbruhh.shader=false}) switches to the fallback that
  * needs no shader of its own: the same two looks, shaded per vertex on the CPU and drawn through
  * one of the game's stock pipelines. It is there in case the shader does not work on some machine.
@@ -43,6 +48,8 @@ public final class GooRenderer {
     private static int seenVersion = -1;
     /** Draw callbacks that actually ran, and quads emitted by them (smoke test and debugging). */
     static volatile int drawCalls, drawnQuads;
+    /** Draw callbacks that handed the goo to a shader pack (smoke test). */
+    static volatile int packDraws;
     /** Use the goo shader (true) or the stock-pipeline fallback (false). */
     static volatile boolean shader = !"false".equalsIgnoreCase(System.getProperty("physicsbruhh.shader"));
 
@@ -97,6 +104,14 @@ public final class GooRenderer {
                 final int alpha = ALPHA[mat];
                 final boolean clear = GooClient.clearLook;
                 final int material = mat;
+                if (Packs.active) {
+                    // a shader pack is drawing the world: plain translucent geometry of the game, which the pack lights and shadows itself
+                    event.getSubmitNodeCollector().submitCustomGeometry(stack, RenderTypes.entityTranslucent(clear ? WHITE : TEXTURES[mat]), (pose, consumer) -> {
+                        drawCalls++; drawnQuads += count; packDraws++;
+                        packQuads(pose, consumer, level, origin, data, count, material, clear, camX, camY, camZ);
+                    });
+                    continue;
+                }
                 if (shader) {
                     event.getSubmitNodeCollector().submitCustomGeometry(stack, GooPipelines.type(TEXTURES[mat]), (pose, consumer) -> {
                         drawCalls++; drawnQuads += count;
@@ -155,6 +170,67 @@ public final class GooRenderer {
                         .setOverlay(OverlayTexture.NO_OVERLAY)
                         .setLight(light)
                         .setNormal(pose, nx / len, ny / len, nz / len);
+            }
+        }
+    }
+
+    /**
+     * Hands the quads to whatever shader pack is on, as translucent geometry like any other in the
+     * game: the block's texture (or, for clear goo, a plain colour that deepens with the depth of
+     * goo behind it), the light where the quad is, and its normal. What the light does to it is
+     * the pack's business.
+     */
+    private static void packQuads(PoseStack.Pose pose, VertexConsumer consumer, ClientLevel level, BlockPos origin, float[] data, int count, int material, boolean clear, float camX, float camY, float camZ) {
+        Long2IntOpenHashMap lightCache = new Long2IntOpenHashMap();
+        lightCache.defaultReturnValue(-1);
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        final float[][] pass = PASS[material];
+        final float[] thin = THIN[material], thick = THICK[material];
+        for (int q = 0; q < count; q++) {
+            int o = q * GooSim.FLOATS_PER_QUAD;
+            pos.set(origin.getX() + (int) Math.floor(data[o]), origin.getY() + (int) Math.floor(data[o + 1] + 0.05F), origin.getZ() + (int) Math.floor(data[o + 2]));
+            int light = lightCache.get(pos.asLong());
+            if (light < 0) {
+                light = level.getBrightness(LightLayer.BLOCK, pos) << 4 | level.getBrightness(LightLayer.SKY, pos) << 20;
+                lightCache.put(pos.asLong(), light);
+            }
+            float fx = (float) Math.floor(data[o]), fy = (float) Math.floor(data[o + 1]), fz = (float) Math.floor(data[o + 2]);
+            float ax = Math.abs(data[o + 3]), ay = Math.abs(data[o + 4]), az = Math.abs(data[o + 5]);
+            if (clear) {
+                // one clean layer: surfaces facing away are left out (threads have no depth and are flat ribbons, always drawn)
+                boolean thread = data[o + 3] * data[o + 3] + data[o + 4] * data[o + 4] + data[o + 5] * data[o + 5] < 1.002F;
+                if (!thread) {
+                    float cx = 0.0F, cy = 0.0F, cz = 0.0F, sx = 0.0F, sy = 0.0F, sz = 0.0F;
+                    for (int v = 0; v < 4; v++) { int i = o + v * 6; cx += data[i]; cy += data[i + 1]; cz += data[i + 2]; sx += data[i + 3]; sy += data[i + 4]; sz += data[i + 5]; }
+                    if (sx * (camX - cx * 0.25F) + sy * (camY - cy * 0.25F) + sz * (camZ - cz * 0.25F) < 0.0F) continue;
+                }
+            }
+            for (int v = 0; v < 4; v++) {
+                int i = o + v * 6;
+                float x = data[i], y = data[i + 1], z = data[i + 2], nx = data[i + 3], ny = data[i + 4], nz = data[i + 5];
+                float len = Math.max(1.0e-6F, (float) Math.sqrt(nx * nx + ny * ny + nz * nz));
+                nx /= len; ny /= len; nz /= len;
+                int colour;
+                float u, w;
+                if (clear) {
+                    float th = Math.min(Math.max(0.0F, len - 1.0F), 2.5F) + 0.03F;
+                    int ti = (int) (th * (ABSORB_STEPS / ABSORB_MAX));
+                    float a = Math.max(0.45F, 1.0F - (0.30F * pass[0][ti] + 0.55F * pass[1][ti] + 0.15F * pass[2][ti]));
+                    float k = Math.min(1.0F, Math.max(0.0F, (th - 0.1F) / 1.3F));
+                    k = k * k * (3.0F - 2.0F * k);
+                    int r = (int) ((thin[0] + (thick[0] - thin[0]) * k) * 255.0F), g = (int) ((thin[1] + (thick[1] - thin[1]) * k) * 255.0F), b = (int) ((thin[2] + (thick[2] - thin[2]) * k) * 255.0F);
+                    colour = ((int) (a * 255.0F) << 24) | (r << 16) | (g << 8) | b;
+                    u = 0.5F; w = 0.5F;
+                } else {
+                    colour = (ALPHA[material] << 24) | 0xFFFFFF;
+                    if (ay >= ax && ay >= az) { u = x - fx; w = z - fz; } else if (ax >= az) { u = z - fz; w = 1.0F - (y - fy); } else { u = x - fx; w = 1.0F - (y - fy); }
+                }
+                consumer.addVertex(pose, x, y, z)
+                        .setColor(colour)
+                        .setUv(u, w)
+                        .setOverlay(OverlayTexture.NO_OVERLAY)
+                        .setLight(light)
+                        .setNormal(pose, nx, ny, nz);
             }
         }
     }

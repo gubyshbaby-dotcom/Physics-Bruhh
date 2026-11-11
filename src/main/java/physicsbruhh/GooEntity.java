@@ -55,6 +55,8 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     private static final EntityDataAccessor<Vector3fc> PUSH = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.VECTOR3);
     /** The last goo came in as one lump (a thrown slime ball) rather than as a stream. */
     private static final EntityDataAccessor<Boolean> LUMP = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.BOOLEAN);
+    /** How thick this piece is, as a factor on the usual: it comes from the block it was made of, see {@link GooThickness}. */
+    private static final EntityDataAccessor<Float> THICK = SynchedEntityData.defineId(GooEntity.class, EntityDataSerializers.FLOAT);
     /** Poured or thrown rather than a block that turned into goo. */
     private boolean poured;
     private int ageTicks;
@@ -84,6 +86,12 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
 
     /** How much goo this piece holds, in particles ({@link GooSim#BLOCK} is a whole block). */
     public int amount() { return this.entityData.get(AMOUNT); }
+
+    /** How thick this piece is; 1 is the usual honey or slime. */
+    public float thick() { return this.entityData.get(THICK); }
+
+    /** Server side, before the marker is added to the world. */
+    public void setThick(float thick) { this.entityData.set(THICK, GooThickness.sane(thick)); }
 
     /** Poured or thrown, rather than a block that turned into goo. */
     public boolean poured() { return poured; }
@@ -154,6 +162,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
         builder.define(SPOT, new Vector3f());
         builder.define(PUSH, new Vector3f());
         builder.define(LUMP, false);
+        builder.define(THICK, 1.0F);
     }
 
     @Override
@@ -210,7 +219,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
             Vec3 v = e.getDeltaMovement();
             if (slime) {
                 if (v.y < -0.12 && !e.isSuppressingBounce()) {
-                    e.setDeltaMovement(v.x, -v.y * (e instanceof LivingEntity ? 1.0 : 0.8), v.z);
+                    e.setDeltaMovement(v.x, -v.y * (e instanceof LivingEntity ? 1.0 : 0.8) * GooThickness.slimeBounce(thick()), v.z);
                     e.resetFallDistance();
                     level.playSound(null, e.getX(), e.getY(), e.getZ(), SoundEvents.SLIME_BLOCK_FALL, SoundSource.BLOCKS, 0.6F, 1.0F);
                 } else if (e.onGround() && Math.abs(v.y) < 0.1 && !e.isSteppingCarefully()) {
@@ -218,7 +227,8 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
                     e.setDeltaMovement(v.x * f, v.y, v.z * f);
                 }
             } else {
-                e.setDeltaMovement(v.x * 0.4, v.y > 0.0 ? v.y * 0.5 : v.y, v.z * 0.4);
+                double slow = GooThickness.honeySpeed(thick());
+                e.setDeltaMovement(v.x * slow, v.y > 0.0 ? v.y * GooThickness.honeyJump(thick()) : v.y, v.z * slow);
             }
         }
     }
@@ -236,7 +246,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
         level.levelEvent(null, 2001, this.blockPosition(), Block.getId((slime ? Blocks.SLIME_BLOCK : Blocks.HONEY_BLOCK).defaultBlockState()));
         // a whole block's worth comes back as the block; less slime as slime balls; less honey is lost (it takes a bottle to keep honey)
         int amount = amount();
-        if (amount > GooSim.BLOCK - GooSim.BALL / 2) Block.popResource(level, this.blockPosition(), new ItemStack(slime ? Items.SLIME_BLOCK : Items.HONEY_BLOCK));
+        if (amount > GooSim.BLOCK - GooSim.BALL / 2) Block.popResource(level, this.blockPosition(), GooThickness.block(material(), thick()));
         else if (slime && amount >= GooSim.BALL / 2) Block.popResource(level, this.blockPosition(), new ItemStack(Items.SLIME_BALL, Math.max(1, Math.round(amount / (float) GooSim.BALL))));
         this.discard();
         return true;
@@ -293,6 +303,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     protected void readAdditionalSaveData(ValueInput input) {
         ageTicks = input.getIntOr("Age", 0);
         poured = input.getBooleanOr("Poured", false);
+        this.entityData.set(THICK, GooThickness.sane(input.getFloatOr("Thick", 1.0F)));
         this.entityData.set(AMOUNT, Math.max(1, Math.min(GooSim.BLOCK, input.getIntOr("Amount", GooSim.BLOCK))));
     }
 
@@ -300,6 +311,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     protected void addAdditionalSaveData(ValueOutput output) {
         output.putInt("Age", ageTicks);
         output.putBoolean("Poured", poured);
+        output.putFloat("Thick", thick());
         output.putInt("Amount", amount());
     }
 

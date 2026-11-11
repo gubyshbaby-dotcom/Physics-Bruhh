@@ -17,6 +17,9 @@ pub const MAX_SPR: usize = 16;
 pub const HONEY: u8 = 0;
 pub const SLIME: u8 = 1;
 pub const DT: f32 = 1.0 / 60.0;
+/// How much thinner or thicker than usual a piece of goo may be.
+pub const THICK_MIN: f32 = 0.25;
+pub const THICK_MAX: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Material {
@@ -51,6 +54,37 @@ pub struct Material {
 }
 
 impl Material {
+    /// This material as a thicker (`d` > 1) or thinner (`d` < 1) piece of goo; 1 leaves it as it is.
+    /// Thick honey melts later, creeps and flows more slowly and holds a heap; thin honey runs like
+    /// syrup. Thick slime is a stiff jelly that hardly wobbles, thin slime is soft and saggy.
+    pub fn thick(&self, d: f32) -> Material {
+        let d = if d.is_finite() && d > 0.0 { d.clamp(THICK_MIN, THICK_MAX) } else { 1.0 };
+        if d == 1.0 { return *self; }
+        let mut m = *self;
+        let root = d.sqrt();
+        if m.dynamic_springs {
+            m.melt_time *= d;
+            m.damp_fresh *= root;
+            m.damp_melted *= d;
+            m.spring_k1 = (m.spring_k1 * d).min(0.5);
+            m.plast0 /= d;
+            m.plast1 /= d;
+            m.yield_ *= d;
+            m.adh_creep /= d;
+            m.coh_k = (m.coh_k * root).min(0.45);
+            m.xsph = (m.xsph * root).min(0.5);
+        } else {
+            // per solver iteration a spring closes this share of its error: d springs in a row close 1 - (1 - k)^d
+            let stiff = |k: f32| 1.0 - (1.0 - k).powf(d);
+            m.spring_k0 = stiff(m.spring_k0);
+            m.spring_k1 = stiff(m.spring_k1);
+            m.shock_k = stiff(m.shock_k);
+            m.damp_fresh *= root;
+            m.damp_melted *= root;
+        }
+        m
+    }
+
     pub fn honey() -> Material {
         Material {
             melt_time: 3.5, damp_fresh: 1.2, damp_melted: 11.0,
@@ -103,6 +137,11 @@ pub struct Body {
     pub emit_pos: [f32; 3],
     pub emit_vel: [f32; 3],
     pub emit_acc: f32,
+    /// How much the stream held when it began, and how long it has been running (seconds): it swells, sways and thins out by these.
+    pub emit_total: u32,
+    pub emit_time: f32,
+    /// How thick this piece is, see [`Material::thick`]; 1 is the usual.
+    pub thick: f32,
     /// Until this time (world clock) the body has particles young enough to bond to what they touch.
     pub young_until: f32,
 }
@@ -125,6 +164,8 @@ pub struct World {
     pub n: usize, pub nb: usize, pub slots: usize, pub maxp: usize,
     pub s: f32, pub h: f32, pub side: f32, pub rc: f32,
     pub mats: [Material; 2],
+    /// The material of each body: the plain one, thickened or thinned as that piece is.
+    pub bmats: Vec<Material>,
     pub gravity: f32, pub iters: usize, pub visc_iters: usize, pub eps: f32, pub k_corr: f32,
     pub kill_y: f32,
     pub p: Vec<f32>, q: Vec<f32>, v: Vec<f32>, pub alive: Vec<u8>, pub scale: Vec<f32>,
@@ -225,6 +266,8 @@ const YOUNG: f32 = 2.0;
 const FLIGHT_MAX: f32 = 4.0;
 /// Particles in one layer of a stream (one in the middle, six around it).
 const STREAM_LAYER: usize = 7;
+/// ... and at most this many, where it bulges.
+const STREAM_BULGE: usize = 12;
 /// Filler points [`World::particles`] may add along stretched springs.
 pub const PARTICLE_FILLERS: usize = 16_000;
 
@@ -335,6 +378,7 @@ impl World {
         World {
             n, nb, slots, maxp, s, h, side, rc: s * 0.5,
             mats: [Material::honey(), Material::slime()],
+            bmats: vec![Material::honey(); max_bodies],
             gravity: 9.8, iters: 3, visc_iters: 1, eps: 60.0, k_corr: 2.0e-4, kill_y: -64.0,
             p: vec![0.0; maxp * 3], q: vec![0.0; maxp * 3], v: vec![0.0; maxp * 3], alive: vec![0; maxp], scale: vec![0.0; maxp],
             anc_kind: vec![0; maxp], anc_id: vec![0; maxp], anc_pt: vec![0.0; maxp * 3], anc_loc: vec![0.0; maxp * 3], anc_stick: vec![0.0; maxp], anc_cool: vec![0.0; maxp], anc_d: vec![0.0; maxp * 3], anc_axis: vec![3; maxp],
@@ -396,12 +440,16 @@ impl World {
     }
 
     /// Adds a body with nothing in it yet, at the block cell (x, y, z); goo arrives through [`World::emit`].
-    pub fn add_empty(&mut self, mat: u8, x: f32, y: f32, z: f32) -> i32 {
+    pub fn add_empty(&mut self, mat: u8, x: f32, y: f32, z: f32) -> i32 { self.add_empty_thick(mat, x, y, z, 1.0) }
+
+    /// [`World::add_empty`] for goo thicker or thinner than usual, see [`Material::thick`].
+    pub fn add_empty_thick(&mut self, mat: u8, x: f32, y: f32, z: f32, thick: f32) -> i32 {
         let mat = if mat == SLIME { SLIME } else { HONEY };
         let slot = match self.take_slot() { Some(s) => s, None => return -1 };
         self.rev = self.rev.wrapping_add(1);
+        self.bmats[slot] = self.mats[mat as usize].thick(thick);
         self.bodies[slot] = Body {
-            state: 1, mat, awake: true, age: self.mats[mat as usize].melt_time + 2.0, born: self.clock, fade: 1.0, rev: self.rev,
+            state: 1, mat, awake: true, age: self.bmats[slot].melt_time + 2.0, born: self.clock, fade: 1.0, rev: self.rev, thick,
             bb: [x, y, z, x + 1.0, y + 1.0, z + 1.0], ..Body::default()
         };
         slot as i32
@@ -409,15 +457,19 @@ impl World {
 
     /// Adds `count` particles of goo already lying at rest on the floor of the block cell (x, y, z):
     /// what a stream left behind, seen again later. Honey lies as a puddle, slime as a lump.
-    pub fn add_resting(&mut self, mat: u8, x: f32, y: f32, z: f32, count: u32) -> i32 {
+    pub fn add_resting(&mut self, mat: u8, x: f32, y: f32, z: f32, count: u32) -> i32 { self.add_resting_thick(mat, x, y, z, count, 1.0) }
+
+    /// [`World::add_resting`] for goo thicker or thinner than usual, see [`Material::thick`].
+    pub fn add_resting_thick(&mut self, mat: u8, x: f32, y: f32, z: f32, count: u32, thick: f32) -> i32 {
         let mat = if mat == SLIME { SLIME } else { HONEY };
         let count = (count as usize).min(self.nb);
         let slot = match self.take_slot() { Some(s) => s, None => return -1 };
         let (n, s, side, nb) = (self.n, self.s, self.side, self.nb);
         let (cx, cz) = (x + 0.5, z + 0.5);
         self.rev = self.rev.wrapping_add(1);
+        self.bmats[slot] = self.mats[mat as usize].thick(thick);
         self.bodies[slot] = Body {
-            state: 1, mat, awake: true, age: self.mats[mat as usize].melt_time + 8.0, born: self.clock, fade: 1.0, fresh: mat == SLIME, rev: self.rev,
+            state: 1, mat, awake: true, age: self.bmats[slot].melt_time + 8.0, born: self.clock, fade: 1.0, fresh: mat == SLIME, rev: self.rev, thick,
             bb: [x - 0.5, y - 0.2, z - 0.5, x + 1.5, y + 1.3, z + 1.5], ..Body::default()
         };
         if mat == SLIME {
@@ -455,7 +507,7 @@ impl World {
         let room = self.nb as u32 - self.amount(b).min(self.nb as u32);
         let count = count.min(room);
         if count == 0 || !pos.iter().chain(vel.iter()).all(|v| v.is_finite()) { return 0; }
-        let m = self.mats[self.bodies[b].mat as usize];
+        let m = self.bmats[b];
         {
             let bd = &mut self.bodies[b];
             bd.awake = true; bd.calm = 0;
@@ -464,7 +516,8 @@ impl World {
         }
         if !lump {
             let bd = &mut self.bodies[b];
-            bd.pending += count; bd.emit_pos = pos; bd.emit_vel = vel;
+            if bd.pending == 0 { bd.emit_total = 0; bd.emit_time = 0.0; }
+            bd.pending += count; bd.emit_total += count; bd.emit_pos = pos; bd.emit_vel = vel;
             return count;
         }
         // a rounded lump: the places of a small cube nearest to its middle
@@ -530,10 +583,14 @@ impl World {
 
     /// Adds a body occupying the block cell whose minimum corner is (x, y, z).
     /// `age` > 6 s spawns honey already melted (used when an old puddle comes back into view).
-    pub fn add_body(&mut self, mat: u8, x: f32, y: f32, z: f32, dirx: f32, dirz: f32, age: f32) -> i32 {
+    pub fn add_body(&mut self, mat: u8, x: f32, y: f32, z: f32, dirx: f32, dirz: f32, age: f32) -> i32 { self.add_body_thick(mat, x, y, z, dirx, dirz, age, 1.0) }
+
+    /// [`World::add_body`] for goo thicker or thinner than usual, see [`Material::thick`].
+    pub fn add_body_thick(&mut self, mat: u8, x: f32, y: f32, z: f32, dirx: f32, dirz: f32, age: f32, thick: f32) -> i32 {
         let mat = if mat == SLIME { SLIME } else { HONEY };
         let slot = match self.take_slot() { Some(s) => s, None => return -1 };
-        let m = self.mats[mat as usize];
+        self.bmats[slot] = self.mats[mat as usize].thick(thick);
+        let m = self.bmats[slot];
         let (n, s, side, nb) = (self.n, self.s, self.side, self.nb);
         let base = slot * nb;
         let puddle = mat == HONEY && age > 6.0;
@@ -573,7 +630,7 @@ impl World {
             }
         }
         self.bodies[slot] = Body {
-            state: 1, mat, awake: true, age: age.max(0.0), born: self.clock, fade: 1.0, fresh: !puddle, count: nb as u32,
+            state: 1, mat, awake: true, age: age.max(0.0), born: self.clock, fade: 1.0, fresh: !puddle, count: nb as u32, thick,
             soft: if crowded { SOFT_TIME } else { 0.0 }, rev: { self.rev = self.rev.wrapping_add(1); self.rev },
             bb: [x - 0.5, y - 0.2, z - 0.5, x + 1.5, y + 1.3, z + 1.5], ..Body::default()
         };
@@ -638,7 +695,7 @@ impl World {
         for b in 0..self.slots {
             let bd = &self.bodies[b];
             if bd.state == 0 { continue; }
-            let m = &self.mats[bd.mat as usize];
+            let m = &self.bmats[b];
             let jelly = !m.dynamic_springs;
             let slime = if bd.mat == SLIME { 2.0 } else { 0.0 };
             for i in b * self.nb..(b + 1) * self.nb {
@@ -798,28 +855,51 @@ impl World {
 
     /// Lets the next layers of body `b`'s stream out of its nozzle: one layer for every particle
     /// spacing the stream has travelled, so the stream is as dense as goo at rest.
+    /// Lets the next part of a stream out of its spout. A stream of honey is never an even rod: it
+    /// starts as a thread, swells, sways a little from side to side, comes in thicker and thinner
+    /// pulses, and thins out to a thread and single drops as the bottle runs empty.
     fn stream_out(&mut self, b: usize, dt: f32) {
         let (pos, vel) = (self.bodies[b].emit_pos, self.bodies[b].emit_vel);
-        let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt().max(0.3);
-        let dir = if speed > 0.31 { [vel[0] / speed, vel[1] / speed, vel[2] / speed] } else { [0.0, -1.0, 0.0] };
+        let speed0 = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt().max(0.3);
+        let dir0 = if speed0 > 0.31 { [vel[0] / speed0, vel[1] / speed0, vel[2] / speed0] } else { [0.0, -1.0, 0.0] };
         // two directions across the stream
-        let up = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
-        let mut u = [dir[1] * up[2] - dir[2] * up[1], dir[2] * up[0] - dir[0] * up[2], dir[0] * up[1] - dir[1] * up[0]];
+        let up = if dir0[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+        let mut u = [dir0[1] * up[2] - dir0[2] * up[1], dir0[2] * up[0] - dir0[0] * up[2], dir0[0] * up[1] - dir0[1] * up[0]];
         let ul = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
         for a in 0..3 { u[a] /= ul; }
-        let w = [dir[1] * u[2] - dir[2] * u[1], dir[2] * u[0] - dir[0] * u[2], dir[0] * u[1] - dir[1] * u[0]];
+        let w = [dir0[1] * u[2] - dir0[2] * u[1], dir0[2] * u[0] - dir0[0] * u[2], dir0[0] * u[1] - dir0[1] * u[0]];
         let s = self.s;
+        // where in its swaying and pulsing this stream is: by its own clock, each stream out of step with the others
+        self.bodies[b].emit_time += dt;
+        let t = self.bodies[b].emit_time as f64;
+        let ph = b as f64 * 1.618 + (pos[0] as f64 + pos[2] as f64) * 0.37;
+        let wave = |rate: f64, shift: f64| (t * rate + ph * shift).sin() as f32;
+        // (the fast parts make bulges and kinks a hand apart along the stream, the slow ones move the whole of it about)
+        let sway_u = 0.09 * wave(5.3, 1.0) + 0.07 * wave(13.7, 1.7) + 0.03 * wave(29.0, 0.4);
+        let sway_w = 0.09 * wave(4.3, 2.1) + 0.07 * wave(15.1, 0.6) + 0.03 * wave(31.0, 1.2);
+        let mut dir = [dir0[0] + u[0] * sway_u + w[0] * sway_w, dir0[1] + u[1] * sway_u + w[1] * sway_w, dir0[2] + u[2] * sway_u + w[2] * sway_w];
+        let dl = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        for a in 0..3 { dir[a] /= dl; }
+        let speed = speed0 * (1.0 + 0.10 * wave(8.9, 1.3) + 0.06 * wave(19.0, 0.9));
+        let pulse = 1.0 + 0.15 * wave(6.1, 1.0) + 0.40 * wave(23.0, 2.3) + 0.25 * wave(41.0, 0.7);
         self.bodies[b].emit_acc += speed * dt;
         self.bodies[b].awake = true; self.bodies[b].calm = 0;
         self.bodies[b].young_until = self.clock + YOUNG + 1.0;
         while self.bodies[b].emit_acc >= s && self.bodies[b].pending > 0 {
             self.bodies[b].emit_acc -= s;
             let ahead = self.bodies[b].emit_acc; // this layer is already that far out
+            // how full the stream runs: a thread at first, soon its full width, a thread again at the end
+            let total = self.bodies[b].emit_total.max(1) as f32;
+            let done = 1.0 - self.bodies[b].pending as f32 / total;
+            let width = (0.25 + 0.75 * smooth(done / 0.12)) * (0.2 + 0.8 * (1.0 - smooth((done - 0.65) / 0.35))) * pulse;
+            let layer = ((STREAM_LAYER as f32 * width).round() as usize).clamp(1, STREAM_BULGE);
             let turn = self.rnd() * std::f32::consts::TAU;
-            for k in 0..STREAM_LAYER {
+            for k in 0..layer {
                 if self.bodies[b].pending == 0 { break; }
-                let (ca, cb) = if k == 0 { (0.0, 0.0) } else { let a = turn + k as f32 * std::f32::consts::TAU / 6.0; (a.cos() * s, a.sin() * s) };
-                let (j0, j1, j2) = ((self.rnd() - 0.5) * 0.06 * s, (self.rnd() - 0.5) * 0.06 * s, 1.0 + (self.rnd() - 0.5) * 0.04);
+                // one in the middle, six around it, and where the stream bulges a second ring in the gaps of the first
+                let (ca, cb) = if k == 0 { (0.0, 0.0) } else if k < 7 { let a = turn + k as f32 * std::f32::consts::TAU / 6.0; (a.cos() * s, a.sin() * s) }
+                    else { let a = turn + (k as f32 + 0.5) * std::f32::consts::TAU / 6.0; (a.cos() * s * 1.75, a.sin() * s * 1.75) };
+                let (j0, j1, j2) = ((self.rnd() - 0.5) * 0.3 * s, (self.rnd() - 0.5) * 0.3 * s, 1.0 + (self.rnd() - 0.5) * 0.10);
                 let at = [pos[0] + dir[0] * ahead + u[0] * (ca + j0) + w[0] * (cb + j1), pos[1] + dir[1] * ahead + u[1] * (ca + j0) + w[1] * (cb + j1), pos[2] + dir[2] * ahead + u[2] * (ca + j0) + w[2] * (cb + j1)];
                 if !self.spawn(b, at, [dir[0] * speed * j2, dir[1] * speed * j2, dir[2] * speed * j2], true) { self.bodies[b].pending = 0; break; }
                 self.bodies[b].pending -= 1;
@@ -868,7 +948,7 @@ impl World {
                 }
                 continue;
             }
-            let m = self.mats[self.bodies[b].mat as usize];
+            let m = self.bmats[b];
             let bd = &mut self.bodies[b];
             bd.age += dt;
             bd.melt = if m.melt_time > 0.0 { smooth(bd.age / m.melt_time) } else { 0.0 };
@@ -1061,12 +1141,12 @@ impl World {
         self.steps = self.steps.wrapping_add(1);
         let look = self.steps & 1 == 0 || (0..slots).any(|b| self.bodies[b].fresh && self.bodies[b].state == 1);
         let wanted: Vec<Vec<(u32, u32)>> = if !look { Vec::new() } else {
-            let (nbr, nbr_lo, nbr_hi, q, spr_n, spr_j, bodies, mats, born, clock) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.q[..], &self.spr_n[..], &self.spr_j[..], &self.bodies[..], &self.mats, &self.born[..], self.clock);
+            let (nbr, nbr_lo, nbr_hi, q, spr_n, spr_j, bodies, mats, born, clock) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.q[..], &self.spr_n[..], &self.spr_j[..], &self.bodies[..], &self.bmats[..], &self.born[..], self.clock);
             self.act.par_chunks(CHUNK).map(|chunk| {
                 let mut out = Vec::new();
                 for &iu in chunk {
                     let i = iu as usize; let bi = i / nb; let mi = bodies[bi].mat;
-                    let (dynamic, fresh) = (mats[mi as usize].dynamic_springs, bodies[bi].fresh);
+                    let (dynamic, fresh) = (mats[bi].dynamic_springs, bodies[bi].fresh);
                     // goo that does not flow only bonds when it is new: a whole block at once, or lumps
                     // that have just been added, to each other and to what they land on in their own body
                     let young = !dynamic && !fresh && clock < bodies[bi].young_until;
@@ -1105,10 +1185,10 @@ impl World {
             let mut root: Vec<usize> = (0..slots).collect();
             fn find(r: &mut Vec<usize>, mut a: usize) -> usize { while r[a] != a { r[a] = r[r[a]]; a = r[a]; } a }
             if slots <= 64 {
-                let (spr_n, spr_j, alive, bodies, mats, live) = (&self.spr_n[..], &self.spr_j[..], &self.alive[..], &self.bodies[..], &self.mats, &live[..]);
+                let (spr_n, spr_j, alive, mats, live) = (&self.spr_n[..], &self.spr_j[..], &self.alive[..], &self.bmats[..], &live[..]);
                 let joined: Vec<u64> = (0..slots).into_par_iter().map(|b| {
                     let mut m = 0u64;
-                    if !live[b] || !mats[bodies[b].mat as usize].dynamic_springs { return m; }
+                    if !live[b] || !mats[b].dynamic_springs { return m; }
                     for i in b * nb..(b + 1) * nb { if alive[i] == 0 { continue; }
                         for k in 0..spr_n[i] as usize { let bj = spr_j[i * MAX_SPR + k] as usize / nb; if bj != b && live[bj] { m |= 1 << bj; } } }
                     m
@@ -1131,7 +1211,7 @@ impl World {
             // density and its multiplier; the kernel value and gradient towards every neighbour are kept for the correction
             let t_sub = std::time::Instant::now();
             {
-                let (q, nbr, nbr_lo, nbr_hi, bodies, mats) = (&self.q[..], &self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.bodies[..], &self.mats);
+                let (q, nbr, nbr_lo, nbr_hi, mats) = (&self.q[..], &self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.bmats[..]);
                 let (rho, lam, nw, ng) = (Shared::of(&mut self.rho), Shared::of(&mut self.lam), Shared::of(&mut self.nw), Shared::of(&mut self.ng));
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3;
                     let (x, y, z) = (q[o], q[o + 1], q[o + 2]);
@@ -1148,7 +1228,7 @@ impl World {
                         r += w; s2 += gx * gx + gy * gy + gz * gz;
                         sx += gx; sy += gy; sz += gz;
                     }
-                    let m = &mats[bodies[i / nb].mat as usize];
+                    let m = &mats[i / nb];
                     let mut c = r * ir0 - 1.0;
                     if c < 0.0 { c = c.max(-m.coh_lim) * m.coh_k; }
                     let den = (s2 + sx * sx + sy * sy + sz * sz) * ir0 * ir0 + eps;
@@ -1208,7 +1288,7 @@ impl World {
                 let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
                 let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
                 let (q, anc_d) = (Shared::of(&mut self.q), Shared::of(&mut self.anc_d));
-                let (p, rho, cool, bodies, mats, kin) = (&self.p[..], &self.rho[..], &self.anc_cool[..], &self.bodies[..], &self.mats, &self.kin[..]);
+                let (p, rho, cool, mats, kin) = (&self.p[..], &self.rho[..], &self.anc_cool[..], &self.bmats[..], &self.kin[..]);
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
                     let kind = *an.kind.at(i);
                     if kind != 0 {
@@ -1216,7 +1296,7 @@ impl World {
                             let id = *an.id.at(i);
                             if let Some(b) = kin.iter().find(|b| b.id == id) { for c in 0..3 { *an.pt.at(o + c) = b.min[c] + *an.loc.at(o + c); } }
                         }
-                        let ak = mats[bodies[i / nb].mat as usize].adh_k;
+                        let ak = mats[i / nb].adh_k;
                         for c in 0..3 {
                             let d = *q.at(o + c) - *an.pt.at(o + c);
                             if last { *anc_d.at(o + c) = d; } // how far everything else dragged it this iteration
@@ -1232,13 +1312,13 @@ impl World {
 
         // ---- anchors creep / snap, springs flow / snap ----
         {
-            let (q, alive, rho, anc_d, anc_stick, anc_axis, bodies, mats) = (&self.q[..], &self.alive[..], &self.rho[..], &self.anc_d[..], &self.anc_stick[..], &self.anc_axis[..], &self.bodies[..], &self.mats);
+            let (q, alive, rho, anc_d, anc_stick, anc_axis, bodies, mats) = (&self.q[..], &self.alive[..], &self.rho[..], &self.anc_d[..], &self.anc_stick[..], &self.anc_axis[..], &self.bodies[..], &self.bmats[..]);
             let (anc_kind, anc_cool, anc_pt, anc_loc) = (Shared::of(&mut self.anc_kind), Shared::of(&mut self.anc_cool), Shared::of(&mut self.anc_pt), Shared::of(&mut self.anc_loc));
             let (spr_n, spr_j, spr_l) = (Shared::of(&mut self.spr_n), Shared::of(&mut self.spr_j), Shared::of(&mut self.spr_l));
             let rho_break = 1.6 * self.rho0;
             self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
                 let bd = &bodies[i / nb];
-                let m = &mats[bd.mat as usize];
+                let m = &mats[i / nb];
                 if *anc_kind.at(i) != 0 {
                     let (ex, ey, ez) = (anc_d[o], anc_d[o + 1], anc_d[o + 2]);
                     let d = (ex * ex + ey * ey + ez * ez).sqrt();
@@ -1296,12 +1376,12 @@ impl World {
         let w_touch = { let r = 1.3 * self.s; let t = self.h * self.h - r * r; self.kp * t * t * t };
         for _ in 0..self.visc_iters {
             {
-                let (nbr, nbr_lo, nbr_hi, nw, v, rho, bodies, mats) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.nw[..], &self.v[..], &self.rho[..], &self.bodies[..], &self.mats);
+                let (nbr, nbr_lo, nbr_hi, nw, v, rho, mats) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.nw[..], &self.v[..], &self.rho[..], &self.bmats[..]);
                 let (dpx, dpy, dpz, land) = (Shared::of(&mut self.dpx), Shared::of(&mut self.dpy), Shared::of(&mut self.dpz), Shared::of(&mut self.land));
                 let fly = &self.fly[..];
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let oi = i * 3;
                     let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
-                    let k = mats[bodies[i / nb].mat as usize].xsph / rho[i];
+                    let k = mats[i / nb].xsph / rho[i];
                     let mut landed = false;
                     for e in nbr_lo[i] as usize..nbr_hi[i] as usize {
                         let w = nw[e]; if w == 0.0 { continue; }
@@ -1342,7 +1422,7 @@ impl World {
         self.prof[5] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
         // ---- sleep / wake ----
         for b in 0..slots {
-            let m = self.mats[self.bodies[b].mat as usize];
+            let m = self.bmats[b];
             let bd = &mut self.bodies[b];
             if bd.state == 0 || !bd.awake { continue; }
             let vrms = (vsum[b] / bd.count.max(1) as f32).sqrt();

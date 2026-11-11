@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches-ignore: [probe]
+    branches-ignore: [probe, 'iris**']
   workflow_dispatch:
 
 concurrency:
@@ -160,7 +160,7 @@ jobs:
             kill $SHOTS 2> /dev/null || true
             for f in shots/$name/*.xwd; do [ -e "$f" ] || continue; convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
             echo "=== client test: $name"
-            grep -E "CLIENTTEST (stage|trace|in honey|bounced|dispensers|bottle|honey bottle|slime ball|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo .*(stopped|failed|error)|physicsbruhh.*(rror|ailed)|pipeline/goo|core/goo" "$log" | cut -c1-900 | head -160 || true
+            grep -E "CLIENTTEST (stage|trace|in honey|bounced|dispensers|bottle|honey bottle|slime ball|wheel|thickness|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo .*(stopped|failed|error)|physicsbruhh.*(rror|ailed)|pipeline/goo|core/goo|shader pack|Iris is here" "$log" | cut -c1-900 | head -170 || true
             grep -A 14 "liquid look of the goo failed" "$log" | head -40 || true
             echo "screenshots: $(ls shots/$name | wc -l)"
           }
@@ -169,8 +169,10 @@ jobs:
           run_client opengl 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1"
           run_client surface "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid=false"
           run_client plain "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.shader=false"
+          # the hand-over to shader packs, with no pack: goo as the game's own translucent geometry
+          run_client packs "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.packs=true"
           echo "=== summary"
-          for name in vulkan oit opengl surface plain; do
+          for name in vulkan oit opengl surface plain packs; do
             echo "$name: $(grep -o 'Using graphics backend [A-Za-z]*' clienttest-$name.log | head -1) / $(grep -o 'CLIENTTEST \(PASS\|FAIL.*\)' clienttest-$name.log | head -1)"
           done
           # the default run and the two fallbacks of our own making must pass; OpenGL depends on what the runner can do
@@ -178,17 +180,18 @@ jobs:
           grep -q "CLIENTTEST PASS" clienttest-oit.log
           grep -q "CLIENTTEST PASS" clienttest-surface.log
           grep -q "CLIENTTEST PASS" clienttest-plain.log
+          grep -q "CLIENTTEST PASS" clienttest-packs.log
       - name: Screenshots as text (commits tagged [shots])
         if: always() && contains(github.event.head_commit.message, '[shots]')
         run: |
-          for name in vulkan oit opengl surface plain; do
+          for name in vulkan oit opengl surface plain packs; do
             n=0
+            # every second frame of the default run, every sixth of the others
+            case "$name" in vulkan) every=2 ;; *) every=6 ;; esac
             for f in shots/$name/*.jpg; do
               [ -e "$f" ] || continue
               n=$((n + 1))
-              # every second frame of the default run, every sixth of the others
-              if [ "$name" = "vulkan" ] && [ $((n % 2)) -ne 0 ]; then continue; fi
-              if [ "$name" != "vulkan" ] && [ $((n % 6)) -ne 0 ]; then continue; fi
+              if [ $((n % every)) -ne 0 ]; then continue; fi
               echo "SHOT-BEGIN ${name}_$(basename "$f")"
               convert "$f" -resize 854x480 -quality 72 jpg:- | base64 -w 160
               echo "SHOT-END"

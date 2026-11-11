@@ -193,13 +193,14 @@ public final class GooClient {
                 final float killY = level.getMinY() - 8 - o.getY();
                 // a block that turned into goo; goo being poured right now (it starts empty, the stream follows below); or poured goo met later, lying there
                 final int amount = goo.amount();
+                final float thick = goo.thick();
                 final int how = !goo.poured() ? 0 : goo.spawnAgeTicks() <= 2 ? 1 : 2;
                 TOLD.put(id, how == 0 ? GooSim.BLOCK : how == 1 ? 0 : amount);
                 COMMANDS.add(() -> {
                     GooSim s = sim;
                     if (s == null) return;
                     s.setKillY(killY);
-                    int slot = how == 0 ? s.addBody(mat, x, y, z, lx, lz, age) : how == 1 ? s.addEmpty(mat, x, y, z) : s.addResting(mat, x, y, z, amount);
+                    int slot = how == 0 ? s.addBody(mat, x, y, z, lx, lz, age, thick) : how == 1 ? s.addEmpty(mat, x, y, z, thick) : s.addResting(mat, x, y, z, amount, thick);
                     if (slot >= 0) { SLOT_OF_ENTITY.values().removeIf(v -> v == slot); SLOT_OF_ENTITY.put(id, slot); }
                 });
             }
@@ -554,6 +555,24 @@ public final class GooClient {
     /** How much goo the local player is standing in: honey particles in the low 16 bits, slime in the next 16. */
     static int contact() { return probeBox == null ? 0 : probeResult; }
 
+    /**
+     * How thick the goo of one kind is that a box stands in: that of the piece whose simulated bounds
+     * reach into the box (the thickest, if several do); 1 if none does.
+     */
+    static float thickAt(AABB box, int material) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        float thick = 0.0F;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != material || goo.isRemoved()) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
+            int b = slot * 8;
+            if (box.intersects(info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ())) thick = Math.max(thick, goo.thick());
+        }
+        return thick > 0.0F ? thick : 1.0F;
+    }
+
     /** The goo whose bounds the segment {@code from}-{@code to} enters first, within {@code limit} blocks; null if none. */
     static GooEntity pick(Vec3 from, Vec3 to, double limit) {
         Picked picked = pickPoint(from, to, limit);
@@ -718,6 +737,17 @@ public final class GooClient {
             total = Math.max(total, 0) + amounts[slot];
         }
         return total;
+    }
+
+    /** Width (the longer way across) and height of the simulated goo of one kind whose marker is nearest to (x, z); null if none (smoke test). */
+    static double[] sizeNear(int material, double x, double z) {
+        GooEntity goo = gooNear(material, x, z);
+        float[] info = bodyInfo;
+        if (goo == null) return null;
+        Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+        if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) return null;
+        int b = slot * 8;
+        return new double[] { Math.max(info[b + 5] - info[b + 2], info[b + 7] - info[b + 4]), info[b + 6] - info[b + 3] };
     }
 
     /** The piece of one kind whose marker is nearest to (x, z), within two blocks; null if none (smoke test). */

@@ -11,7 +11,7 @@ Honey melts and flows, slime wobbles and stretches, pistons squash and pull both
 [[dependencies.${mod_id}]]
     modId="neoforge"
     type="required"
-    versionRange="[${neo_version},)"
+    versionRange="[${neo_version_min},)"
     ordering="NONE"
     side="BOTH"
 

@@ -43,7 +43,7 @@ public final class SimCheck {
 
     static float[] scenarios(String name, Factory f) {
         System.out.println(name + ":");
-        float[] sig = new float[10];
+        float[] sig = new float[14];
         long t0 = System.nanoTime();
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
@@ -105,7 +105,7 @@ public final class SimCheck {
             check("all of it counts at once", s.count(4, honey) == GooSim.BOTTLE, "amount " + s.count(4, honey));
             run(s, 0.25f);
             int out = s.probe(-9f, -1f, -9f, 9f, 9f, 9f) & 0xFFFF;
-            check("the stream comes out bit by bit", out > 40 && out < GooSim.BOTTLE, out + " particles after a quarter of a second");
+            check("the stream comes out bit by bit, as a thread at first", out > 12 && out < GooSim.BOTTLE / 2, out + " particles after a quarter of a second");
             run(s, 7f);
             float[] b = body(s, honey);
             check("the stream became a flat puddle ahead", b[6] < 0.45f && b[2] > 0.2f && b[5] < 4.5f, "top " + b[6] + ", x " + b[2] + ".." + b[5]);
@@ -148,6 +148,17 @@ public final class SimCheck {
                     honeyParticles + " honey, " + slimeParticles + " slime, " + outside + " outside");
         }
         double ms = (System.nanoTime() - t0) / 1e6;
+        // every piece is as thick as it was made: thin honey runs out, thick honey stays a heap; thin slime sags, thick slime stands
+        try (GooSim s = f.make(12, 4)) {
+            s.setStatic(floor(), floorCount(0));
+            int thin = s.addBody(GooSim.HONEY, -4, 0, 0, 1, 0, 0, 0.25f), thick = s.addBody(GooSim.HONEY, 0, 0, 0, 1, 0, 0, 4f);
+            int soft = s.addBody(GooSim.SLIME, 3, 0, -2, 1, 0, 0, 0.25f), stiff = s.addBody(GooSim.SLIME, 3, 0, 2, 1, 0, 0, 4f);
+            run(s, 8f);
+            float[] a = body(s, thin), b = body(s, thick), c = body(s, soft), d = body(s, stiff);
+            check("thin honey lies flatter and wider than thick honey", a[6] < b[6] - 0.15f && a[5] - a[2] > b[5] - b[2] + 0.4f, "thin " + (a[5] - a[2]) + " wide, " + a[6] + " high; thick " + (b[5] - b[2]) + " wide, " + b[6] + " high");
+            check("thin slime sags more than thick slime", c[6] < d[6] - 0.04f, "thin " + c[6] + " high, thick " + d[6] + " high");
+            sig[10] = a[6]; sig[11] = b[6]; sig[12] = c[6]; sig[13] = d[6];
+        }
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
             s.addBody(GooSim.HONEY, 0, 0, 0, 1, 0, 0);
@@ -170,6 +181,8 @@ public final class SimCheck {
             check("pull distance agrees", Math.abs(j[3] - r[3]) < 0.45f, j[3] + " vs " + r[3]);
             check("the honey stream lands in the same place", Math.abs(j[6] - r[6]) < 0.5f && Math.abs(j[7] - r[7]) < 0.6f, "middle " + j[6] + " vs " + r[6] + ", width " + j[7] + " vs " + r[7]);
             check("the slime heap lands in the same place", Math.abs(j[8] - r[8]) < 0.5f, j[8] + " vs " + r[8]);
+            check("thin and thick honey agree", Math.abs(j[10] - r[10]) < 0.1f && Math.abs(j[11] - r[11]) < 0.15f, "thin " + j[10] + " vs " + r[10] + ", thick " + j[11] + " vs " + r[11]);
+            check("thin and thick slime agree", Math.abs(j[12] - r[12]) < 0.08f && Math.abs(j[13] - r[13]) < 0.08f, "thin " + j[12] + " vs " + r[12] + ", thick " + j[13] + " vs " + r[13]);
         } else {
             System.out.println("Rust simulation skipped: " + NativeSim.loadMessage());
             if (args.length > 0 && args[0].equals("--require-native")) { System.out.println("  FAIL  native library required"); failures++; }

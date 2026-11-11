@@ -109,7 +109,7 @@ public final class GooDispense {
                 protected ItemStack execute(BlockSource source, ItemStack stack) {
                     Direction facing = source.state().getValue(DispenserBlock.FACING);
                     BlockPos front = source.pos().relative(facing);
-                    GooEvents.spawnBlock(source.level(), front, material, facing.getStepX(), facing.getStepZ());
+                    GooEvents.spawnBlock(source.level(), front, material, facing.getStepX(), facing.getStepZ(), GooThickness.of(stack));
                     source.level().playSound(null, front, material == GooSim.SLIME ? SoundEvents.SLIME_BLOCK_PLACE : SoundEvents.HONEY_BLOCK_PLACE, SoundSource.BLOCKS, 0.9F, 0.9F);
                     stack.shrink(1);
                     return stack;

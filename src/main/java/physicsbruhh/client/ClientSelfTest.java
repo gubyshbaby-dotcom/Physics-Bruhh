@@ -8,6 +8,7 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 import physicsbruhh.GooEntity;
+import physicsbruhh.GooThickness;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import physicsbruhh.GooEvents;
@@ -34,7 +35,10 @@ final class ClientSelfTest {
     private static float restingWidth = -1.0F, bandLeft = 99.0F, bandRight = -99.0F, bandWidest;
     private static boolean sawHoney, sawSlime, sawClear, waded, bounced, removedOne;
     private static int bouncesBefore;
-    private static boolean liquidExpected, bottleFilled, pouredBack, thrown;
+    private static boolean liquidExpected, bottleFilled, pouredBack, thrown, wheelTurned, placedThick, thicknessShows;
+    private static int wheelPassed, menuTicks;
+    private static boolean openedWorld;
+    private static String thicknessSeen = "not looked at";
     private static int liquidFrames, honeyPoured = -1, slimeShot = -1, honeyAfterBottle = -1, honeyAfterPour = -1, honeySimulated = -1;
     private static volatile int emptyBottles = -1;
     /** The hands part runs by what has happened, not by the clock: how far it is, since when, where the player should stand, and what it got stuck on. */
@@ -109,8 +113,81 @@ final class ClientSelfTest {
                     step(8);
                 }
             }
+            default -> {
+                // ---- thickness: the wheel, a block placed by hand, and thin, usual and thick goo side by side
+                stage("thickness: the wheel on a block of honey");
+                commands(server, "goo clear", "gamemode creative @a", "clear @a", "item replace entity @a weapon.mainhand with minecraft:honey_block 2", "tp @a 12.5 200 9.0 0 60");
+                step(20);
+            }
+        }
+    }
+
+    /** Sneak, turn the wheel four notches on a block of honey, place it, and watch thin, usual and thick goo next to each other. */
+    private static void thickness(Minecraft mc, MinecraftServer server) {
+        var held = mc.player.getMainHandItem();
+        boolean late = tick > stepTick + 200;
+        switch (step) {
+            case 20 -> { // at the place, block in hand: sneak
+                if (tick > stepTick + 5 && held.is(Items.HONEY_BLOCK) && standsAt(mc, 12.5, 9.0)) { mc.options.keyShift.setDown(true); step(21); }
+                else if (late) { stuck = "the player never got a block of honey in hand"; step(27); }
+            }
+            case 21 -> { // sneaking: four notches up
+                if (mc.player.isShiftKeyDown()) {
+                    int passed = 0;
+                    for (int k = 0; k < 4; k++) if (GooWheel.turn(mc, 1)) passed++;
+                    wheelPassed = passed;
+                    step(22);
+                } else if (late) { stuck = "the player never sneaked"; step(27); }
+            }
+            case 22 -> { // the server's answer: the stack in hand is four times as thick
+                if (GooThickness.of(held) == 4.0F) {
+                    wheelTurned = true;
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST wheel: the block in hand is now of thickness {}", GooThickness.of(held));
+                    stage("thickness: the thick block placed by hand");
+                    mc.options.keyShift.setDown(false);
+                    mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, new net.minecraft.world.phys.BlockHitResult(new Vec3(12.5, 200.0, 11.5), net.minecraft.core.Direction.UP, new BlockPos(12, 199, 11), false));
+                    step(23);
+                } else if (late) { mc.options.keyShift.setDown(false); stuck = "the wheel did not make the block in hand thicker (" + wheelPassed + " turns passed on, thickness " + GooThickness.of(held) + ")"; step(27); }
+            }
+            case 23 -> { // the goo it turned into is as thick
+                GooEntity goo = GooClient.gooNear(GooSim.HONEY, 12.5, 11.5);
+                if (goo != null && goo.thick() == 4.0F) {
+                    placedThick = true;
+                    stage("thickness: thin, usual and thick honey; thin and thick slime");
+                    server.execute(() -> {
+                        var level = server.overworld();
+                        physicsbruhh.GooEvents.spawnBlock(level, new BlockPos(8, 200, 11), GooSim.HONEY, -1.0F, 0.0F, 0.25F);
+                        physicsbruhh.GooEvents.spawnBlock(level, new BlockPos(10, 200, 11), GooSim.HONEY, -1.0F, 0.0F, 1.0F);
+                        physicsbruhh.GooEvents.spawnBlock(level, new BlockPos(8, 200, 8), GooSim.SLIME, 0.0F, 1.0F, 0.25F);
+                        physicsbruhh.GooEvents.spawnBlock(level, new BlockPos(10, 200, 8), GooSim.SLIME, 0.0F, 1.0F, 4.0F);
+                    });
+                    commands(server, "tp @a 14.5 202 9.5 84 36");
+                    step(24);
+                } else if (late) { stuck = "a block of honey turned thick did not become thick goo (" + (goo == null ? "no goo there" : "thickness " + goo.thick()) + ")"; step(27); }
+            }
+            case 24 -> { // eight seconds: the thin one has run out, the thick one is still a heap
+                if (tick >= stepTick + 170) {
+                    double[] thin = GooClient.sizeNear(GooSim.HONEY, 8.5, 11.5), usual = GooClient.sizeNear(GooSim.HONEY, 10.5, 11.5), thick = GooClient.sizeNear(GooSim.HONEY, 12.5, 11.5);
+                    double[] soft = GooClient.sizeNear(GooSim.SLIME, 8.5, 8.5), stiff = GooClient.sizeNear(GooSim.SLIME, 10.5, 8.5);
+                    thicknessSeen = String.format(java.util.Locale.ROOT, "honey thin %s, usual %s, thick %s; slime thin %s, thick %s", size(thin), size(usual), size(thick), size(soft), size(stiff));
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST thickness: {}", thicknessSeen);
+                    thicknessShows = thin != null && usual != null && thick != null && soft != null && stiff != null
+                            && thin[0] > usual[0] + 0.2 && usual[0] > thick[0] + 0.05 && thin[1] < usual[1] - 0.05 && usual[1] < thick[1] - 0.1 && soft[1] < stiff[1] - 0.04;
+                    // for the screenshots: the thick heap at the bottom right, behind the block in the hand
+                    stage("goo behind the hand");
+                    commands(server, "tp @a 14.5 202 9.5 22 34");
+                    step(25);
+                }
+            }
+            case 25 -> {
+                if (tick >= stepTick + 30) step(27);
+            }
             default -> step(9);
         }
+    }
+
+    private static String size(double[] s) {
+        return s == null ? "(none)" : String.format(java.util.Locale.ROOT, "%.2f wide %.2f high", s[0], s[1]);
     }
 
     /** Right click with the main hand on whatever goo the player is looking at, the way the use key does it. */
@@ -163,6 +240,14 @@ final class ClientSelfTest {
         if (firstTick == 0L) firstTick = System.nanoTime();
         MinecraftServer server = mc.getSingleplayerServer();
         if (mc.level == null || mc.player == null || server == null) {
+            // NeoForge puts a screen of warnings about other mods' metadata (Iris has one) where --quickPlaySingleplayer
+            // would have gone into the world: go there from that screen
+            var screen = mc.gui.screen();
+            if (++menuTicks > 60 && !openedWorld && screen != null && screen.getClass().getSimpleName().contains("LoadingError")) {
+                openedWorld = true;
+                PhysicsBruhh.LOGGER.info("CLIENTTEST a screen of mod loading warnings is in the way; opening the world from it");
+                mc.createWorldOpenFlows().openWorld("selftest", () -> {});
+            }
             if (System.nanoTime() - firstTick > 240_000_000_000L) finish(mc, "no world after four minutes");
             return;
         }
@@ -276,12 +361,14 @@ final class ClientSelfTest {
                 step(1);
             } else if (step > 0 && step < 9) {
                 hands(mc, server);
+            } else if (step >= 20) {
+                thickness(mc, server);
             } else if (step == 9 && tick == stepTick + 5) {
                 stage("everything is cleared away");
                 commands(server, "gamemode creative @a", "tp @a 14.5 202 9.5 180 30", "goo clear");
             } else if (tick > 0 && tick % 20 == 0 && step < 9) {
-                PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} band={} clear={} shader={} drawCalls={} liquid={} frames={} particles={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.shader, GooRenderer.drawCalls,
-                        GooFluid.inUse(), GooFluid.frames, GooClient.particleCount());
+                PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} band={} clear={} shader={} drawCalls={} liquid={} frames={} particles={} pack={} packDraws={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.shader, GooRenderer.drawCalls,
+                        GooFluid.inUse(), GooFluid.frames, GooClient.particleCount(), Packs.active, GooRenderer.packDraws);
             } else if (step == 9 && tick == stepTick + 45) {
                 String state = GooClient.describe() + " restingWidth=" + restingWidth + " band=" + bandLeft + ".." + bandRight + " shader=" + GooRenderer.shader + " drawCalls=" + GooRenderer.drawCalls
                         + " liquid=" + GooFluid.inUse() + " liquidFrames=" + GooFluid.frames + " uses=" + GooTouch.uses;
@@ -308,6 +395,10 @@ final class ClientSelfTest {
                 else if (!pouredBack || honeyAfterPour != 2 * GooSim.BOTTLE) problem = "a honey bottle used while sneaking was not poured out (" + honeyAfterBottle + " -> " + honeyAfterPour + ")";
                 else if (Math.abs(honeySimulated - honeyAfterPour) > 60) problem = "the simulated honey did not follow the markers (" + honeySimulated + " particles, the markers say " + honeyAfterPour + ")";
                 else if (!thrown) problem = "a slime ball was not thrown";
+                else if (!wheelTurned) problem = "sneaking and turning the wheel did not change the thickness of the block in hand";
+                else if (!placedThick) problem = "the thick block placed by hand did not become thick goo";
+                else if (!thicknessShows) problem = "thin, usual and thick goo did not come out different (" + thicknessSeen + ")";
+                else if (Packs.active && GooRenderer.packDraws == 0) problem = "with a shader pack on, the goo was never handed to it";
                 else if (GooClient.quadCount(0) != 0 || GooClient.quadCount(1) != 0 || GooClient.particleCount() != 0) problem = "goo is still drawn after /goo clear (" + GooClient.quadCount(0) + " + " + GooClient.quadCount(1) + " quads, " + GooClient.particleCount() + " particles)";
                 PhysicsBruhh.LOGGER.info("CLIENTTEST final {}", state);
                 finish(mc, problem);
@@ -315,7 +406,7 @@ final class ClientSelfTest {
             if (tick == 225) { sawHoney = GooClient.quadCount(0) > 0; sawSlime = GooClient.quadCount(1) > 0; }
             if (tick == 420) {
                 sawClear = GooClient.clearLook;
-                liquidExpected = GooFluid.chosen && GooRenderer.shader;
+                liquidExpected = GooFluid.chosen && GooRenderer.shader && (!Packs.active || Packs.LIQUID_ON_TOP);
                 liquidFrames = GooFluid.frames;
                 // clear goo is drawn one way or the other
                 if (liquidExpected && !GooFluid.broken) { sawHoney &= GooClient.particleCount() > 0; sawSlime &= GooClient.particleCount() > 0; }
