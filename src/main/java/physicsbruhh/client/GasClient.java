@@ -134,6 +134,33 @@ final class GasClient {
         return GasGpu.available() && GasDraw.available(false);
     }
 
+    /** Whether gas is being computed and drawn right now. */
+    static boolean showing() {
+        return box != null && placed && !broken && (gpu != null && gpu.steps > 0 || cpu != null && cpu.gas() != null);
+    }
+
+    /** Whether the gas is drawn at this place in the world, so that the game's own smoke and flames there are left out: inside the box, away from its edge, where the gas fades. */
+    static boolean draws(double x, double y, double z) {
+        return showing() && x >= ox + 2 && y >= oy + 2 && z >= oz + 2 && x < ox + box.bx - 2 && y < oy + box.by - 2 && z < oz + box.bz - 2;
+    }
+
+    /** The blocks of fire and lit campfires the gas draws the flames of. */
+    private static void hideFlames(ClientLevel level) {
+        it.unimi.dsi.fastutil.longs.LongOpenHashSet set = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        if (showing()) {
+            final int bx = box.bx, by = box.by, bz = box.bz;
+            for (int y = 2; y < by - 2; y++) {
+                for (int z = 2; z < bz - 2; z++) {
+                    for (int x = 2; x < bx - 2; x++) {
+                        int kind = plain[(x + bx * (z + bz * y)) * 4 + 1] & 15;
+                        if (kind == GasParams.FIRE || kind == GasParams.CAMPFIRE) set.add(BlockPos.asLong(ox + x, oy + y, oz + z));
+                    }
+                }
+            }
+        }
+        GasHide.update(level, set);
+    }
+
     /** "graphics card", "processor" or "none". */
     static String solverInUse() {
         return gpu != null ? "graphics card" : cpu != null ? "processor" : "none";
@@ -151,6 +178,7 @@ final class GasClient {
         if (cpu != null) { cpu.close(); cpu = null; }
         GasDraw.close();
         box = null; placed = false; sources = 0; blobCount = 0; pending = 0.0F;
+        GasHide.update(Minecraft.getInstance().level, new it.unimi.dsi.fastutil.longs.LongOpenHashSet());
     }
 
     /** Every tick of the client: the box follows the player, the map of the world in it is brought up to date, burning creatures and explosions are collected. */
@@ -187,6 +215,7 @@ final class GasClient {
             int total = 0;
             for (int count : sourcesInColumn) total += count;
             sources = total;
+            hideFlames(level);
             collect(level);
             if (cpu != null) {
                 int n = blobsInBox(ox, oy, oz);

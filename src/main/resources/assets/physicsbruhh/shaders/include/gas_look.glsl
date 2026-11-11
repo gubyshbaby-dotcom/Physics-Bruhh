@@ -4,13 +4,13 @@
 // How the gas is seen. The numbers are those of native/examples/gas_preview.rs, where they were chosen.
 
 // Brightness of gas at flame heat, per block of it looked through, and how steeply that falls as the gas cools.
-const float GAS_GLOW = 22.0;
+const float GAS_GLOW = 48.0;
 const float GAS_GLOW_STEEP = 11.0;
 // How much a block of smoke of density 1 dims what is behind it (e-folds), and the share of that light it scatters on rather than swallows.
 const float GAS_SMOKE_DIMS = 9.0;
 const float GAS_SMOKE_WHITE = 0.82;
-// Flames are nearly clear: this much dimming per block at flame heat.
-const float GAS_FLAME_DIMS = 0.6;
+// Glowing soot stands in the way of what is behind it as well: this much dimming per block at flame heat.
+const float GAS_FLAME_DIMS = 2.5;
 // How much of the light smoke scatters goes on forwards (Henyey-Greenstein g).
 const float GAS_FORWARD = 0.45;
 
@@ -36,7 +36,7 @@ vec3 gasFlame(float heat, float soul) {
     float green = clamp(0.04 + 0.000208 * (kelvin - 1000.0), 0.0, 0.7);
     float k = max((kelvin - 1900.0) / 1100.0, 0.0);
     float t = clamp((heat - 0.2) / 0.9, 0.0, 1.0);
-    return bright * mix(vec3(1.0, green, min(0.147 * k * k, 0.5)), vec3(0.05 + 0.35 * t * t, 0.35 + 0.5 * t, 1.0), soul);
+    return bright * mix(vec3(1.0, green, min(0.006 + 0.147 * k * k, 0.5)), vec3(0.05 + 0.35 * t * t, 0.35 + 0.5 * t, 1.0), soul);
 }
 
 float gasPhase(float cosine) {

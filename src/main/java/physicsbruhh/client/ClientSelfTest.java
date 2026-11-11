@@ -340,7 +340,7 @@ final class ClientSelfTest {
         int into = tick - stepTick;
         switch (step) {
             case 60 -> {
-                if (into == 0) {
+                if (into == 1) {
                     stage("gas: a campfire, a fire, a soul fire and a torch");
                     commands(server, "goo clear", "gamemode creative @a", "time set noon",
                             "fill 40 199 -3 54 199 12 minecraft:stone", "fill 40 200 -3 54 212 12 minecraft:air",
@@ -382,7 +382,7 @@ final class ClientSelfTest {
                 }
             }
             case 62 -> {
-                if (into == 0) {
+                if (into == 1) {
                     stage("gas: an explosion, a burning pig");
                     gasBlastsBefore = GasClient.blastsSeen;
                     sawBurning = false;
@@ -402,7 +402,7 @@ final class ClientSelfTest {
                 if (GasClient.stepsDone - gasStepsBefore >= 280 || into > 600) step(64);
             }
             case 64 -> {
-                if (into == 0) {
+                if (into == 1) {
                     stage("gas: the game rule off, and on again");
                     commands(server, "gamerule physicsbruhh:physical_gas false");
                 }

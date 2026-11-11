@@ -671,7 +671,7 @@ pub fn source(kind: u8, ix: f32, iy: f32, iz: f32, half: f32, wx: f32, wz: f32, 
             let jet = ((lumps(wx * 4.0, wz * 4.0, time, 1.6) - 0.25) / 0.4).clamp(0.0, 1.0);
             [11.0 * cover * jet * live, 3.0 * cover, if layer(0.15, 0.35) > 0.0 { 0.5 * disc(0.3) * jet } else { 0.0 }]
         }
-        kind::TORCH => { let cover = layer(0.6, 0.95) * disc(0.12); if cover > 0.0 { [0.0, 6.0 * cover, 0.3] } else { [0.0; 3] } }
+        kind::TORCH => { let cover = layer(0.6, 0.95) * disc(0.12); if cover > 0.0 { [0.0, 0.7 * cover, 0.16] } else { [0.0; 3] } }
         kind::OVER_LAVA => { let cover = layer(0.0, 0.3); if cover > 0.0 { [0.0, 0.15 * live * cover, 0.2 * live] } else { [0.0; 3] } }
         kind::CHIMNEY => { let cover = layer(0.0, 0.3) * disc(0.26); if cover > 0.0 { [0.0, 5.0 * live * cover, 0.35] } else { [0.0; 3] } }
         _ => [0.0; 3],

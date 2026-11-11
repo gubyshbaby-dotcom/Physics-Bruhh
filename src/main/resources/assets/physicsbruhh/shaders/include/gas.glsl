@@ -126,7 +126,7 @@ vec3 gasSource(int kind, vec3 inside, float halfCell, vec3 place, float time, fl
     }
     if (kind == 3) {
         float cover = gasLayer(inside.y, halfCell, 0.6, 0.95) * gasDisc(off, halfCell, 0.12);
-        return cover > 0.0 ? vec3(0.0, 6.0 * cover, 0.3) : vec3(0.0);
+        return cover > 0.0 ? vec3(0.0, 0.7 * cover, 0.16) : vec3(0.0);
     }
     if (kind == 4) {
         float cover = gasLayer(inside.y, halfCell, 0.0, 0.3);

@@ -35,20 +35,20 @@ fn flame(heat: f32, soul: f32) -> [f32; 3] {
     let bright = GLOW * (GLOW_STEEP * (1.0 - 1800.0 / kelvin)).exp();
     let green = (0.04 + 0.000208 * (kelvin - 1000.0)).clamp(0.0, 0.7);
     let k = ((kelvin - 1900.0) / 1100.0).max(0.0);
-    let blue = (0.147 * k * k).min(0.5);
+    let blue = (0.006 + 0.147 * k * k).min(0.5);
     let t = ((heat - 0.2) / 0.9).clamp(0.0, 1.0);
     let cold = [0.05 + 0.35 * t * t, 0.35 + 0.5 * t, 1.0];
     [bright * (1.0 + (cold[0] - 1.0) * soul), bright * (green + (cold[1] - green) * soul), bright * (blue + (cold[2] - blue) * soul)]
 }
 
 /// Brightness of gas at flame heat, and how steeply it falls off as the gas cools.
-const GLOW: f32 = 22.0;
+const GLOW: f32 = 48.0;
 const GLOW_STEEP: f32 = 11.0;
 /// How much a block of smoke of density 1 dims what is behind it (e-folds), and the share of that light it scatters on rather than swallows.
 const SMOKE_DIMS: f32 = 9.0;
 const SMOKE_WHITE: f32 = 0.82;
 /// Flames are nearly clear: this much dimming per block at flame heat.
-const FLAME_DIMS: f32 = 0.6;
+const FLAME_DIMS: f32 = 2.5;
 /// Share of light smoke throws on forwards (Henyey-Greenstein g).
 const FORWARD: f32 = 0.45;
 
@@ -178,7 +178,7 @@ fn main() {
                         let (s, heat, soul) = (v[0], v[1], (v[3] / (v[1] + v[2] + 1.0e-4)).min(1.0));
                         if s < 0.002 && heat < 0.12 { continue; }
                         // hot gas is thin gas: as many times fewer specks of smoke to the block as it is hotter than the air
-                        let s = s / (1.0 + 5.0 * heat);
+                        let s = s / (1.0 + 5.0 * heat) * (1.0 - smooth(0.3, 0.75, heat));
                         let dims = SMOKE_DIMS * s + FLAME_DIMS * smooth(0.3, 0.9, heat);
                         let a = 1.0 - (-dims * ds).exp();
                         let glow = flame(heat, soul);

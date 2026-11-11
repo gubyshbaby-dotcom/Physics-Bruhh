@@ -17,6 +17,9 @@ being rigid cubes:
 
 Everything is on by default for the vanilla `honey_block` and `slime_block`.
 
+And **fire and smoke are gas**: flames and smoke are simulated as moving air around you instead of
+being drawn as flat pictures and puffs. See [Smoke and fire](#smoke-and-fire).
+
 ## Using it
 
 - Place a honey or slime block, or let a piston push or pull one: it turns into goo.
@@ -128,6 +131,48 @@ Slime and honey contraptions (flying machines, block conveyors) do not work whil
 What cannot be kept: goo is not solid, so nothing can stand on top of it, and pistons do not
 drag neighbouring blocks along with it.
 
+## Smoke and fire
+
+With the game rule `physicsbruhh:physical_gas` on (the default) the air in a box around you is
+simulated: how it moves, how hot it is, how much smoke and unburnt fuel it carries.
+
+- **What feeds it**: blocks of fire and lit campfires (soul fire burns blue), torches (a thread of
+  smoke), the air over lava, lit furnaces (smoke as from a chimney), burning creatures and a
+  burning player, explosions (a fireball that swells, pushes the air away and leaves a cloud).
+- **What it does**: fuel comes up in a few wandering jets and burns into tongues of flame; hot gas
+  rises and cools, smoke is carried along, curls, thins out; blocks are walls: smoke gathers
+  under a roof and comes out round its edges.
+- **What it looks like**: flames glow in the colour of their temperature (yellow-white where
+  hottest, orange, dark red at the tips), brighter the hotter; smoke is lit by the sun and the sky,
+  shaded by the smoke between it and the sun, and lit from below by the flames under it. At night
+  the fire is what lights its smoke.
+- **The game's own fire** is left out where the gas is drawn: the flat flames of fire blocks and
+  campfires (the logs stay), the puffs of smoke over them, the puff of an explosion, the flames
+  across the screen when you burn. Outside the box, and with the rule off, all of that is as ever.
+
+`/gamerule physicsbruhh:physical_gas false` switches it off for everyone. On each client:
+
+| Command | |
+| --- | --- |
+| `/gaslook low` | a box of 24 x 16 x 24 blocks, 4 cells to the block |
+| `/gaslook medium` | 24 x 20 x 24 blocks, 6 cells to the block (the default) |
+| `/gaslook high` | 32 x 24 x 32 blocks, 8 cells to the block (12.6 million cells) |
+| `/gaslook ultra` | 40 x 28 x 40 blocks, 8 cells to the block (22.9 million cells) |
+| `/gaslook off` | fire and smoke as the game draws them, on this client only |
+| `/gaslook solver auto\|gpu\|cpu` | where it is computed (see below) |
+| `/gaslook info` | which solver, how many cells, how long a step and the drawing take |
+
+**Where it is computed.** On the graphics card: every step of the solver is a pass over a texture
+(`shaders/core/gas_*.fsh`), and so is the drawing. Where those passes do not work, the Rust core
+computes a coarser box (24 x 16 x 24 blocks, 2 cells to the block) on a thread of its own and the
+graphics card only draws it. If that does not work either, fire and smoke stay as the game draws
+them, and the log says why.
+
+**How fast.** `/gaslook info` shows the time a step takes by the graphics card's own clock (and the
+time the drawing takes), so it can be compared with other solvers on the same machine at the same
+number of cells. It has only ever been run on software rendering here (see Limits), so there is no
+measured number for a real graphics card in this file.
+
 ## How it works
 
 | Part | Where | What it does |
@@ -201,6 +246,20 @@ cargo run --release --example dump -- particles.bin            # a scene with a 
 ```
 
 ## Limits
+
+- Smoke and fire exist in a box around each player and nowhere else: a fire further away than
+  that is drawn the vanilla way, and a column of smoke ends at the top of the box. The gas is
+  computed separately on every client and is only something to look at: it does not burn, choke
+  or push anything, and two players see different curls of the same smoke.
+- The gas solver's passes have been run on the software renderers of the build machines (Vulkan
+  and OpenGL) and in a browser's WebGL, where they give the same numbers as the Rust solver to
+  four digits; they have never been run on a real graphics card. How fast they are there is not
+  known. The model itself is the common one for real-time smoke (velocity and pressure on a coarse
+  grid, smoke carried on a finer one): it is not a model of chemistry, of soot or of radiation.
+- Torches get a thread of smoke but no flame of gas (a torch's flame is smaller than a cell), and
+  the flat flames on a burning creature are still the game's.
+- The gas is drawn after everything else in the world, at half the screen's size: behind stained
+  glass or water it is drawn over them, and a thin post in front of a fire has a soft edge.
 
 - Honey or slime that is still an ordinary block (placed by a command, or while the rule was off)
   only turns into goo when a piston can actually move it; if vanilla says the piston is blocked,

@@ -50,6 +50,9 @@ public class PhysicsBruhhClient {
         modBus.addListener(GooFluid::register);
         modBus.addListener(GasGpu::register);
         modBus.addListener(GasDraw::register);
+        modBus.addListener(GasHide::models);
+        modBus.addListener(GasHide::particles);
+        NeoForge.EVENT_BUS.addListener(GasHide::screen);
         modBus.addListener((net.neoforged.neoforge.client.network.event.RegisterClientPayloadHandlersEvent e) -> {
             e.register(physicsbruhh.GasRules.State.TYPE, (state, context) -> GasClient.onState(state));
             e.register(physicsbruhh.GasRules.Blast.TYPE, (blast, context) -> GasClient.onBlast(blast));

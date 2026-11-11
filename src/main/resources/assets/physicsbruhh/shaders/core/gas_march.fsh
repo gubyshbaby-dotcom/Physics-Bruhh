@@ -54,7 +54,8 @@ void main() {
     float fpb = GasStep.z * GasStep.w;
     float ds = STRIDE / fpb;
     ivec2 pixel = ivec2(gl_FragCoord.xy);
-    float jitter = gasHash(uint(pixel.x), uint(pixel.y), 3u, uint(GasSun.w));
+    // where along the ray the first place looked at lies: different for neighbouring pixels in an even pattern, and from frame to frame
+    float jitter = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.61803399 * GasSun.w);
     vec3 sun = GasSun.xyz;
     float towards = gasPhase(dot(dir, sun));
 
@@ -75,8 +76,9 @@ void main() {
             vec4 v = gasHere(p, fpb);
             float heat = v.y;
             if (v.x < 0.002 && heat < 0.12) continue;
-            // hot gas is thin gas: as many times fewer specks of smoke to the block as it is hotter than the air
-            float smoke = v.x / (1.0 + 5.0 * heat);
+            // hot gas is thin gas: as many times fewer specks of smoke to the block as it is hotter than the air;
+            // and inside a flame what will be smoke is still glowing soot, seen by its own light and not by the sun's
+            float smoke = v.x / (1.0 + 5.0 * heat) * (1.0 - smoothstep(0.3, 0.75, heat));
             vec3 lit = vec3(0.0);
             if (smoke > 0.002) {
                 // how much smoke the sun's light crosses on its way here; light scattered more than once gets further than that
