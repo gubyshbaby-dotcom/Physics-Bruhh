@@ -129,12 +129,37 @@ jobs:
           name: selftest-log
           path: selftest.log
           retention-days: 7
+      - name: Which runner image this is (the packages kept for it)
+        id: image
+        run: echo "name=${ImageOS:-unknown}-${ImageVersion:-0}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-debs
+          key: debs-${{ steps.image.outputs.name }}
+          restore-keys: debs-
       - name: Client smoke test (software rendering, screenshots)
         timeout-minutes: 40
         run: |
-          # the runners' name service drops out now and then: three tries
-          for try in 1 2 3; do sudo apt-get update -qq && break; sleep 20; done
-          for try in 1 2 3; do sudo apt-get install -y -qq xvfb libgl1-mesa-dri libegl1 libgles2 mesa-vulkan-drivers imagemagick x11-apps > /dev/null && break; sleep 20; done
+          # The runners' name service drops out for the package mirrors now and then, for many minutes at a time. What came
+          # down once is kept (the cache above) and installed from there; the mirrors are only asked when that does not work.
+          mkdir -p ~/apt-debs
+          if ls ~/apt-debs/*.deb > /dev/null 2>&1 && sudo dpkg -i ~/apt-debs/*.deb > /dev/null 2>&1; then
+            echo "packages installed from the cache ($(ls ~/apt-debs | wc -l))"
+          else
+            for try in 1 2 3; do
+              if sudo timeout 150 apt-get update -qq && sudo timeout 300 apt-get install -y -qq xvfb libgl1-mesa-dri libegl1 libgles2 mesa-vulkan-drivers imagemagick x11-apps > /dev/null; then
+                cp /var/cache/apt/archives/*.deb ~/apt-debs/ 2> /dev/null || true
+                echo "packages installed from the mirrors, $(ls ~/apt-debs | wc -l) kept for next time"
+                break
+              fi
+              echo "the package mirrors did not answer (try $try)"
+              # the mirrors the runner is set up with all hang off one name; the second and third tries go to others
+              if [ -f /etc/apt/apt-mirrors.txt ]; then
+                printf 'https://mirrors.kernel.org/ubuntu/\tpriority:1\nhttp://ftp.halifax.rwth-aachen.de/ubuntu/\tpriority:2\n' | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+              fi
+              sleep 5
+            done
+          fi
           Xvfb :99 -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
           export DISPLAY=:99
           sleep 3
