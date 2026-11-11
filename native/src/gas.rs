@@ -361,6 +361,10 @@ pub struct Gas {
     gas2: Vec<[f32; 4]>,
     gas3: Vec<[f32; 4]>,
     pub world: Vec<u8>,
+    /// Where the corner of the box is in the world, in blocks, counted from where it was first (within 512 either
+    /// way). What wanders by chance (the jets of a flame, the unrest over it) goes by places in the world, not in
+    /// the box: the box moves with the player, and none of that may jump when it does.
+    pub origin: [i32; 3],
     /// For each block: whether gas was to be seen in it after the last step (not zero).
     pub seen: Vec<u8>,
     /// For each block: whether anything can happen in it this step (see `wake`).
@@ -435,7 +439,7 @@ impl Gas {
             vel: vec![[0.0; 4]; n], vel2: vec![[0.0; 4]; n], curl: vec![[0.0; 4]; n],
             p: vec![0.0; n], q: vec![0.0; n], levels, rhs: vec![0.0; n], solid: vec![0; n],
             gas: vec![[0.0; 4]; f], gas2: vec![[0.0; 4]; f], gas3: vec![[0.0; 4]; f],
-            world: vec![0; bx * by * bz * WORLD_BYTES], seen: vec![0; bx * by * bz], awake: vec![0; bx * by * bz], params: Params::default(), time: 0.0, sharp: true,
+            world: vec![0; bx * by * bz * WORLD_BYTES], origin: [0; 3], seen: vec![0; bx * by * bz], awake: vec![0; bx * by * bz], params: Params::default(), time: 0.0, sharp: true,
         }
     }
 
@@ -473,6 +477,9 @@ impl Gas {
         moved(&mut self.p, self.nx, self.ny, self.nz, dx * c, dy * c, dz * c, 0.0);
         moved(&mut self.gas, self.fx, self.fy, self.fz, dx * f, dy * f, dz * f, [0.0; 4]);
         moved(&mut self.seen, self.bx, self.by, self.bz, dx, dy, dz, 0);
+        // (kept small, so that places counted from it stay exact: it starts again 512 blocks from where it began, and there, once, what wanders does jump)
+        let on = |o: i32, d: i32| (o + d + 512).rem_euclid(1024) - 512;
+        self.origin = [on(self.origin[0], dx), on(self.origin[1], dy), on(self.origin[2], dz)];
     }
 
     /// One step of `dt` seconds.
@@ -598,6 +605,7 @@ impl Gas {
         let pr = self.params;
         let keep = (-pr.drag * dt).exp();
         let time = self.time;
+        let origin = self.origin;
         let (vel, curl, gas, solid, world) = (&self.vel, &self.curl, &self.gas, &self.solid, &self.world);
         let layer = nx * nz;
         self.vel2.par_chunks_mut(layer).enumerate().for_each(|(y, out)| {
@@ -630,8 +638,10 @@ impl Gas {
                     let b = (x / cpb + bx * (z / cpb + bz * (y / cpb))) * WORLD_BYTES;
                     if world[b + 1] != 0 {
                         let much = dt * pr.unrest * world[b + 2] as f32 / 127.5;
-                        ax += much * (flicker(x as u32, y as u32, z as u32, time, 7.0) - 0.5);
-                        az += much * (flicker(z as u32, y as u32, x as u32 + 977, time, 7.0) - 0.5);
+                        // (by the cell's place in the world: the same unrest wherever the box is)
+                        let (wx, wy, wz) = ((x as i32 + origin[0] * cpb as i32) as u32, (y as i32 + origin[1] * cpb as i32) as u32, (z as i32 + origin[2] * cpb as i32) as u32);
+                        ax += much * (flicker(wx, wy, wz, time, 7.0) - 0.5);
+                        az += much * (flicker(wz, wy, wx.wrapping_add(977), time, 7.0) - 0.5);
                     }
                     // creatures and explosions drag the gas with them
                     for blob in blobs {
@@ -789,6 +799,7 @@ impl Gas {
         let time = self.time;
         let burning = 1.0 - (-pr.burn * dt).exp();
         let thin = (-pr.smoke_fade * dt).exp();
+        let origin = self.origin;
         let layer = fx * fz;
         let sharp = self.sharp;
 
@@ -853,8 +864,10 @@ impl Gas {
                             let much = world[b + 2] as f32 / 127.5;
                             let (ix, iy, iz) = (px * cell - kx as f32, py * cell - ky as f32, pz * cell - kz as f32);
                             let blue = if k & kind::SOUL != 0 { 1.0 } else { 0.0 };
-                            let live = 0.55 + 0.9 * flicker(x as u32 / 2, y as u32 / 2, z as u32 / 2, time, 5.0);
-                            let [fuel_in, smoke_in, heat_to] = source(k & 15, ix, iy, iz, 0.5 * cell, px * cell, pz * cell, time, live);
+                            // (by the cell's place in the world: the same flickering and the same jets wherever the box is)
+                            let (wx, wy, wz) = ((x as i32 + origin[0] * fpb as i32) as u32, (y as i32 + origin[1] * fpb as i32) as u32, (z as i32 + origin[2] * fpb as i32) as u32);
+                            let live = 0.55 + 0.9 * flicker(wx / 2, wy / 2, wz / 2, time, 5.0);
+                            let [fuel_in, smoke_in, heat_to] = source(k & 15, ix, iy, iz, 0.5 * cell, px * cell + origin[0] as f32, pz * cell + origin[2] as f32, time, live);
                             fu += dt * much * fuel_in;
                             bl += dt * much * fuel_in * blue;
                             s += dt * much * smoke_in;

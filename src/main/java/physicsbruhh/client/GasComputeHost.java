@@ -42,6 +42,12 @@ import physicsbruhh.client.compute.VkCompute;
  */
 final class GasComputeHost {
     private static Boolean possible;
+    private static String whyNot;
+
+    /** Why compute shaders cannot be tried on this machine, once {@link #possible} has said they cannot. */
+    static String whyNot() {
+        return whyNot;
+    }
 
     /** What is under the game's graphics layer. */
     private static Object backend() throws ReflectiveOperationException {
@@ -57,10 +63,14 @@ final class GasComputeHost {
             try {
                 String kind = backend().getClass().getName();
                 possible = kind.endsWith(".VulkanDevice") || kind.endsWith(".GlDevice") && GasComputeOpenGl.supported();
-                if (!possible) PhysicsBruhh.LOGGER.info("Gas: no compute shaders here ({}{})", kind, kind.endsWith(".GlDevice") ? ", OpenGL " + GL45C.glGetString(GL45C.GL_VERSION) : "");
+                if (!possible) {
+                    whyNot = kind.endsWith(".GlDevice") ? "the game draws with OpenGL " + GL45C.glGetString(GL45C.GL_VERSION) + " here, and they need 4.5" : "the game draws with something this does not know (" + kind + ")";
+                    PhysicsBruhh.LOGGER.info("Gas: no compute shaders here: {}", whyNot);
+                }
             } catch (Throwable t) {
                 possible = false;
-                PhysicsBruhh.LOGGER.info("Gas: what is under the game's graphics layer could not be reached for compute shaders ({})", t.toString());
+                whyNot = "what is under the game's graphics layer could not be reached (" + t + ")";
+                PhysicsBruhh.LOGGER.info("Gas: no compute shaders here: {}", whyNot);
             }
         }
         return possible;
@@ -130,8 +140,8 @@ final class GasComputeHost {
      * One step, and its result into the texture the drawing reads. {@code map}: the map of the world if it has changed
      * since the last step (four bytes a block, as the passes read it), or null. The rest as {@link GasBox#grid}.
      */
-    void step(CommandEncoder encoder, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part, ByteBuffer map) {
-        box.grid(grid.asFloatBuffer(), dt, time, movedX, movedY, movedZ, blobs, blobCount, part);
+    void step(CommandEncoder encoder, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part, int cornerX, int cornerY, int cornerZ, ByteBuffer map) {
+        box.grid(grid.asFloatBuffer(), dt, time, movedX, movedY, movedZ, blobs, blobCount, part, cornerX, cornerY, cornerZ);
         final int cells = box.cpb * box.ratio;
         int count = 0;
         for (int layer = part[1] * cells; layer < part[4] * cells; layer++, count++) {

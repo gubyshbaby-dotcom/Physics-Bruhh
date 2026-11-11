@@ -59,16 +59,17 @@ final class GasBox {
 
     /** Blobs the solvers take at once ({@code GAS_BLOBS} in gas.glsl). */
     static final int BLOBS = 16;
-    /** How many numbers the passes are told about the grid and a step ({@code GasGrid} in gas.glsl): fifteen of four, then the blobs, three of four each. */
-    static final int GRID_FLOATS = (15 + BLOBS * 3) * 4;
+    /** How many numbers the passes are told about the grid and a step ({@code GasGrid} in gas.glsl): sixteen of four, then the blobs, three of four each. */
+    static final int GRID_FLOATS = (16 + BLOBS * 3) * 4;
 
     /**
      * What the passes are told about the grid and a step ({@code GasGrid} in gas.glsl), written from the start of
      * {@code out}. {@code blobs}: twelve numbers each, places in blocks from the corner of the box. {@code part}: the
      * part of the box that is computed this step, in blocks from its corner (the least corner, then the corner just
-     * past the greatest).
+     * past the greatest). {@code cornerX, cornerY, cornerZ}: where the corner of the box is in the world (what wanders
+     * by chance in the gas goes by places in the world, so that it does not jump when the box moves with the player).
      */
-    void grid(FloatBuffer out, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part) {
+    void grid(FloatBuffer out, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part, int cornerX, int cornerY, int cornerZ) {
         float[] p = GasParams.values();
         out.put(0, nx).put(1, ny).put(2, nz).put(3, coarseTiles);
         out.put(4, fx).put(5, fy).put(6, fz).put(7, fineTiles);
@@ -80,10 +81,11 @@ final class GasBox {
         out.put(36, p[GasParams.MOST_HEAT]).put(37, p[GasParams.MOST_FUEL]).put(38, 0.0F).put(39, 0.0F);
         out.put(40, part[0]).put(41, part[1]).put(42, part[2]).put(43, 0.0F);
         out.put(44, part[3]).put(45, part[4]).put(46, part[5]).put(47, 0.0F);
+        out.put(48, Math.floorMod(cornerX, 1024)).put(49, Math.floorMod(cornerY, 1024)).put(50, Math.floorMod(cornerZ, 1024)).put(51, 0.0F);
         for (int level = 0; level < UNDER; level++) {
-            out.put(48 + level * 4, underX[level]).put(49 + level * 4, underY[level]).put(50 + level * 4, underZ[level]).put(51 + level * 4, underTiles[level]);
+            out.put(52 + level * 4, underX[level]).put(53 + level * 4, underY[level]).put(54 + level * 4, underZ[level]).put(55 + level * 4, underTiles[level]);
         }
-        for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(60 + i, blobs[i]);
+        for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(64 + i, blobs[i]);
     }
 
     boolean same(GasBox other) {

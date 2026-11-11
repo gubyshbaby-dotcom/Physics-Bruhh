@@ -77,12 +77,13 @@ void main() {
             if (v.x < 0.002 && v.y < 0.12) continue;
             // a flame's edge is not the smooth one the grid gives it: it wavers
             if (info.g > 0.25) {
-                vec2 sway = gasSway(p, GasSunLight.a) * (GAS_SWAY * smoothstep(0.1, 0.5, v.y + 0.3 * info.g));
+                vec2 sway = gasSway(p + GasOrigin.xyz, GasSunLight.a) * (GAS_SWAY * smoothstep(0.1, 0.5, v.y + 0.3 * info.g));
                 v = gasHere(p + vec3(sway.x, 0.0, sway.y), fpb);
             }
             float heat = v.y;
             // what the grid is too coarse for: a flame is not a smooth lump but tongues and gaps, smoke is not a mist but curls
-            float lumps = gasDetail(p, heat, GasSunLight.a, 2.3, 6.1);
+            // (by the place in the world: the pattern does not jump when the box moves with the player)
+            float lumps = gasDetail(p + GasOrigin.xyz, heat, GasSunLight.a, 2.3, 6.1);
             if (heat > 0.12) heat *= 1.0 + GAS_FLAME_DETAIL * (lumps - 0.5) * smoothstep(0.12, 0.45, heat);
             // hot gas is thin gas: as many times fewer specks of smoke to the block as it is hotter than the air;
             // and inside a flame what will be smoke is still glowing soot, seen by its own light and not by the sun's

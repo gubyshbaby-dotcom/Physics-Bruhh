@@ -138,13 +138,14 @@ final class GasDraw {
     /**
      * What the passes are told about the grid and this step ({@code GasGrid} in gas.glsl). {@code blobs}: twelve numbers
      * each, places in blocks from the corner of the box. {@code part}: the part of the box that is computed this step,
-     * in blocks from its corner (the least corner, then the corner just past the greatest).
+     * in blocks from its corner (the least corner, then the corner just past the greatest). {@code cornerX, cornerY,
+     * cornerZ}: where in the world the corner of the box is that the grid being stepped or drawn is for.
      */
-    static GpuBuffer writeGrid(GasBox box, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part) {
+    static GpuBuffer writeGrid(GasBox box, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part, int cornerX, int cornerY, int cornerZ) {
         if (gridBuffer == null) gridBuffer = new MappableRingBuffer(() -> "Gas grid", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, GRID_BYTES);
         gridBuffer.rotate();
         try (GpuBufferSlice.MappedView view = gridBuffer.currentBuffer().map(false, true)) {
-            box.grid(view.data().order(ByteOrder.nativeOrder()).asFloatBuffer(), dt, time, movedX, movedY, movedZ, blobs, blobCount, part);
+            box.grid(view.data().order(ByteOrder.nativeOrder()).asFloatBuffer(), dt, time, movedX, movedY, movedZ, blobs, blobCount, part, cornerX, cornerY, cornerZ);
         }
         return gridBuffer.currentBuffer();
     }

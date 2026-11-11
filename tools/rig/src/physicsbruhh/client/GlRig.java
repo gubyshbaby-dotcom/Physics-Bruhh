@@ -59,7 +59,7 @@ public class GlRig {
         float dt = 1.0F / 30.0F, time = 0.0F, fpb = cpb * ratio, cell = 1.0F / (fpb * fpb * fpb);
         double took = 0.0;
         for (int step = 0; step < steps; step++) {
-            box.grid(grid.asFloatBuffer(), dt, time, 0, 0, 0, new float[0], 0, part);
+            box.grid(grid.asFloatBuffer(), dt, time, 0, 0, 0, new float[0], 0, part, 0, 0, 0);
             long start = System.nanoTime();
             gas.begin();
             gas.step(grid, step == 0 ? map : null, part);

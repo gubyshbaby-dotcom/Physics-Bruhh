@@ -23,6 +23,7 @@ layout(std140) uniform GasGrid {
     vec4 GasE;        // most_heat, most_fuel
     vec4 GasFrom;     // the part of the box that is computed this step, in blocks: its least corner ...
     vec4 GasTo;       // ... and the corner just past its greatest (the rest of the box is empty and is left alone)
+    vec4 GasOrigin;   // xyz: where the corner of the box is in the world, in blocks (counted round every 1024). What wanders by chance (the jets of a flame, the unrest over it, the detail finer than the grid) goes by places in the world, not in the box: the box moves with the player, and none of that may jump when it does
     vec4 GasUnder[3]; // the grids under the coarse one that the pressure is solved on along the way, each twice as coarse as the one before: cells along x, y, z (of the whole box), tiles to a row
     vec4 GasBlob[GAS_BLOBS * 3];   // a blob: centre (blocks from the corner of the box) and radius; fuel, smoke, heat, soul; velocity and how much gas it makes
 };
@@ -267,7 +268,7 @@ float gasDisc(float off, float halfCell, float r) {
 }
 
 // What a burning block of this kind puts into a fine cell: fuel and smoke per second, and the heat the cell is brought up to
-// (gas.rs, `source`). `inside` is the middle of the cell inside the block, `halfCell` half its width, `place` where it is in the box (blocks).
+// (gas.rs, `source`). `inside` is the middle of the cell inside the block, `halfCell` half its width, `place` where it is in the world (blocks).
 vec3 gasSource(int kind, vec3 inside, float halfCell, vec3 place, float time, float live) {
     float off = length(inside.xz - 0.5);
     if (kind == 1) {

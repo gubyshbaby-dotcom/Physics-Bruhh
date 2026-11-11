@@ -78,6 +78,17 @@ final class GasClient {
     /** Set when neither solver works on this machine; the gas then stays off until the game is restarted. */
     static volatile boolean broken;
     private static boolean gpuFailed, computeFailed;
+    /** Why the compute shaders are not in use though they were asked for, if they have been tried and that is known. */
+    private static volatile String computeTrouble;
+
+    /** Why the solver does not run as compute shaders though that was asked for; null if it does, or if it was not asked for. */
+    static String whyNotCompute() {
+        if (!"compute".equals(solver) || compute != null) return null;
+        if (computeTrouble != null) return computeTrouble;
+        if (!GasComputeHost.possible()) return GasComputeHost.whyNot();
+        if (!GasDraw.available(false)) return "the passes that draw the gas are not available on this machine";
+        return null; // (nothing burns yet, or the frame that sets them up has not been drawn)
+    }
 
     private GasClient() {}
 
@@ -458,10 +469,12 @@ final class GasClient {
             if (useCompute()) {
                 try {
                     compute = new GasComputeHost(box);
+                    computeTrouble = null;
                     mapNew = true;
                     PhysicsBruhh.LOGGER.info("Gas: computed on the graphics card by compute shaders ({}), {}", compute.on(), box);
                 } catch (Throwable t) {
                     computeFailed = true;
+                    computeTrouble = "setting them up failed (" + t + ")";
                     PhysicsBruhh.LOGGER.error("Gas: the compute shaders could not be set up on this machine; the solver's passes are drawn instead", t);
                 }
             }
@@ -485,17 +498,26 @@ final class GasClient {
         lastFrame = now;
         boolean awake = alive() && !mc.isPaused();
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-        GpuTextureView world = GasDraw.world(encoder, box, picture, pictureChanged);
-        mapNew |= pictureChanged;
-        pictureChanged = false;
         final boolean card = gpu != null || compute != null;
+        // What the processor's solver hands over may still be for where the box was a moment ago. The map of the world
+        // is for where the box is now: it goes to the drawing only once the gas is for the same place.
+        final boolean took = cpu != null && cpu.take(encoder);
+        final boolean mapFits = card || cpu.gas() == null || cpu.shownX() == ox && cpu.shownY() == oy && cpu.shownZ() == oz;
+        GpuTextureView world = GasDraw.world(encoder, box, picture, pictureChanged && mapFits);
+        if (mapFits) {
+            mapNew |= pictureChanged;
+            pictureChanged = false;
+        }
 
         boolean stepped = false;
         float dt = 0.0F;
         if (card && awake) {
             pending += passed;
-            if (pending >= 1.0F / 61.0F) {
-                dt = Math.min(pending, 1.0F / 20.0F);
+            // (a box that has moved with the player is stepped at once, however little time has passed: the map of the
+            // world is for where the box is now, and the gas has to be before anything is drawn, or its light jumps)
+            final boolean boxMoved = ox != gridX || oy != gridY || oz != gridZ;
+            if (pending >= 1.0F / 61.0F || boxMoved) {
+                dt = Math.max(1.0F / 240.0F, Math.min(pending, 1.0F / 20.0F));
                 pending = 0.0F;
                 stepped = true;
             }
@@ -516,7 +538,9 @@ final class GasClient {
             part[0] = 0; part[1] = 0; part[2] = 0; part[3] = box.bx; part[4] = box.by; part[5] = box.bz;
             partOfBox = 1.0F;
         }
-        GpuBuffer grid = GasDraw.writeGrid(box, dt, time, movedX, movedY, movedZ, blobsInBox, n, part);
+        // where in the world the corner of the box is that the grid stepped or drawn in this frame is for
+        final int cornerX = !card ? cpu.shownX() : stepped ? ox : gridX, cornerY = !card ? cpu.shownY() : stepped ? oy : gridY, cornerZ = !card ? cpu.shownZ() : stepped ? oz : gridZ;
+        GpuBuffer grid = GasDraw.writeGrid(box, dt, time, movedX, movedY, movedZ, blobsInBox, n, part, cornerX, cornerY, cornerZ);
         Timer.begin(encoder);
         if (gpu != null) {
             if (stepped) {
@@ -527,13 +551,13 @@ final class GasClient {
             }
         } else if (compute != null) {
             if (stepped) {
-                compute.step(encoder, dt, time, movedX, movedY, movedZ, blobsInBox, n, part, mapNew ? picture : null);
+                compute.step(encoder, dt, time, movedX, movedY, movedZ, blobsInBox, n, part, ox, oy, oz, mapNew ? picture : null);
                 mapNew = false;
                 gridX = ox; gridY = oy; gridZ = oz;
                 stepsDone++;
                 GasDraw.where(encoder, box, grid, compute.gas(), false, gridX, gridY, gridZ);
             }
-        } else if (cpu.take(encoder)) {
+        } else if (took) {
             stepsDone = cpu.steps;
             GasDraw.where(encoder, box, grid, cpu.gas(), true, cpu.shownX(), cpu.shownY(), cpu.shownZ());
         }
@@ -552,6 +576,7 @@ final class GasClient {
     private static void fail(String what, Throwable t) {
         if (compute != null && !computeFailed) {
             computeFailed = true;
+            computeTrouble = "they failed while running (" + t + ")";
             PhysicsBruhh.LOGGER.error("Gas: the compute shaders failed on this machine; the solver's passes are drawn instead from now on", t);
             release();
         } else if (gpu != null && !gpuFailed) {
@@ -685,6 +710,7 @@ final class GasClient {
                 solver = by;
                 gpuFailed = false;
                 computeFailed = false;
+                computeTrouble = null;
                 save();
                 // (whatever computes the gas now is let go; the one asked for is set up when the next frame is drawn)
                 release();
@@ -692,6 +718,10 @@ final class GasClient {
                         by.equals("cpu") ? "Fire and smoke are computed by the Rust core on the processor (coarser)"
                                 : by.equals("compute") ? "Fire and smoke are computed on the graphics card by compute shaders where it can run them (not tried on a real graphics card yet: /gaslook info says how long a step takes, /gaslook solver gpu goes back)"
                                 : "Fire and smoke are computed on the graphics card where it can do it"), false);
+                if (by.equals("compute") && !GasComputeHost.possible()) {
+                    final String why = GasComputeHost.whyNot();
+                    context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info.nocompute", "Compute shaders are not in use: %s", why), false);
+                }
                 return 1;
             })));
         }
@@ -711,6 +741,8 @@ final class GasClient {
                         "Fire and smoke: computed on the %s, %s x %s x %s cells (%s million), a step takes %s ms and the drawing %s ms; %s blocks and %s creatures feed it; %s%% of the box is computed right now",
                         Component.translatableWithFallback("commands.physicsbruhh.gas.on." + (gpu != null ? "gpu" : compute != null ? "compute" : "cpu"), solverInUse()), b.fx, b.fy, b.fz, million, step, picture, sources, burning, share), false);
             }
+            final String why = whyNotCompute();
+            if (why != null) context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info.nocompute", "Compute shaders are not in use: %s", why), false);
             return 1;
         }));
         event.getDispatcher().register(command);

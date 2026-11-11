@@ -181,6 +181,26 @@ fn a_big_fire_in_a_closed_room_stays_sane() {
     assert!(g.gas.iter().all(|v| v[0] <= pr.most_smoke && v[2] <= pr.most_fuel && v[0] >= 0.0 && v[1] >= 0.0 && v[2] >= 0.0));
 }
 
+#[test]
+fn a_fire_burns_on_the_same_when_the_box_moves_with_the_player() {
+    // the jets a flame comes up in and its flickering wander by chance; they go by places in the world, so the flame
+    // must not start afresh when the box it is computed in moves
+    let fuel = |g: &Gas| g.gas.iter().map(|v| v[2] as f64).sum::<f64>();
+    let mut still = ground(10, 14, 10, 2, 2);
+    still.set_block(5, 2, 5, false, kind::FIRE, 1.0);
+    let mut walked = ground(10, 14, 10, 2, 2);
+    walked.set_block(5, 2, 5, false, kind::FIRE, 1.0);
+    for _ in 0..60 { still.step(DT, &[]); walked.step(DT, &[]); }
+    assert_eq!(fuel(&still), fuel(&walked));
+    // one block east and two north: the fire is where it was in the world, so somewhere else in the box
+    walked.shift(1, 0, -2);
+    walked.set_block(5, 2, 5, false, 0, 0.0);
+    walked.set_block(4, 2, 7, false, kind::FIRE, 1.0);
+    for _ in 0..8 { still.step(DT, &[]); walked.step(DT, &[]); }
+    let (a, b) = (fuel(&still), fuel(&walked));
+    assert!((a - b).abs() < 0.02 * a, "unburnt fuel eight steps after the box moved: {} where it stood still, {} where it moved", a, b);
+}
+
 /// How much of the piling up of the last step its pressure left undone (root of the sums of squares, one over the other).
 fn left_undone(g: &Gas) -> f64 {
     let (nx, ny, nz) = (g.nx, g.ny, g.nz);

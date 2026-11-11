@@ -77,8 +77,10 @@ void main() {
     if (kind != 0) {
         float much = block.b;
         float blue = (kind & 16) != 0 ? 1.0 : 0.0;
-        float live = 0.55 + 0.9 * gasFlicker(uint(c.x) / 2u, uint(c.y) / 2u, uint(c.z) / 2u, time, 5.0);
-        vec3 src = gasSource(kind & 15, place - vec3(inBlock), 0.5 / fpbf, place, time, live);
+        // (by the cell's place in the world: the same flickering and the same jets wherever the box is)
+        uvec3 w = uvec3(c + ivec3(GasOrigin.xyz) * fpb);
+        float live = 0.55 + 0.9 * gasFlicker(w.x / 2u, w.y / 2u, w.z / 2u, time, 5.0);
+        vec3 src = gasSource(kind & 15, place - vec3(inBlock), 0.5 / fpbf, place + GasOrigin.xyz, time, live);
         fuel += dt * much * src.x;
         soul += dt * much * src.x * blue;
         smoke += dt * much * src.y;

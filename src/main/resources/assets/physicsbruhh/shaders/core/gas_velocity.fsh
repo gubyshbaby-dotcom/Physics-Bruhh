@@ -44,8 +44,10 @@ void main() {
     // unrest over a source
     if (block.g > 0.5) {
         float much = dt * GasD.x * block.b;
-        a.x += much * (gasFlicker(uint(c.x), uint(c.y), uint(c.z), GasStep.y, 7.0) - 0.5);
-        a.z += much * (gasFlicker(uint(c.z), uint(c.y), uint(c.x) + 977u, GasStep.y, 7.0) - 0.5);
+        // (by the cell's place in the world: the same unrest wherever the box is)
+        uvec3 w = uvec3(c + ivec3(GasOrigin.xyz) * int(GasStep.z));
+        a.x += much * (gasFlicker(w.x, w.y, w.z, GasStep.y, 7.0) - 0.5);
+        a.z += much * (gasFlicker(w.z, w.y, w.x + 977u, GasStep.y, 7.0) - 0.5);
     }
 
     // creatures and explosions drag the gas with them

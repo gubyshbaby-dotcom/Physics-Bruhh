@@ -38,6 +38,7 @@
   "commands.physicsbruhh.gas.solver.compute": "Fire and smoke are computed on the graphics card by compute shaders where it can run them (not tried on a real graphics card yet: /gaslook info says how long a step takes, /gaslook solver gpu goes back)",
   "commands.physicsbruhh.gas.solver.cpu": "Fire and smoke are computed by the Rust core on the processor (coarser)",
   "commands.physicsbruhh.gas.info": "Fire and smoke: computed on the %s, %s x %s x %s cells (%s million), a step takes %s ms and the drawing %s ms; %s blocks and %s creatures feed it; %s%% of the box is computed right now",
+  "commands.physicsbruhh.gas.info.nocompute": "Compute shaders are not in use: %s",
   "commands.physicsbruhh.gas.info.rule": "Fire and smoke are not gas here: the game rule physicsbruhh:physical_gas is off",
   "commands.physicsbruhh.gas.info.broken": "Fire and smoke as gas did not work on this machine (see the log)",
   "commands.physicsbruhh.gas.info.idle": "Fire and smoke: nothing is being computed right now (%s)",

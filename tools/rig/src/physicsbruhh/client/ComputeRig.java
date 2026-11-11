@@ -56,7 +56,7 @@ public class ComputeRig {
             float fpb = cpb * ratio, cell = 1.0F / (fpb * fpb * fpb);
             for (int step = 0; step < steps; step++) {
                 int[] now = second != null && step >= steps / 2 ? second : part;
-                box.grid(grid.asFloatBuffer(), dt, time, 0, 0, 0, new float[0], 0, now);
+                box.grid(grid.asFloatBuffer(), dt, time, 0, 0, 0, new float[0], 0, now, 0, 0, 0);
                 VkCommandBuffer commands = vk.begin();
                 gas.begin(commands);
                 gas.step(grid, step == 0 ? map : null, now);
