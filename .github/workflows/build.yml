@@ -186,14 +186,15 @@ jobs:
             kill $SHOTS 2> /dev/null || true
             for f in shots/$name/*.xwd; do [ -e "$f" ] || continue; convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
             echo "=== client test: $name"
-            grep -E "CLIENTTEST (stage|trace|in honey|bounced|dispensers|bottle|honey bottle|slime ball|wheel|thickness|by hand|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo .*(stopped|failed|error)|physicsbruhh.*(rror|ailed)|pipeline/goo|core/goo|shader pack|Iris is here" "$log" | cut -c1-900 | head -170 || true
+            grep -E "CLIENTTEST (stage|trace|in honey|bounced|dispensers|bottle|honey bottle|slime ball|wheel|thickness|by hand|gas|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo .*(stopped|failed|error)|Gas: |physicsbruhh.*(rror|ailed)|pipeline/g|core/g|shader pack|Iris is here" "$log" | cut -c1-900 | head -170 || true
             grep -A 14 "liquid look of the goo failed" "$log" | head -40 || true
             echo "screenshots: $(ls shots/$name | wc -l)"
           }
           run_client vulkan "" ""
           run_client oit "improvedTransparency:true\n" ""
           run_client opengl 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1"
-          run_client surface "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid=false"
+          # (this one also has smoke and fire computed by the Rust core instead of the graphics card)
+          run_client surface "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid=false PHYSICSBRUHH_GAS_SOLVER=cpu"
           run_client plain "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.shader=false"
           # the hand-over to shader packs, with no pack: goo as the game's own translucent geometry
           run_client packs "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.packs=true"

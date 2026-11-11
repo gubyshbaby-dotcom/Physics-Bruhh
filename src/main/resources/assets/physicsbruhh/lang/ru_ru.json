@@ -26,5 +26,20 @@
   "physicsbruhh.thickness.thinner": "жиже",
   "physicsbruhh.thickness.much_thinner": "намного жиже",
   "key.physicsbruhh.shake": "Стряхнуть с себя мёд и слизь",
-  "physicsbruhh.thickness.hint": "Shift + колёсико с блоком в руке: гуще или жиже"
+  "physicsbruhh.thickness.hint": "Shift + колёсико с блоком в руке: гуще или жиже",
+  "gamerule.physicsbruhh.physical_gas": "Огонь и дым — настоящий газ",
+  "gamerule.physicsbruhh.physical_gas.description": "Огонь, костры, факелы, лава, горящие печи, горящие существа и взрывы дают пламя и дым, которые считаются как газ: поднимаются, клубятся, обтекают блоки и скапливаются под потолком. Каждый клиент считает и рисует их сам (/gaslook).",
+  "gamerule.physicsbruhh:physical_gas": "Огонь и дым — настоящий газ",
+  "gamerule.physicsbruhh:physical_gas.description": "Огонь, костры, факелы, лава, горящие печи, горящие существа и взрывы дают пламя и дым, которые считаются как газ: поднимаются, клубятся, обтекают блоки и скапливаются под потолком. Каждый клиент считает и рисует их сам (/gaslook).",
+  "commands.physicsbruhh.gas.off": "Огонь и дым на этом клиенте остаются такими, какими их рисует игра",
+  "commands.physicsbruhh.gas.set": "Огонь и дым: область %s x %s x %s блоков вокруг вас, %s ячеек на блок",
+  "commands.physicsbruhh.gas.solver.auto": "Огонь и дым считаются на видеокарте, если она это умеет",
+  "commands.physicsbruhh.gas.solver.gpu": "Огонь и дым считаются на видеокарте, если она это умеет",
+  "commands.physicsbruhh.gas.solver.cpu": "Огонь и дым считает ядро на Rust на процессоре (грубее)",
+  "commands.physicsbruhh.gas.info": "Огонь и дым: считает %s, сетка %s x %s x %s ячеек (%s млн), шаг занимает %s мс, отрисовка %s мс; источников: блоков %s, существ %s",
+  "commands.physicsbruhh.gas.info.rule": "Огонь и дым здесь не газ: игровое правило physicsbruhh:physical_gas выключено",
+  "commands.physicsbruhh.gas.info.broken": "Газ на этой машине не заработал (подробности в журнале)",
+  "commands.physicsbruhh.gas.info.idle": "Огонь и дым: сейчас считать нечего (%s)",
+  "commands.physicsbruhh.gas.on.gpu": "видеокарта",
+  "commands.physicsbruhh.gas.on.cpu": "процессор"
 }

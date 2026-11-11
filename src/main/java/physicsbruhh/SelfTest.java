@@ -63,6 +63,8 @@ public final class SelfTest {
         return health;
     }
 
+    private static int blastsBefore;
+
     private static void run(MinecraftServer server, String... commands) {
         for (String command : commands) server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command);
     }
@@ -312,7 +314,17 @@ public final class SelfTest {
                 GooEvents.convert(level, new BlockPos(-1, Y, 3), 1, 0);
                 level.setBlock(new BlockPos(4, Y, 10), Blocks.HONEY_BLOCK.defaultBlockState(), 3);
                 GooEvents.convert(level, new BlockPos(4, Y, 10), 1, 0);
-            } else if (tick == 254) {
+                // M: smoke and fire. The server only passes on the game rule and where things explode.
+                expect("M: fire and smoke are gas unless the game rule says otherwise", level.getGameRules().get(PhysicsBruhh.PHYSICAL_GAS.get()));
+                blastsBefore = GasRules.blastsTold;
+                run(server, "summon minecraft:tnt 0.5 " + (Y + 14) + " 6.5 {fuse:0}");
+            } else if (tick == 252) {
+                expect("M: an explosion is told to the clients near it (" + (GasRules.blastsTold - blastsBefore) + ")", GasRules.blastsTold == blastsBefore + 1);
+                run(server, "gamerule physicsbruhh:physical_gas false", "summon minecraft:tnt 0.5 " + (Y + 14) + " 6.5 {fuse:0}");
+            } else if (tick == 256) {
+                expect("M: ... and not with the game rule off (" + (GasRules.blastsTold - blastsBefore) + ")", GasRules.blastsTold == blastsBefore + 1);
+                run(server, "gamerule physicsbruhh:physical_gas true");
+            } else if (tick == 258) {
                 finish(server);
             }
         } catch (Throwable t) {

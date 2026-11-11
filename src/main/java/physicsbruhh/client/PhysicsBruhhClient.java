@@ -48,15 +48,24 @@ public class PhysicsBruhhClient {
         });
         modBus.addListener(GooPipelines::register);
         modBus.addListener(GooFluid::register);
+        modBus.addListener(GasGpu::register);
+        modBus.addListener(GasDraw::register);
+        modBus.addListener((net.neoforged.neoforge.client.network.event.RegisterClientPayloadHandlersEvent e) -> {
+            e.register(physicsbruhh.GasRules.State.TYPE, (state, context) -> GasClient.onState(state));
+            e.register(physicsbruhh.GasRules.Blast.TYPE, (blast, context) -> GasClient.onBlast(blast));
+        });
         modBus.addListener((net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent e) -> e.register(SHAKE));
         NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> GooFluid.render(e));
-        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { Packs.tick(); GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); shake(Minecraft.getInstance()); });
+        NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> GasClient.render(e));
+        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { Packs.tick(); GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); shake(Minecraft.getInstance()); GasClient.tick(Minecraft.getInstance()); });
         NeoForge.EVENT_BUS.addListener((InputEvent.InteractionKeyMappingTriggered e) -> guarded(1, "click", () -> GooTouch.onClick(e)));
         NeoForge.EVENT_BUS.addListener((InputEvent.MouseScrollingEvent e) -> guarded(1, "wheel", () -> GooWheel.onScroll(e)));
         NeoForge.EVENT_BUS.addListener((ItemTooltipEvent e) -> GooWheel.onTooltip(e));
         NeoForge.EVENT_BUS.addListener(GooLook::registerCommand);
         GooLook.load();
-        NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> { GooClient.reset(); GooClient.failures = 0; java.util.Arrays.fill(FAILED, 0); });
+        NeoForge.EVENT_BUS.addListener(GasClient::registerCommand);
+        GasClient.load();
+        NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> { GooClient.reset(); GooClient.failures = 0; java.util.Arrays.fill(FAILED, 0); GasClient.reset(); });
         NeoForge.EVENT_BUS.addListener((SubmitCustomGeometryEvent e) -> guarded(2, "drawing", () -> GooRenderer.submit(e)));
         ClientSelfTest.register();
     }

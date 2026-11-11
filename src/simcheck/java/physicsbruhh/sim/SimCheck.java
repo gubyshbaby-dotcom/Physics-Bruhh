@@ -188,6 +188,46 @@ public final class SimCheck {
         return sig;
     }
 
+    /** The gas solver of the Rust core, through the same calls the game makes. */
+    private static void gas() {
+        System.out.println("Rust gas solver:");
+        float[] core = NativeGas.defaults(), game = GasParams.values();
+        check("the game and the core hold the same numbers of the gas model", java.util.Arrays.equals(core, game), java.util.Arrays.toString(core) + " in the core, " + java.util.Arrays.toString(game) + " in the game");
+        final int bx = 8, by = 12, bz = 8, tiles = 6;
+        try (NativeGas g = new NativeGas(bx, by, bz, 2, 2)) {
+            ByteBuffer world = ByteBuffer.allocateDirect(bx * by * bz * 4).order(ByteOrder.nativeOrder());
+            for (int y = 0; y < 2; y++) for (int z = 0; z < bz; z++) for (int x = 0; x < bx; x++) world.put((x + bx * (z + bz * y)) * 4, (byte) 255);
+            int fire = (4 + bx * (4 + bz * 2)) * 4;
+            world.put(fire + 1, (byte) GasParams.CAMPFIRE).put(fire + 2, (byte) 127);
+            ByteBuffer blobs = ByteBuffer.allocateDirect(GasParams.BLOB_FLOATS * 4 * 4).order(ByteOrder.nativeOrder());
+            ByteBuffer totals = ByteBuffer.allocateDirect((4 + by) * 4).order(ByteOrder.nativeOrder());
+            boolean stepped = g.params(game);
+            long t0 = System.nanoTime();
+            for (int k = 0; k < 240 && stepped; k++) stepped = g.step(1f / 30f, world, blobs, 0, 0, 0, 0);
+            double ms = (System.nanoTime() - t0) / 1e6 / 240.0;
+            int n = g.totals(totals);
+            float smoke = totals.getFloat(0), hottest = totals.getFloat(8), low = 0, high = 0;
+            for (int y = 0; y < by; y++) { float layer = totals.getFloat((4 + y) * 4); if (y < 6) low += layer; else high += layer; }
+            check("a campfire burns and smokes", stepped && n == 4 + by && smoke > 0.3f && hottest > 0.4f, "stepped " + stepped + ", smoke " + smoke + ", hottest " + hottest);
+            check("... and its smoke rises", high > 0.15f * (low + high), high + " of " + (low + high) + " is more than three blocks over the fire after eight seconds");
+            int fx = bx * 4, fy = by * 4, fz = bz * 4, rows = (fy + tiles - 1) / tiles;
+            ByteBuffer atlas = ByteBuffer.allocateDirect(tiles * fx * rows * fz * 4).order(ByteOrder.nativeOrder());
+            int written = g.atlas(atlas, tiles);
+            int flameY = 2 * 4 + 2, pixel = (((flameY / tiles) * fz + 4 * 4 + 2) * (tiles * fx) + (flameY % tiles) * fx + 4 * 4 + 2) * 4;
+            check("... and the picture of the grid shows the flame where the campfire is", written == atlas.capacity() && (atlas.get(pixel + 1) & 255) > 40, written + " bytes, heat byte " + (atlas.get(pixel + 1) & 255));
+            // the box moves two blocks east: the fire is now two blocks further west in it, and so is the smoke
+            ByteBuffer shifted = ByteBuffer.allocateDirect(bx * by * bz * 4).order(ByteOrder.nativeOrder());
+            for (int y = 0; y < 2; y++) for (int z = 0; z < bz; z++) for (int x = 0; x < bx; x++) shifted.put((x + bx * (z + bz * y)) * 4, (byte) 255);
+            g.step(1f / 30f, shifted, blobs, 0, 2, 0, 0);
+            g.atlas(atlas, tiles);
+            int there = pixel - 2 * 4 * 4, smokeY = 5 * 4, column = (((smokeY / tiles) * fz + 4 * 4 + 2) * (tiles * fx) + (smokeY % tiles) * fx + 2 * 4 + 2) * 4;
+            check("... and when the box moves the gas stays where it was in the world", (atlas.get(there + 1) & 255) > 20 || (atlas.get(column) & 255) > 5, "heat byte " + (atlas.get(there + 1) & 255) + " where the flame now is, smoke byte " + (atlas.get(column) & 255) + " over it");
+            System.out.printf("  %.2f ms per step (a box of %dx%dx%d blocks, %d cells)%n", ms, bx, by, bz, fx * fy * fz);
+        } catch (Throwable t) {
+            check("the gas solver runs", false, String.valueOf(t));
+        }
+    }
+
     public static void main(String[] args) {
         float[] j = scenarios("Java simulation", JavaSim::new);
         if (NativeSim.available()) {
@@ -202,6 +242,7 @@ public final class SimCheck {
             check("thin and thick honey agree", Math.abs(j[10] - r[10]) < 0.1f && Math.abs(j[11] - r[11]) < 0.15f, "thin " + j[10] + " vs " + r[10] + ", thick " + j[11] + " vs " + r[11]);
             check("honey squeezed out of a block agrees", Math.abs(j[14] - r[14]) < 0.4f && Math.abs(j[15] - r[15]) < 0.2f, "width " + j[14] + " vs " + r[14] + ", top " + j[15] + " vs " + r[15]);
             check("thin and thick slime agree", Math.abs(j[12] - r[12]) < 0.08f && Math.abs(j[13] - r[13]) < 0.08f, "thin " + j[12] + " vs " + r[12] + ", thick " + j[13] + " vs " + r[13]);
+            gas();
         } else {
             System.out.println("Rust simulation skipped: " + NativeSim.loadMessage());
             if (args.length > 0 && args[0].equals("--require-native")) { System.out.println("  FAIL  native library required"); failures++; }

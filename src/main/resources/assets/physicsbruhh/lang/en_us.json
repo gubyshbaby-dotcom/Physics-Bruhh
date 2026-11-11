@@ -26,5 +26,20 @@
   "physicsbruhh.thickness.thinner": "thinner",
   "physicsbruhh.thickness.much_thinner": "much thinner",
   "key.physicsbruhh.shake": "Shake goo off yourself",
-  "physicsbruhh.thickness.hint": "Sneak + mouse wheel in hand: thicker or thinner goo"
+  "physicsbruhh.thickness.hint": "Sneak + mouse wheel in hand: thicker or thinner goo",
+  "gamerule.physicsbruhh.physical_gas": "Fire and smoke are physical gas",
+  "gamerule.physicsbruhh.physical_gas.description": "Fire, campfires, torches, lava, lit furnaces, burning creatures and explosions make flames and smoke that are simulated as gas: they rise, swirl, go round blocks and gather under ceilings. Each client computes and draws them for itself (/gaslook).",
+  "gamerule.physicsbruhh:physical_gas": "Fire and smoke are physical gas",
+  "gamerule.physicsbruhh:physical_gas.description": "Fire, campfires, torches, lava, lit furnaces, burning creatures and explosions make flames and smoke that are simulated as gas: they rise, swirl, go round blocks and gather under ceilings. Each client computes and draws them for itself (/gaslook).",
+  "commands.physicsbruhh.gas.off": "Fire and smoke are left as the game draws them on this client",
+  "commands.physicsbruhh.gas.set": "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block",
+  "commands.physicsbruhh.gas.solver.auto": "Fire and smoke are computed on the graphics card where it can do it",
+  "commands.physicsbruhh.gas.solver.gpu": "Fire and smoke are computed on the graphics card where it can do it",
+  "commands.physicsbruhh.gas.solver.cpu": "Fire and smoke are computed by the Rust core on the processor (coarser)",
+  "commands.physicsbruhh.gas.info": "Fire and smoke: computed on the %s, %s x %s x %s cells (%s million), a step takes %s ms and the drawing %s ms; %s blocks and %s creatures feed it",
+  "commands.physicsbruhh.gas.info.rule": "Fire and smoke are not gas here: the game rule physicsbruhh:physical_gas is off",
+  "commands.physicsbruhh.gas.info.broken": "Fire and smoke as gas did not work on this machine (see the log)",
+  "commands.physicsbruhh.gas.info.idle": "Fire and smoke: nothing is being computed right now (%s)",
+  "commands.physicsbruhh.gas.on.gpu": "graphics card",
+  "commands.physicsbruhh.gas.on.cpu": "processor"
 }

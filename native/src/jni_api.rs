@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 5;
+pub const ABI_VERSION: jint = 6;
 const ERR: jint = -9999;
 
 struct Handle { world: World, mesh: Vec<f32> }
@@ -165,4 +165,99 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nBodies(env: JNIEnv, _c: 
         }
         n as jint
     })
+}
+
+// ---------------------------------------------------------------- gas (`physicsbruhh.sim.NativeGas`)
+
+use crate::gas::{Blob, Gas, Params, BLOB_FLOATS, PARAM_COUNT, WORLD_BYTES};
+
+unsafe fn gas<'a>(h: jlong) -> Option<&'a mut Gas> { (h as *mut Gas).as_mut() }
+
+unsafe fn bytes<'a>(env: &JNIEnv, buf: &JByteBuffer) -> Option<&'a mut [u8]> {
+    let ptr = env.get_direct_buffer_address(buf).ok()?;
+    let cap = env.get_direct_buffer_capacity(buf).ok()?;
+    if ptr.is_null() { return None; }
+    Some(std::slice::from_raw_parts_mut(ptr, cap))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nCreate(_env: JNIEnv, _c: JClass, bx: jint, by: jint, bz: jint, cpb: jint, ratio: jint) -> jlong {
+    catch_unwind(|| {
+        if bx < 2 || by < 2 || bz < 2 || cpb < 1 || ratio < 1 || (bx as i64 * by as i64 * bz as i64) * (cpb as i64 * ratio as i64).pow(3) > 64_000_000 { return 0; }
+        Box::into_raw(Box::new(Gas::new(bx as usize, by as usize, bz as usize, cpb as usize, ratio as usize))) as jlong
+    }).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nDestroy(_env: JNIEnv, _c: JClass, h: jlong) {
+    if h != 0 { let _ = catch_unwind(|| unsafe { drop(Box::from_raw(h as *mut Gas)) }); }
+}
+
+/// The solver's own numbers, in the order of `GasParams`. Returns how many there are.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nDefaults(env: JNIEnv, _c: JClass, out: JByteBuffer) -> jint {
+    guard(|| match unsafe { floats(&env, &out) } {
+        Some(o) if o.len() >= PARAM_COUNT => { o[..PARAM_COUNT].copy_from_slice(&Params::default().to_array()); PARAM_COUNT as jint }
+        _ => ERR,
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nParams(env: JNIEnv, _c: JClass, h: jlong, values: JByteBuffer) -> jint {
+    guard(|| match (unsafe { gas(h) }, unsafe { floats(&env, &values) }) {
+        (Some(g), Some(v)) => match Params::from_slice(v) { Some(p) => { g.params = p; 0 } None => ERR },
+        _ => ERR,
+    })
+}
+
+/// One step: the map of the world in the box (four bytes a block), the blobs (twelve numbers each), and how many blocks the box has moved since the last step.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nStep(env: JNIEnv, _c: JClass, h: jlong, dt: jfloat, world: JByteBuffer, blobs: JByteBuffer, blob_count: jint, dx: jint, dy: jint, dz: jint) -> jint {
+    guard(|| match (unsafe { gas(h) }, unsafe { bytes(&env, &world) }, unsafe { floats(&env, &blobs) }) {
+        (Some(g), Some(w), Some(b)) => {
+            if w.len() < g.bx * g.by * g.bz * WORLD_BYTES { return ERR; }
+            let n = (blob_count.max(0) as usize).min(b.len() / BLOB_FLOATS);
+            let list: Vec<Blob> = (0..n).map(|i| Blob::from_slice(&b[i * BLOB_FLOATS..(i + 1) * BLOB_FLOATS])).collect();
+            g.shift(dx, dy, dz);
+            g.set_world(w);
+            g.step(dt, &list);
+            0
+        }
+        _ => ERR,
+    })
+}
+
+/// The fine grid as the picture the renderer reads, `tiles` layers to a row. Returns the bytes written.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nAtlas(env: JNIEnv, _c: JClass, h: jlong, out: JByteBuffer, tiles: jint) -> jint {
+    guard(|| match (unsafe { gas(h) }, unsafe { bytes(&env, &out) }) {
+        (Some(g), Some(o)) => {
+            let tiles = tiles.max(1) as usize;
+            let need = tiles * g.fx * ((g.fy + tiles - 1) / tiles) * g.fz * 4;
+            if o.len() < need { return ERR; }
+            g.write_atlas(o, tiles);
+            need as jint
+        }
+        _ => ERR,
+    })
+}
+
+/// Smoke in all, heat in all, the hottest cell, the fastest cell, then the smoke in each layer of blocks from the bottom up. Returns how many numbers.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nTotals(env: JNIEnv, _c: JClass, h: jlong, out: JByteBuffer) -> jint {
+    guard(|| match (unsafe { gas(h) }, unsafe { floats(&env, &out) }) {
+        (Some(g), Some(o)) => {
+            if o.len() < 4 + g.by { return ERR; }
+            o[..4].copy_from_slice(&g.totals());
+            let fpb = g.cpb * g.ratio;
+            for (y, chunk) in g.smoke_by_height().chunks(fpb).enumerate() { o[4 + y] = chunk.iter().sum(); }
+            (4 + g.by) as jint
+        }
+        _ => ERR,
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeGas_nClear(_env: JNIEnv, _c: JClass, h: jlong) -> jint {
+    guard(|| match unsafe { gas(h) } { Some(g) => { g.clear(); 0 } None => ERR })
 }

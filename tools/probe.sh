@@ -3,10 +3,14 @@
 # (The game cannot be compiled against outside CI, so this is how its exact signatures are looked up.)
 # Lines of probe.txt:  src <class path ending in .java> | srcdir <regex over class paths> | grepsrc <path> <regex>
 #                      list <regex> | asset <path> | assetdir <regex> | alist <regex> | javap <class>
+#                      njavap <class> | nlist <regex>   (the same two, in NeoForge's own jar)
 # Sources are decompiled on the spot from the classes asked for; nothing is kept.
 set -u
 JAR=$(ls build/moddev/artifacts/*.jar 2>/dev/null | grep -v sources | grep -i patched | head -1)
+NEO=$(find ~/.gradle build -name 'neoforge-*.jar' 2>/dev/null | grep -v -i 'sources\|javadoc' | xargs -r ls -S | head -1)
 echo "jar: $JAR"
+echo "NeoForge jar: $NEO"
+[ -n "$NEO" ] && unzip -Z1 "$NEO" > neo-entries.txt || : > neo-entries.txt
 unzip -Z1 "$JAR" > entries.txt
 rm -rf probe-in probe-out && mkdir -p probe-in probe-out
 # 1. collect the classes that have to be decompiled
@@ -36,5 +40,7 @@ while read -r kind a b; do
     assetdir) for f in $(grep -E "$a" entries.txt | grep -v '/$'); do echo "API-BEGIN asset $f"; unzip -p "$JAR" "$f"; echo "API-END"; done ;;
     alist)   echo "API-BEGIN alist $a"; grep -E "$a" entries.txt || echo "(nothing)"; echo "API-END" ;;
     javap)   echo "API-BEGIN javap $a"; javap -cp "$JAR" -public "$a" 2>&1 | head -400; echo "API-END" ;;
+    njavap)  echo "API-BEGIN javap $a"; javap -cp "$NEO:$JAR" -public "$a" 2>&1 | head -400; echo "API-END" ;;
+    nlist)   echo "API-BEGIN list $a"; grep -E "$a" neo-entries.txt || echo "(nothing)"; echo "API-END" ;;
   esac
 done < tools/probe.txt

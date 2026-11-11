@@ -322,8 +322,111 @@ final class ClientSelfTest {
             case 45 -> {
                 if (into >= 30) step(46);
             }
-            default -> step(9);
+            default -> step(60);
         }
+    }
+
+    // ---- fire and smoke
+    private static String gasProblem = "the fire and smoke part never ran";
+    private static int gasStepsBefore, gasBlastsBefore;
+    private static boolean sawBurning;
+
+    /**
+     * Fire and smoke as gas: a campfire, a block of fire, a soul fire and a torch on a stone floor. The solver has to find
+     * them, burn them hot and send their smoke up; then an explosion and a burning pig have to reach it; then the game
+     * rule has to switch it off and on again. It runs by the solver's steps, not by the clock: frames are slow here.
+     */
+    private static void gas(Minecraft mc, MinecraftServer server) {
+        int into = tick - stepTick;
+        switch (step) {
+            case 60 -> {
+                if (into == 0) {
+                    stage("gas: a campfire, a fire, a soul fire and a torch");
+                    commands(server, "goo clear", "gamemode creative @a", "time set noon",
+                            "fill 40 199 -3 54 199 12 minecraft:stone", "fill 40 200 -3 54 212 12 minecraft:air",
+                            "setblock 44 200 6 minecraft:campfire",
+                            "setblock 50 199 6 minecraft:netherrack", "setblock 50 200 6 minecraft:fire",
+                            "setblock 47 199 9 minecraft:soul_sand", "setblock 47 200 9 minecraft:soul_fire",
+                            "setblock 47 200 4 minecraft:torch",
+                            "tp @a 47.5 200 -1.5 0 -12");
+                }
+                if (GasClient.sources >= 4 && into >= 20) {
+                    gasStepsBefore = GasClient.stepsDone;
+                    step(61);
+                } else if (into > 300) {
+                    gasProblem = !GasClient.ruleOn ? "the game rule physical_gas did not reach the client"
+                            : "the client did not find the fires in the world (" + GasClient.sources + " of 4, gas broken: " + GasClient.broken + ")";
+                    step(66);
+                }
+            }
+            case 61 -> {
+                int steps = GasClient.stepsDone - gasStepsBefore;
+                if (into % 40 == 0) PhysicsBruhh.LOGGER.info("CLIENTTEST gas t={} steps={} sums={} drawn={}", tick, steps, head(GasClient.sums()), GasDraw.drawn);
+                if (steps >= 200 || GasClient.broken || into > 3000) {
+                    float[] sums = GasClient.sums();
+                    float smoke = sums.length > 0 ? sums[0] : 0.0F, hottest = sums.length > 2 ? sums[2] : 0.0F, above = 0.0F;
+                    for (int y = Math.max(0, 204 - GasClient.boxY()); 3 + y < sums.length; y++) above += sums[3 + y];
+                    String by = GasClient.solverInUse(), want = "cpu".equals(GasClient.solver) ? "processor" : "graphics card";
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST gas: computed on the {}, {} steps; smoke {}, hottest {}, {} of the smoke more than three blocks over the fires; a step takes {} ms, the drawing {} ms; drawn in {} frames, sums read back {} times",
+                            by, steps, smoke, hottest, above, GasClient.stepMs(), GasClient.drawMs(), GasDraw.drawn, GasDraw.readBacks);
+                    if (GasClient.broken) gasProblem = "fire and smoke as gas failed (see the log)";
+                    else if (steps < 200) gasProblem = "the gas solver made only " + steps + " steps in " + into + " ticks";
+                    else if (!by.equals(want)) gasProblem = "the gas was computed on the " + by + ", not on the " + want;
+                    else if (sums.length == 0) gasProblem = "the sums of the gas never came back";
+                    else if (smoke < 0.3F) gasProblem = "four fires made no smoke (" + smoke + ")";
+                    else if (hottest < 0.5F) gasProblem = "four fires made no flame (hottest " + hottest + ")";
+                    else if (above < 0.05F * smoke) gasProblem = "the smoke did not rise (" + above + " of " + smoke + " more than three blocks over the fires)";
+                    else if (GasDraw.drawn == 0) gasProblem = "the gas was never drawn";
+                    else gasProblem = null;
+                    step(gasProblem == null ? 62 : 66);
+                }
+            }
+            case 62 -> {
+                if (into == 0) {
+                    stage("gas: an explosion, a burning pig");
+                    gasBlastsBefore = GasClient.blastsSeen;
+                    sawBurning = false;
+                    commands(server, "summon minecraft:pig 50.5 200 6.5 {NoAI:1b,Silent:1b}", "summon minecraft:tnt 47.5 207.0 6.5 {fuse:0}");
+                }
+                sawBurning |= GasClient.burning > 0;
+                if (GasClient.blastsSeen > gasBlastsBefore && sawBurning) {
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST gas: the explosion and the burning pig reached the solver");
+                    step(63);
+                } else if (into > 400) {
+                    gasProblem = GasClient.blastsSeen > gasBlastsBefore ? "a pig standing in fire was not taken as burning" : "an explosion did not reach the gas solver";
+                    step(66);
+                }
+            }
+            case 63 -> {
+                // let the fireball be seen
+                if (GasClient.stepsDone - gasStepsBefore >= 280 || into > 600) step(64);
+            }
+            case 64 -> {
+                if (into == 0) {
+                    stage("gas: the game rule off, and on again");
+                    commands(server, "gamerule physicsbruhh:physical_gas false");
+                }
+                if (!GasClient.ruleOn && GasClient.solverInUse().equals("none")) {
+                    commands(server, "gamerule physicsbruhh:physical_gas true");
+                    step(65);
+                } else if (into > 200) {
+                    gasProblem = "with the game rule physical_gas off the gas was still computed";
+                    step(66);
+                }
+            }
+            case 65 -> {
+                if (GasClient.ruleOn) step(66);
+                else if (into > 200) { gasProblem = "the game rule physical_gas did not come back on"; step(66); }
+            }
+            default -> {
+                commands(server, "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "fill 40 199 -3 54 212 12 minecraft:air");
+                step(9);
+            }
+        }
+    }
+
+    private static String head(float[] sums) {
+        return sums.length < 3 ? "(none)" : String.format(java.util.Locale.ROOT, "smoke %.2f heat %.2f hottest %.2f", sums[0], sums[1], sums[2]);
     }
 
     private static String size(double[] s) {
@@ -502,6 +605,8 @@ final class ClientSelfTest {
                 step(1);
             } else if (step > 0 && step < 9) {
                 hands(mc, server);
+            } else if (step >= 60) {
+                gas(mc, server);
             } else if (step >= 40) {
                 byHand(mc, server);
             } else if (step >= 20) {
@@ -539,6 +644,7 @@ final class ClientSelfTest {
                 else if (Math.abs(honeySimulated - honeyAfterPour) > 60) problem = "the simulated honey did not follow the markers (" + honeySimulated + " particles, the markers say " + honeyAfterPour + ")";
                 else if (!thrown) problem = "a slime ball was not thrown";
                 else if (handProblem != null) problem = handProblem;
+                else if (gasProblem != null) problem = gasProblem;
                 else if (bornLingering < 0) problem = "the blocks put down by hand were never looked at";
                 else if (!wheelTurned) problem = "sneaking and turning the wheel did not change the thickness of the block in hand";
                 else if (!placedThick) problem = "the thick block placed by hand did not become thick goo";

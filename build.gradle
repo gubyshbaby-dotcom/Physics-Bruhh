@@ -54,6 +54,8 @@ neoForge {
             programArgument '--height'
             programArgument '720'
             systemProperty 'physicsbruhh.clienttest', 'true'
+            // the runners draw without a graphics card: the coarsest grid of smoke and fire is slow enough there
+            systemProperty 'physicsbruhh.gas', 'low'
             systemProperty 'physicsbruhh.lockstep', 'true'
             gameDirectory = project.file('run/clienttest')
         }

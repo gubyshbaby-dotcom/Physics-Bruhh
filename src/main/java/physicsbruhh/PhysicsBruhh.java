@@ -54,16 +54,25 @@ public class PhysicsBruhh {
     private static GameRule<Boolean> clearGoo;
     /** {@code /gamerule physicsbruhh:clear_goo true} draws honey and slime as clear liquid instead of with the blocks' textures. */
     public static final Supplier<GameRule<Boolean>> CLEAR_GOO = () -> clearGoo;
+    private static GameRule<Boolean> physicalGas;
+    /** {@code /gamerule physicsbruhh:physical_gas false} leaves fire and smoke as the game draws them. */
+    public static final Supplier<GameRule<Boolean>> PHYSICAL_GAS = () -> physicalGas;
 
     public PhysicsBruhh(IEventBus modBus, ModContainer container) {
         ENTITIES.register(modBus);
         COMPONENTS.register(modBus);
-        modBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("1").playToServer(GooThickness.Turn.TYPE, GooThickness.Turn.CODEC, GooThickness::handle));
+        modBus.addListener((RegisterPayloadHandlersEvent e) -> {
+            e.registrar("1").playToServer(GooThickness.Turn.TYPE, GooThickness.Turn.CODEC, GooThickness::handle);
+            // what the client does with these two is registered by the client (PhysicsBruhhClient)
+            e.registrar("1").playToClient(GasRules.State.TYPE, GasRules.State.CODEC);
+            e.registrar("1").playToClient(GasRules.Blast.TYPE, GasRules.Blast.CODEC);
+        });
         // GameRules.registerBoolean puts the rule into the registry itself, so it must not go through a DeferredRegister
         modBus.addListener((RegisterEvent e) -> {
             if (e.getRegistryKey().equals(Registries.GAME_RULE)) {
                 physicalGoo = GameRules.registerBoolean(MODID + ":physical_goo", RULE_CATEGORY, true);
                 clearGoo = GameRules.registerBoolean(MODID + ":clear_goo", RULE_CATEGORY, false);
+                physicalGas = GameRules.registerBoolean(MODID + ":physical_gas", RULE_CATEGORY, true);
             }
         });
         modBus.addListener((RegisterGameRuleCategoryEvent e) -> e.register(RULE_CATEGORY));
@@ -71,6 +80,7 @@ public class PhysicsBruhh {
         modBus.addListener((net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent e) -> e.enqueueWork(GooDispense::register));
         NeoForge.EVENT_BUS.register(GooEvents.class);
         NeoForge.EVENT_BUS.register(GooCommands.class);
+        NeoForge.EVENT_BUS.register(GasRules.class);
         SelfTest.register();
     }
 }

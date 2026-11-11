@@ -1,0 +1,22 @@
+#version 330
+#extension GL_ARB_separate_shader_objects : require
+
+// Gas, step 6, first half: smoke, heat and fuel carried along by the velocity. Each fine cell takes
+// what was, a step ago, where its gas has come from.
+
+#include <physicsbruhh:gas.glsl>
+#include <physicsbruhh:gas_carry.glsl>
+
+uniform sampler2D GasSampler;     // smoke, heat, fuel after the last step
+uniform sampler2D VelSampler;     // step 5
+uniform sampler2D WorldSampler;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    ivec3 c = gasCell(GasFine, ivec2(gl_FragCoord.xy));
+    int fpb = int(GasStep.z * GasStep.w);
+    if (c.y < 0 || gasBlock(WorldSampler, c / fpb).r > 0.5) { fragColor = vec4(0.0); return; }
+    vec3 moved = GasMoved.xyz * float(fpb);
+    fragColor = gasAt(GasSampler, GasFine, gasCameFrom(VelSampler, WorldSampler, c) + moved);
+}
