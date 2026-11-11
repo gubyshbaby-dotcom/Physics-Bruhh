@@ -124,6 +124,15 @@ void main() {
     vec4 amount = texture(ThickSampler, texCoord);
     cover *= smoothstep(0.004, 0.008, amount.r + amount.g);
 
+#ifdef GOO_DEBUG
+    // what the passes before this one came up with, as colours: red the amount of goo along the line of sight (blocks),
+    // green the same times ten, blue how far the goo's surface is in front of the world behind it (half a block per unit)
+    if (along > GOO_NONE) {
+        discard;
+    }
+    fragColor = vec4(clamp(amount.r + amount.g, 0.0, 1.0), clamp((amount.r + amount.g) * 10.0, 0.0, 1.0), clamp((sceneHere - along) * 0.5, 0.0, 1.0), 1.0);
+    return;
+#endif
     // the world as it was, in the goo's shade where there is goo over it
     vec3 shaded = pow(texture(SceneSampler, texCoord).rgb, vec3(2.2));
     vec3 shade = sceneHere < 2000.0 ? shadeAt(viewAt(unproject, ndc, sceneHere)) : vec3(1.0);

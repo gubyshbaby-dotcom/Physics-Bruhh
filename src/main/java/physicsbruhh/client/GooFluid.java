@@ -141,11 +141,16 @@ final class GooFluid {
     private static final float[] REACH = { 3.0F, 2.0F, 1.2F };
     private static final RenderPipeline[] BLUR = new RenderPipeline[REACH.length * 2];
     private static final RenderPipeline[] SMOOTH = new RenderPipeline[2];
-    private static final RenderPipeline PICTURE = screen("goo_fluid", "core/goo_fluid")
-            .withBindGroupLayout(PICTURE_IN)
-            .withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT)).build();
+    /** {@code -Dphysicsbruhh.liquid.debug=true}: the last pass shows what the passes before it came up with instead of the goo (see the shader). */
+    private static final boolean DEBUG = Boolean.getBoolean("physicsbruhh.liquid.debug");
+    private static final RenderPipeline PICTURE;
 
     static {
+        RenderPipeline.Builder picture = screen("goo_fluid", "core/goo_fluid")
+                .withBindGroupLayout(PICTURE_IN)
+                .withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT));
+        if (DEBUG) picture.withShaderDefine("GOO_DEBUG");
+        PICTURE = picture.build();
         for (int i = 0; i < BLUR.length; i++) {
             RenderPipeline.Builder builder = screen("goo_blur_" + i, "core/goo_blur")
                     .withBindGroupLayout(BindGroupLayouts.IN_SAMPLER)
