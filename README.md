@@ -183,6 +183,10 @@ dozen blocks of thousands. The solver on the graphics card works only on a small
 there is (the gas last seen and three blocks more, the blocks that feed it and the room over
 them, burning creatures, for three seconds the place of an explosion); `/gaslook info` says how
 much of the whole that is. `-Dphysicsbruhh.gas.whole=true` computes everything always.
+Inside that box, smoke, heat and fuel (the fine grid, where most of the work is) are worked on
+only in blocks that are awake: where something feeds the gas, or where gas was seen in the block
+or in one of the six next to it after the last step. Over one fire in a box of five thousand
+blocks that is four hundred. The Rust core does the same.
 
 **The pressure.** What keeps gas from piling up is found in steps down and up four grids, each
 twice as coarse as the one before, instead of by many rounds on one: measured against the exact

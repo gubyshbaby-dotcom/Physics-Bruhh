@@ -19,6 +19,9 @@
 //!    hot enough burns into heat and smoke; heat is lost, smoke thins; burning blocks, burning
 //!    creatures and explosions put new fuel, heat and smoke in.
 //!
+//! Step 6 is done only in blocks that are awake ([`Gas::wake`]): most of the air in the box holds
+//! nothing, and nothing can come of it in one step.
+//!
 //! Two grids over the same box of the world: a coarse one for velocity and pressure, and one
 //! `ratio` times finer for what is seen. Flow is cheap to compute coarsely and hard to tell from a
 //! fine one once the smoke it carries is sharp; pressure is the expensive part, and this way it
@@ -280,6 +283,11 @@ fn down_and_up(levels: &mut [Level], each: usize) {
     even_out(nx, ny, nz, h2, edge, solid, f, p, q, each);
 }
 
+/// A block counts as holding gas to be seen if a cell of it, or a cell next to it, has more smoke or more heat than
+/// this (`gas_where.fsh` draws nothing of less).
+pub const SEEN_SMOKE: f32 = 0.002;
+pub const SEEN_HEAT: f32 = 0.1;
+
 pub struct Gas {
     /// Size of the box in blocks.
     pub bx: usize, pub by: usize, pub bz: usize,
@@ -307,6 +315,10 @@ pub struct Gas {
     gas2: Vec<[f32; 4]>,
     gas3: Vec<[f32; 4]>,
     pub world: Vec<u8>,
+    /// For each block: whether gas was to be seen in it after the last step (not zero).
+    pub seen: Vec<u8>,
+    /// For each block: whether anything can happen in it this step (see `wake`).
+    awake: Vec<u8>,
     pub params: Params,
     pub time: f32,
     /// Whether smoke and heat are carried along the sharper way (two passes instead of one).
@@ -377,7 +389,7 @@ impl Gas {
             vel: vec![[0.0; 4]; n], vel2: vec![[0.0; 4]; n], curl: vec![[0.0; 4]; n],
             p: vec![0.0; n], q: vec![0.0; n], levels, rhs: vec![0.0; n], solid: vec![0; n],
             gas: vec![[0.0; 4]; f], gas2: vec![[0.0; 4]; f], gas3: vec![[0.0; 4]; f],
-            world: vec![0; bx * by * bz * WORLD_BYTES], params: Params::default(), time: 0.0, sharp: true,
+            world: vec![0; bx * by * bz * WORLD_BYTES], seen: vec![0; bx * by * bz], awake: vec![0; bx * by * bz], params: Params::default(), time: 0.0, sharp: true,
         }
     }
 
@@ -403,6 +415,7 @@ impl Gas {
         self.vel.iter_mut().for_each(|v| *v = [0.0; 4]);
         self.gas.iter_mut().for_each(|v| *v = [0.0; 4]);
         self.p.iter_mut().for_each(|v| *v = 0.0);
+        self.seen.iter_mut().for_each(|v| *v = 0);
     }
 
     /// The box moved by whole blocks: what is in it stays where it is in the world.
@@ -413,6 +426,7 @@ impl Gas {
         moved(&mut self.vel, self.nx, self.ny, self.nz, dx * c, dy * c, dz * c, [0.0; 4]);
         moved(&mut self.p, self.nx, self.ny, self.nz, dx * c, dy * c, dz * c, 0.0);
         moved(&mut self.gas, self.fx, self.fy, self.fz, dx * f, dy * f, dz * f, [0.0; 4]);
+        moved(&mut self.seen, self.bx, self.by, self.bz, dx, dy, dz, 0);
     }
 
     /// One step of `dt` seconds.
@@ -426,7 +440,9 @@ impl Gas {
             self.divergence(dt, blobs);
             self.pressure();
             self.project();
+            self.wake();
             self.scalars(dt, blobs);
+            self.look();
         });
         self.time += dt;
     }
@@ -445,9 +461,56 @@ impl Gas {
         solve(self, dt);
         on_pool(|| {
             self.project();
+            self.wake();
             self.scalars(dt, blobs);
+            self.look();
         });
         self.time += dt;
+    }
+
+    /// Which blocks anything can happen in this step. Most of the air in the box holds nothing: a block is awake if
+    /// something feeds the gas in it, or if gas was seen in it or in one of the six blocks next to it after the last
+    /// step (`look` counts one cell into the blocks around, so gas about to cross an edge or a corner is seen from
+    /// both sides; gas does not get further than a block in a step). The cells of a block that is not awake hold
+    /// nothing and are not worked on, unless a burning creature or an explosion reaches them: what little may have
+    /// been left in them is too thin to be seen.
+    fn wake(&mut self) {
+        let (bx, by, bz) = (self.bx, self.by, self.bz);
+        let (world, seen) = (&self.world, &self.seen);
+        self.awake.par_chunks_mut(bx * bz).enumerate().for_each(|(y, out)| {
+            for z in 0..bz {
+                for x in 0..bx {
+                    let i = x + bx * (z + bz * y);
+                    let near = |j: usize, inside: bool| inside && seen[j] != 0;
+                    out[x + bx * z] = (world[i * WORLD_BYTES + 1] != 0 || seen[i] != 0
+                        || near(i + 1, x + 1 < bx) || near(i.wrapping_sub(1), x > 0)
+                        || near(i + bx * bz, y + 1 < by) || near(i.wrapping_sub(bx * bz), y > 0)
+                        || near(i + bx, z + 1 < bz) || near(i.wrapping_sub(bx), z > 0)) as u8;
+                }
+            }
+        });
+    }
+
+    /// After a step: in which blocks gas is to be seen (in the block itself or one cell into the blocks around it).
+    fn look(&mut self) {
+        let (bx, bz, fx, fy, fz) = (self.bx, self.bz, self.fx, self.fy, self.fz);
+        let fpb = self.cpb * self.ratio;
+        let gas = &self.gas;
+        self.seen.par_chunks_mut(bx * bz).enumerate().for_each(|(by, out)| {
+            for bzi in 0..bz {
+                for bxi in 0..bx {
+                    let (x0, x1) = ((bxi * fpb).saturating_sub(1), ((bxi + 1) * fpb + 1).min(fx));
+                    let (y0, y1) = ((by * fpb).saturating_sub(1), ((by + 1) * fpb + 1).min(fy));
+                    let (z0, z1) = ((bzi * fpb).saturating_sub(1), ((bzi + 1) * fpb + 1).min(fz));
+                    let mut any = false;
+                    'cells: for y in y0..y1 { for z in z0..z1 { for x in x0..x1 {
+                        let v = &gas[x + fx * (z + fz * y)];
+                        if v[0] > SEEN_SMOKE || v[1] > SEEN_HEAT { any = true; break 'cells; }
+                    } } }
+                    out[bxi + bx * bzi] = any as u8;
+                }
+            }
+        });
     }
 
     fn mark_solid(&mut self) {
@@ -689,7 +752,8 @@ impl Gas {
             first.par_chunks_mut(layer).enumerate().for_each(|(y, out)| {
                 for z in 0..fz {
                     for x in 0..fx {
-                        if this.world[(x / fpb + bx * (z / fpb + bz * (y / fpb))) * WORLD_BYTES] != 0 { out[x + fx * z] = [0.0; 4]; continue; }
+                        let block = x / fpb + bx * (z / fpb + bz * (y / fpb));
+                        if this.world[block * WORLD_BYTES] != 0 || (this.awake[block] == 0 && !reached(blobs, (x as f32 + 0.5) * cell, (y as f32 + 0.5) * cell, (z as f32 + 0.5) * cell)) { out[x + fx * z] = [0.0; 4]; continue; }
                         let (qx, qy, qz) = this.came_from(x, y, z, dt);
                         out[x + fx * z] = tri4(&this.gas, fx, fy, fz, qx, qy, qz);
                     }
@@ -706,8 +770,8 @@ impl Gas {
                         let o = x + fx * z;
                         let (kx, ky, kz) = (x / fpb, y / fpb, z / fpb);
                         let b = (kx + bx * (kz + bz * ky)) * WORLD_BYTES;
-                        if world[b] != 0 { out[o] = [0.0; 4]; continue; }
                         let (px, py, pz) = (x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        if world[b] != 0 || (this.awake[b / WORLD_BYTES] == 0 && !reached(blobs, px * cell, py * cell, pz * cell)) { out[o] = [0.0; 4]; continue; }
                         let mut v = first[o + layer * y];
                         if sharp {
                             // carrying is a blur; carried back again it shows how much of one, and half of that is put back,
@@ -836,6 +900,17 @@ impl Gas {
         } } }
         worst
     }
+}
+
+/// Whether a burning creature or an explosion reaches a place (in blocks): an explosion throws its gas a block
+/// further than it is wide before it is seen there.
+#[inline]
+fn reached(blobs: &[Blob], x: f32, y: f32, z: f32) -> bool {
+    blobs.iter().any(|blob| {
+        let reach = blob.radius + if blob.expand != 0.0 { 1.0 } else { 0.0 };
+        let (dx, dy, dz) = (x - blob.pos[0], y - blob.pos[1], z - blob.pos[2]);
+        dx * dx + dy * dy + dz * dz < reach * reach
+    })
 }
 
 /// A number between 0 and 1 that changes smoothly from place to place (`x`, `z` in any unit: one lump per unit) and in time.

@@ -48,7 +48,7 @@ public class GlRig {
         int someTexture = glCreateTextures(GL_TEXTURE_2D), someBuffer = glCreateBuffers(), someSampler = glCreateSamplers();
         glTextureStorage2D(someTexture, 1, GL_RGBA8, 4, 4);
         glNamedBufferData(someBuffer, 256L, GL_STATIC_DRAW);
-        for (int unit = 0; unit < 5; unit++) { glBindTextureUnit(unit, someTexture); glBindSampler(unit, someSampler); }
+        for (int unit = 0; unit < 6; unit++) { glBindTextureUnit(unit, someTexture); glBindSampler(unit, someSampler); }
         glBindBufferRange(GL_UNIFORM_BUFFER, 0, someBuffer, 64L, 128L);
 
         long built = System.nanoTime();
@@ -76,7 +76,7 @@ public class GlRig {
         }
         System.out.println(String.format("a step takes %.1f ms here", took / steps * 1000.0));
         boolean back = glGetInteger(GL_CURRENT_PROGRAM) == 0 && glGetIntegeri(GL_UNIFORM_BUFFER_BINDING, 0) == someBuffer && glGetInteger64i(GL_UNIFORM_BUFFER_START, 0) == 64L && glGetInteger64i(GL_UNIFORM_BUFFER_SIZE, 0) == 128L;
-        for (int unit = 0; unit < 5; unit++) back &= glGetIntegeri(GL_TEXTURE_BINDING_2D, unit) == someTexture && glGetIntegeri(GL_SAMPLER_BINDING, unit) == someSampler;
+        for (int unit = 0; unit < 6; unit++) back &= glGetIntegeri(GL_TEXTURE_BINDING_2D, unit) == someTexture && glGetIntegeri(GL_SAMPLER_BINDING, unit) == someSampler;
         System.out.println("what was bound before is bound again: " + back + "; OpenGL errors: " + glGetError());
         gas.close();
         glfwDestroyWindow(window);

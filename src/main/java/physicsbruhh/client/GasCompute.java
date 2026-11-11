@@ -69,11 +69,13 @@ abstract class GasCompute {
      *
      * @param read     gives the text of a file under {@code shaders/} ("core/gas_spin.fsh", "include/gas.glsl")
      * @param fragment the pass ("gas_spin")
-     * @param define   what the pass's pipeline tells its shaders ("FINE", "LEVEL2"), or null
+     * @param define   what the pass's pipeline tells its shaders ("LEVEL2"), or null
+     * @param over     the cells the pass is run for: those of the "fine" grid, of a "level" of the pressure solve (the
+     *                 coarse grid or one under it, as the define says), or the "blocks" of the box
      * @param version  the first line ("#version 450")
      * @param format   how the image written is declared ("rgba16f")
      */
-    static Wrapped wrap(Function<String, String> read, String fragment, String define, String version, String format) {
+    static Wrapped wrap(Function<String, String> read, String fragment, String define, String over, String version, String format) {
         String text = read.apply("core/" + fragment + ".fsh");
         for (int depth = 0; depth < 8; depth++) {
             Matcher include = INCLUDE.matcher(text);
@@ -97,14 +99,14 @@ abstract class GasCompute {
         if (!text.contains("layout(location = 0) out vec4 fragColor;")) throw new IllegalStateException(fragment + " does not write fragColor the way the passes do");
         text = text.replace("layout(location = 0) out vec4 fragColor;", "");
         text = text.replace("void main()", "void gasMain()").replace("gl_FragCoord", "gasFragCoord");
-        boolean fine = "FINE".equals(define);
         String head = version + "\n" + (define == null ? "" : "#define " + define + "\n")
                 + "layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;\n"
                 + "layout(binding = " + (samplers.size() + 1) + ", " + format + ") uniform writeonly image2D GasOut;\n"
                 + "vec4 gasFragCoord;\nvec4 fragColor;\n";
         String tail = "\n// For every cell of the part of the grid that is computed (as gas_region.vsh draws it): what the pass would draw there.\n"
                 + "void main() {\n"
-                + (fine ? "    vec4 grid = GasFine;\n    ivec3 lo = gasLow(grid), hi = gasHigh(grid);\n"
+                + (over.equals("fine") ? "    vec4 grid = GasFine;\n    ivec3 lo = gasLow(grid), hi = gasHigh(grid);\n"
+                        : over.equals("blocks") ? "    vec4 grid = GasBlocks;\n    ivec3 lo = ivec3(GasFrom.xyz), hi = ivec3(GasTo.xyz) - 1;\n"
                         : "    vec4 grid = gasLevelGrid(GAS_LEVEL);\n    ivec3 lo = gasLevelFrom(GAS_LEVEL), hi = lo + gasLevelCells(GAS_LEVEL) - 1;\n")
                 + "    ivec3 cell = lo + ivec3(gl_GlobalInvocationID.xzy);\n"
                 + "    if (any(greaterThan(cell, hi))) return;\n"
@@ -122,12 +124,12 @@ abstract class GasCompute {
         final String name;
         final Object program;
         final String[] samplers;
-        /** Which level of the pressure solve it works on (0 the coarse grid), or -1 for the fine grid. */
+        /** Which level of the pressure solve it works on (0 the coarse grid), or FINE for the fine grid, or BLOCKS for the blocks of the box. */
         final int level;
 
         Pass(Function<String, String> read, String version, String fragment, int level, int writes) {
-            String define = level < 0 ? "FINE" : level == 0 ? null : "LEVEL" + level;
-            Wrapped wrapped = wrap(read, fragment, define, version, writes == WHOLE ? "rgba32f" : "rgba16f");
+            String define = level <= 0 ? null : "LEVEL" + level;
+            Wrapped wrapped = wrap(read, fragment, define, level == FINE ? "fine" : level == BLOCKS ? "blocks" : "level", version, writes == WHOLE ? "rgba32f" : "rgba16f");
             this.name = fragment + (level > 0 ? " " + level : "");
             this.samplers = wrapped.samplers;
             this.level = level;
@@ -135,7 +137,8 @@ abstract class GasCompute {
         }
     }
 
-    private Pass spin, velocityPass, divergence, project, carry, burn;
+    private static final int FINE = -1, BLOCKS = -2;
+    private Pass spin, velocityPass, divergence, project, carry, burn, where;
     private final Pass[] round = new Pass[GasBox.UNDER + 1], down = new Pass[GasBox.UNDER], up = new Pass[GasBox.UNDER];
 
     // ------------------------------------------------------------------ the grids
@@ -152,7 +155,8 @@ abstract class GasCompute {
 
     private final Field[] velocity = new Field[2], gas = new Field[3];
     private final Field[][] pressure = new Field[GasBox.UNDER + 1][2];
-    private Field spinField, world;
+    /** What each block held after the last step: the steps over the fine grid leave alone the blocks nothing can happen in (gasAwake in gas.glsl). */
+    private Field spinField, world, info;
     /** Which of each holds what the last step left. */
     private int v, p, g;
     private final int[] part = new int[6];
@@ -172,8 +176,9 @@ abstract class GasCompute {
         velocityPass = new Pass(read, version, "gas_velocity", 0, HALF);
         divergence = new Pass(read, version, "gas_divergence", 0, WHOLE);
         project = new Pass(read, version, "gas_project", 0, HALF);
-        carry = new Pass(read, version, "gas_carry", -1, HALF);
-        burn = new Pass(read, version, "gas_burn", -1, HALF);
+        carry = new Pass(read, version, "gas_carry", FINE, HALF);
+        burn = new Pass(read, version, "gas_burn", FINE, HALF);
+        where = new Pass(read, version, "gas_where", BLOCKS, HALF);
         for (int level = 0; level <= GasBox.UNDER; level++) {
             round[level] = new Pass(read, version, "gas_pressure", level, WHOLE);
             if (level > 0) down[level - 1] = new Pass(read, version, "gas_down", level, WHOLE);
@@ -189,6 +194,7 @@ abstract class GasCompute {
         spinField = new Field(image(HALF, box.coarseW, box.coarseH, "spin"));
         for (int i = 0; i < 3; i++) gas[i] = new Field(image(HALF, box.fineW, box.fineH, "smoke, heat, fuel " + i));
         world = new Field(image(BYTES, box.blockW, box.blockH, "map of the world"));
+        info = new Field(image(HALF, box.blockW, box.blockH, "what each block holds"));
     }
 
     /** The image that holds smoke, heat and fuel as the last step left them (four half numbers a cell, laid out as {@link GasBox} says). */
@@ -207,6 +213,7 @@ abstract class GasCompute {
         for (Field[] level : pressure) for (Field field : level) empty(field);
         for (Field field : gas) empty(field);
         empty(spinField);
+        empty(info);
     }
 
     private void empty(Field field) {
@@ -244,7 +251,7 @@ abstract class GasCompute {
             if (!found) throw new IllegalStateException("the pass " + pass.name + " reads " + pass.samplers[i] + " and is not given it");
         }
         // groups of 8 by 8 cells along x and z, one layer each, over the part of the pass's grid that is computed
-        int cells = pass.level < 0 ? box.cpb * box.ratio : box.cpb;
+        int cells = pass.level == FINE ? box.cpb * box.ratio : pass.level == BLOCKS ? 1 : box.cpb;
         int shift = Math.max(0, pass.level);
         int x = ((part[3] - part[0]) * cells + (1 << shift) - 1) >> shift, y = ((part[4] - part[1]) * cells + (1 << shift) - 1) >> shift, z = ((part[5] - part[2]) * cells + (1 << shift) - 1) >> shift;
         run(pass.program, reads, linear, writing(writes), (x + 7) / 8, (z + 7) / 8, y);
@@ -275,8 +282,9 @@ abstract class GasCompute {
         for (int cycle = 0; cycle < cycles; cycle++) downAndUp(0, at, each);
         p = at[0];
         run(project, velocity[v], "VelSampler", pushed, false, "PressureSampler", pressure[0][p], false);
-        run(carry, carried, "GasSampler", before, true, "VelSampler", velocity[v], true, "WorldSampler", world, false);
-        run(burn, result, "CarriedSampler", carried, true, "GasSampler", before, false, "VelSampler", velocity[v], true, "WorldSampler", world, false);
+        run(carry, carried, "GasSampler", before, true, "VelSampler", velocity[v], true, "WorldSampler", world, false, "InfoSampler", info, false);
+        run(burn, result, "CarriedSampler", carried, true, "GasSampler", before, false, "VelSampler", velocity[v], true, "WorldSampler", world, false, "InfoSampler", info, false);
+        run(where, info, "GasSampler", result, false);
         g = (g + 2) % 3;
         steps++;
     }

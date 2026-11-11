@@ -34,9 +34,13 @@ import physicsbruhh.PhysicsBruhh;
  *   down        pressure                         -> what is left, for the grid under (the grids under the coarse one)
  *   up          pressure, the grid under's       -> pressure with its answer added   (coarse, and the grids under it but the last)
  *   project     velocity, pressure               -> velocity that piles nothing up   (coarse)
- *   carry       gas, velocity, world             -> gas carried along                (fine)
- *   burn        carried, gas, velocity, world    -> gas burnt, cooled, fed           (fine)
+ *   carry       gas, velocity, world, info       -> gas carried along                (fine)
+ *   burn        carried, gas, velocity, world, info -> gas burnt, cooled, fed        (fine)
  * </pre>
+ *
+ * <p>The passes over the fine grid are drawn only over the blocks anything can happen in
+ * ({@code gasAwake} in gas.glsl, {@code shaders/core/gas_blocks.vsh}): "info" is what each block
+ * held after the last step ({@link GasDraw#where}).
  *
  * <p>The pressure is solved in steps down and up a few grids, each twice as coarse as the one above
  * it ({@code Gas::pressure} in gas.rs says why): a few rounds, what they leave undone handed down,
@@ -70,14 +74,22 @@ final class GasGpu {
      * part of the box that is computed ({@code shaders/core/gas_region.vsh}); the rest of the texture is cleared.
      */
     private static RenderPipeline step(String name, GpuFormat format, boolean fine, String... textures) {
-        return step(name, name, format, fine ? "FINE" : null, textures);
+        return step(name, name, format, fine ? "core/gas_blocks" : "core/gas_region", null, textures);
     }
 
-    /** The same with the shaders told one more thing ({@code define}): that the grid is the fine one, or which level of the pressure solve the pass works on. */
+    /** The same with the shaders told one more thing ({@code define}): which level of the pressure solve the pass works on. */
     private static RenderPipeline step(String name, String fragment, GpuFormat format, String define, String... textures) {
+        return step(name, fragment, format, "core/gas_region", define, textures);
+    }
+
+    /**
+     * {@code vertex}: what the pass is drawn over. "core/gas_region": a rectangle for each layer of the part of the box
+     * that is computed; "core/gas_blocks" (the fine grid): a rectangle for each layer of each block of it that is awake.
+     */
+    private static RenderPipeline step(String name, String fragment, GpuFormat format, String vertex, String define, String... textures) {
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(id("pipeline/" + name))
-                .withVertexShader(id("core/gas_region"))
+                .withVertexShader(id(vertex))
                 .withFragmentShader(id("core/" + fragment))
                 .withBindGroupLayout(GasDraw.GRID)
                 .withBindGroupLayout(samplers(textures))
@@ -109,8 +121,8 @@ final class GasGpu {
         }
     }
     private static final RenderPipeline PROJECT = step("gas_project", GpuFormat.RGBA16_FLOAT, false, "VelSampler", "PressureSampler");
-    private static final RenderPipeline CARRY = step("gas_carry", GpuFormat.RGBA16_FLOAT, true, "GasSampler", "VelSampler", "WorldSampler");
-    private static final RenderPipeline BURN = step("gas_burn", GpuFormat.RGBA16_FLOAT, true, "CarriedSampler", "GasSampler", "VelSampler", "WorldSampler");
+    private static final RenderPipeline CARRY = step("gas_carry", GpuFormat.RGBA16_FLOAT, true, "GasSampler", "VelSampler", "WorldSampler", "InfoSampler");
+    private static final RenderPipeline BURN = step("gas_burn", GpuFormat.RGBA16_FLOAT, true, "CarriedSampler", "GasSampler", "VelSampler", "WorldSampler", "InfoSampler");
     private static final RenderPipeline[] ALL;
     static {
         java.util.List<RenderPipeline> all = new java.util.ArrayList<>(java.util.List.of(SPIN, VELOCITY, DIVERGENCE, PROJECT, CARRY, BURN));
@@ -176,7 +188,7 @@ final class GasGpu {
         return gas[g].getColorTextureView();
     }
 
-    /** One pass: the whole texture cleared, then a rectangle for each of {@code layers} layers of the part that is computed. */
+    /** One pass: the whole texture cleared, then {@code layers} rectangles (one for each layer of the part that is computed; for the fine grid one for each layer of each block of it). */
     private static void run(CommandEncoder encoder, String name, RenderPipeline pipeline, TextureTarget to, GpuBuffer grid, int layers, Consumer<RenderPass> textures) {
         RenderSystem.AutoStorageIndexBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS);
         GpuBuffer indexBuffer = indices.getBuffer(layers * 6);
@@ -192,10 +204,13 @@ final class GasGpu {
 
     /**
      * One step. The grid's numbers (how long the step is, how far the box has moved, the blobs, the part of the box
-     * that is computed) are in {@code grid}; {@code layers} is how many layers of blocks that part is high.
+     * that is computed) are in {@code grid}; {@code part} is that part once more (blocks: the least corner, then the
+     * corner just past the greatest); {@code info}: what each block held after the last step.
      */
-    void step(CommandEncoder encoder, GpuBuffer grid, GpuTextureView world, int layers) {
-        final int coarse = layers * box.cpb, fine = coarse * box.ratio;
+    void step(CommandEncoder encoder, GpuBuffer grid, GpuTextureView world, GpuTextureView info, int[] part) {
+        final int coarse = (part[4] - part[1]) * box.cpb;
+        // the fine grid: a rectangle for each of its layers through each block of the part
+        final int fine = (part[3] - part[0]) * (part[4] - part[1]) * (part[5] - part[2]) * box.cpb * box.ratio;
         GpuSampler nearest = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST), linear = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
         final GpuTextureView was = velocity[v].getColorTextureView(), pushed = velocity[1 - v].getColorTextureView();
         final GpuTextureView before = gas[g].getColorTextureView(), carried = gas[(g + 1) % 3].getColorTextureView();
@@ -230,12 +245,14 @@ final class GasGpu {
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("VelSampler", now, linear);
             pass.setUniform("WorldSampler", world, nearest);
+            pass.setUniform("InfoSampler", info, nearest);
         });
         run(encoder, "Gas: burn", BURN, gas[(g + 2) % 3], grid, fine, pass -> {
             pass.setUniform("CarriedSampler", carried, linear);
             pass.setUniform("GasSampler", before, nearest);
             pass.setUniform("VelSampler", now, linear);
             pass.setUniform("WorldSampler", world, nearest);
+            pass.setUniform("InfoSampler", info, nearest);
         });
         g = (g + 2) % 3;
         steps++;

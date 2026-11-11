@@ -10,12 +10,15 @@
 uniform sampler2D GasSampler;     // smoke, heat, fuel after the last step
 uniform sampler2D VelSampler;     // step 5
 uniform sampler2D WorldSampler;
+uniform sampler2D InfoSampler;    // what each block held after the last step (gas_where.fsh)
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
     ivec3 c = gasCell(GasFine, ivec2(gl_FragCoord.xy));
     int fpb = int(GasStep.z * GasStep.w);
-    if (c.y < 0 || !gasComputed(GasFine, c) || gasBlock(WorldSampler, c / fpb).r > 0.5) { fragColor = vec4(0.0); return; }
+    if (c.y < 0 || !gasComputed(GasFine, c)) { fragColor = vec4(0.0); return; }
+    vec4 block = gasBlock(WorldSampler, c / fpb);
+    if (block.r > 0.5 || !gasAwake(InfoSampler, block, c / fpb, (vec3(c) + 0.5) / float(fpb), 0.0)) { fragColor = vec4(0.0); return; }
     fragColor = gasAtWas(GasSampler, GasFine, gasCameFrom(VelSampler, WorldSampler, c));
 }

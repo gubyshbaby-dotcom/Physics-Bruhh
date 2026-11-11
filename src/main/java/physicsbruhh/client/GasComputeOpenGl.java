@@ -19,8 +19,8 @@ import org.lwjgl.system.MemoryUtil;
  * ({@link #begin}, {@link #end}): the game does not ask OpenGL what is bound, it remembers.
  */
 final class GasComputeOpenGl extends GasCompute {
-    /** Texture units the programs read through: a pass reads four images at most. */
-    private static final int UNITS = 5;
+    /** Texture units the programs read through: a pass reads five images at most. */
+    private static final int UNITS = 6;
 
     /** Whether the OpenGL of this thread can run the gas solver's programs. */
     static boolean supported() {

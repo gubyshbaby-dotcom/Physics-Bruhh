@@ -12,6 +12,7 @@ uniform sampler2D CarriedSampler;   // first half
 uniform sampler2D GasSampler;       // smoke, heat, fuel after the last step
 uniform sampler2D VelSampler;       // step 5
 uniform sampler2D WorldSampler;
+uniform sampler2D InfoSampler;      // what each block held after the last step (gas_where.fsh)
 
 layout(location = 0) out vec4 fragColor;
 
@@ -26,7 +27,7 @@ void main() {
     int fpb = int(fpbf);
     ivec3 inBlock = c / fpb;
     vec4 block = c.y < 0 || !gasComputed(GasFine, c) ? vec4(1.0) : gasBlock(WorldSampler, inBlock);
-    if (block.r > 0.5) { fragColor = vec4(0.0); return; }
+    if (block.r > 0.5 || !gasAwake(InfoSampler, block, inBlock, (vec3(c) + 0.5) / fpbf, 0.0)) { fragColor = vec4(0.0); return; }
     float dt = GasStep.x;
     float time = GasStep.y;
     vec3 p = vec3(c) + 0.5;

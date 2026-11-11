@@ -27,7 +27,7 @@ public class ComputeRig {
         boolean wide = scene.equals("fires") || scene.equals("far");
         GasBox box = wide ? new GasBox(24, 16, 16, cpb, ratio, 4) : new GasBox(10, 14, 10, cpb, ratio, 4);
         Function<String, String> read = name -> { try { return Files.readString(Path.of(ROOT + name)); } catch (Exception e) { throw new RuntimeException(e); } };
-        if (System.getenv("DUMP") != null) { System.out.println(GasCompute.wrap(read, System.getenv("DUMP"), null, "#version 450", "rgba16f").source()); return; }
+        if (System.getenv("DUMP") != null) { System.out.println(GasCompute.wrap(read, System.getenv("DUMP"), null, System.getenv("DUMP").equals("gas_where") ? "blocks" : System.getenv("DUMP").matches("gas_(carry|burn)") ? "fine" : "level", "#version 450", "rgba16f").source()); return; }
 
         ByteBuffer map = MemoryUtil.memCalloc(box.blockW * box.blockH * 4);
         for (int y = 0; y < box.by; y++) for (int z = 0; z < box.bz; z++) for (int x = 0; x < box.bx; x++) set(box, map, x, y, z, y < 2, 0);

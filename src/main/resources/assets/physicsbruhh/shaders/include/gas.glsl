@@ -183,6 +183,37 @@ vec4 gasBlock(sampler2D world, ivec3 block) {
     return vec4(solid, k - 128.0 * solid, w.b * 2.0, 0.0);
 }
 
+// ---- where nothing can happen. Even in the part of the box that is computed most of the air holds nothing. A
+// block is awake this step if something feeds the gas in it, or if gas was seen in it or in one of the six blocks
+// next to it after the last step (`info`: gas_where.fsh, written before the box last moved; it counts one cell into
+// the blocks around, so gas about to cross an edge or a corner is seen from both sides). Gas does not get further
+// than a block in a step. The cells of a block that is not awake hold nothing and are not worked on: what little may
+// have been left in them is too thin to be seen.
+//
+// `block`: what gasBlock says of it, `inBlock`: which block, `place`: a place in it, in blocks, and `around`: how far
+// from that place what is asked about reaches (0 for a cell's middle).
+bool gasAwake(sampler2D info, vec4 block, ivec3 inBlock, vec3 place, float around) {
+    if (block.g > 0.5) return true;
+    int blobs = int(GasMoved.w);
+    for (int i = 0; i < blobs; i++) {
+        vec4 ball = GasBlob[i * 3];
+        // (an explosion throws its gas a block further than it is wide before it is seen there)
+        float reach = ball.w + (GasBlob[i * 3 + 2].w != 0.0 ? 1.0 : 0.0) + around;
+        vec3 d = place - ball.xyz;
+        if (dot(d, d) < reach * reach) return true;
+    }
+    ivec3 was = inBlock + ivec3(GasMoved.xyz);
+    ivec3 n = ivec3(GasBlocks.xyz);
+    for (int i = 0; i < 7; i++) {
+        ivec3 b = was;
+        if (i > 0) b[(i - 1) >> 1] += (i & 1) == 1 ? 1 : -1;
+        if (any(lessThan(b, ivec3(0))) || any(greaterThanEqual(b, n))) continue;
+        vec2 seen = texelFetch(info, gasPixel(GasBlocks, b), 0).rg;
+        if (seen.r > 0.0 || seen.g > 0.0) return true;
+    }
+    return false;
+}
+
 float gasHash(uint x, uint y, uint z, uint t) {
     uint h = (x * 0x9E3779B1u) ^ (y * 0x85EBCA77u) ^ (z * 0xC2B2AE3Du) ^ (t * 0x27D4EB2Fu);
     h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;

@@ -176,11 +176,7 @@ final class GasDraw {
      * {@link #bounds}). {@code ox, oy, oz}: the corner of the box in the world.
      */
     static void where(CommandEncoder encoder, GasBox box, GpuBuffer grid, GpuTextureView gas, boolean coded, int ox, int oy, int oz) {
-        if (info == null || !box.same(infoBox)) {
-            if (info != null) info.destroyBuffers();
-            info = new TextureTarget("Gas: what each block holds", box.blockW, box.blockH, GpuFormat.RGBA16_FLOAT, null);
-            infoBox = box;
-        }
+        info(box);
         GpuSampler nearest = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST);
         try (RenderPass pass = encoder.createRenderPass(() -> "Gas: what each block holds", info.getColorTextureView(), Optional.empty())) {
             pass.setPipeline(GasGpu.compiled(coded ? WHERE_CODED : WHERE));
@@ -190,6 +186,17 @@ final class GasDraw {
         }
         boundsAge++;
         if (!reading && ++frame % 6 == 0) readBack(encoder, box, ox, oy, oz);
+    }
+
+    /** What each block of the box held after the last step (nothing, before the first): the solver on the graphics card leaves alone the blocks nothing can happen in. */
+    static GpuTextureView info(GasBox box) {
+        if (info == null || !box.same(infoBox)) {
+            if (info != null) info.destroyBuffers();
+            info = new TextureTarget("Gas: what each block holds", box.blockW, box.blockH, GpuFormat.RGBA16_FLOAT, null);
+            RenderSystem.getDevice().createCommandEncoder().clearColorTexture(info.getColorTexture(), new Vector4f(0.0F, 0.0F, 0.0F, 0.0F));
+            infoBox = box;
+        }
+        return info.getColorTextureView();
     }
 
     private static void readBack(CommandEncoder encoder, GasBox box, int ox, int oy, int oz) {
@@ -258,6 +265,11 @@ final class GasDraw {
     static void forget() {
         sums = new float[0];
         bounds = null;
+    }
+
+    /** What each block held is nothing again (the gas has been emptied). */
+    static void forgetInfo() {
+        if (info != null) RenderSystem.getDevice().createCommandEncoder().clearColorTexture(info.getColorTexture(), new Vector4f(0.0F, 0.0F, 0.0F, 0.0F));
     }
 
     /** The gas into the picture. {@code ox, oy, oz}: the corner of the box in the world. */

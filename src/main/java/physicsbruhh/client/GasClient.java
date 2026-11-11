@@ -506,6 +506,7 @@ final class GasClient {
         if (Math.abs(movedX) >= box.bx / 2 || Math.abs(movedY) >= box.by / 2 || Math.abs(movedZ) >= box.bz / 2) {
             // the player is somewhere else altogether: nothing of the old gas is in the box any more
             if (gpu != null) gpu.clear(); else compute.forget();
+            GasDraw.forgetInfo();
             movedX = 0; movedY = 0; movedZ = 0;
         }
         if (card) {
@@ -519,7 +520,7 @@ final class GasClient {
         Timer.begin(encoder);
         if (gpu != null) {
             if (stepped) {
-                gpu.step(encoder, grid, world, part[4] - part[1]);
+                gpu.step(encoder, grid, world, GasDraw.info(box), part);
                 gridX = ox; gridY = oy; gridZ = oz;
                 stepsDone++;
                 GasDraw.where(encoder, box, grid, gpu.gas(), false, gridX, gridY, gridZ);
