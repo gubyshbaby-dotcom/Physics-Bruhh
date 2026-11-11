@@ -370,7 +370,7 @@ final class ClientSelfTest {
                     float[] sums = GasClient.sums();
                     float smoke = sums.length > 0 ? sums[0] : 0.0F, hottest = sums.length > 2 ? sums[2] : 0.0F, above = 0.0F;
                     for (int y = Math.max(0, 204 - GasClient.boxY()); 3 + y < sums.length; y++) above += sums[3 + y];
-                    String by = GasClient.solverInUse(), want = "cpu".equals(GasClient.solver) ? "processor" : "graphics card";
+                    String by = GasClient.solverInUse(), want = "cpu".equals(GasClient.solver) ? "processor" : "compute".equals(GasClient.solver) ? "graphics card (compute shaders)" : "graphics card";
                     PhysicsBruhh.LOGGER.info("CLIENTTEST gas: computed on the {}, {} steps; smoke {}, hottest {}, {} of the smoke more than three blocks over the fires; a step takes {} ms, the drawing {} ms; drawn in {} frames, sums read back {} times; {} of the box is computed",
                             by, steps, smoke, hottest, above, GasClient.stepMs(), GasClient.drawMs(), GasDraw.drawn, GasDraw.readBacks, GasClient.partOfBox);
                     if (GasClient.broken) gasProblem = "fire and smoke as gas failed (see the log)";

@@ -196,11 +196,14 @@ jobs:
           run_client opengl 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1"
           # (this one also has smoke and fire computed by the Rust core instead of the graphics card)
           run_client surface "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.liquid=false PHYSICSBRUHH_GAS_SOLVER=cpu"
-          run_client plain "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.shader=false"
+          # (this one also has smoke and fire computed by compute shaders, on Vulkan)
+          run_client plain "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.shader=false PHYSICSBRUHH_GAS_SOLVER=compute"
           # the hand-over to shader packs, with no pack: goo as the game's own translucent geometry
           run_client packs "" "JAVA_TOOL_OPTIONS=-Dphysicsbruhh.packs=true"
+          # smoke and fire computed by compute shaders on OpenGL (the game asks for 3.3; the programs need what came with 4.5)
+          run_client glcompute 'preferredGraphicsBackend:"opengl"\n' "SDL_VIDEO_FORCE_EGL=1 LIBGL_ALWAYS_SOFTWARE=1 PHYSICSBRUHH_GAS_SOLVER=compute"
           echo "=== summary"
-          for name in vulkan oit opengl surface plain packs; do
+          for name in vulkan oit opengl surface plain packs glcompute; do
             echo "$name: $(grep -o 'Using graphics backend [A-Za-z]*' clienttest-$name.log | head -1) / $(grep -o 'CLIENTTEST \(PASS\|FAIL.*\)' clienttest-$name.log | head -1)"
           done
           # the default run and the two fallbacks of our own making must pass; OpenGL depends on what the runner can do
@@ -212,7 +215,7 @@ jobs:
       - name: Screenshots as text (commits tagged [shots])
         if: always() && contains(github.event.head_commit.message, '[shots]')
         run: |
-          for name in vulkan oit opengl surface plain packs; do
+          for name in vulkan oit opengl surface plain packs glcompute; do
             n=0
             # every second frame of the default run, every sixth of the others
             case "$name" in vulkan) every=2 ;; *) every=6 ;; esac

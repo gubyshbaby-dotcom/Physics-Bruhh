@@ -50,7 +50,8 @@ import org.lwjgl.vulkan.VkWriteDescriptorSet;
  * uniforms in their buffer changes from one use to the next.
  */
 public final class VkCompute implements AutoCloseable {
-    public static final int RGBA16F = VK_FORMAT_R16G16B16A16_SFLOAT, R32F = VK_FORMAT_R32_SFLOAT, RGBA8 = VK_FORMAT_R8G8B8A8_UNORM;
+    /** Formats every Vulkan device can store to from a compute shader without anything extra turned on (the game turns nothing extra on). */
+    public static final int RGBA16F = VK_FORMAT_R16G16B16A16_SFLOAT, RGBA32F = VK_FORMAT_R32G32B32A32_SFLOAT, R32F = VK_FORMAT_R32_SFLOAT, RGBA8 = VK_FORMAT_R8G8B8A8_UNORM;
 
     private final VkDevice device;
     private final long vma;
@@ -218,6 +219,11 @@ public final class VkCompute implements AutoCloseable {
         barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     }
 
+    /** What anything before has written can be read by anything after (round a clear or a copy in the middle of the dispatches). */
+    public void all(VkCommandBuffer commands) {
+        barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    }
+
     /** What anything before has written (uploads, the game's passes) can be read by compute shaders. */
     public void before(VkCommandBuffer commands) {
         barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -374,6 +380,28 @@ public final class VkCompute implements AutoCloseable {
                 region.extent().set(x1 - x0, y1 - y0, 1);
             }
             vkCmdCopyImage(commands, grid.image, VK_IMAGE_LAYOUT_GENERAL, to, VK_IMAGE_LAYOUT_GENERAL, regions);
+        } finally {
+            regions.free();
+        }
+    }
+
+    /**
+     * Rectangles of a flat image copied into the same places of another image of the same size and format, in the
+     * general layout (the game's own): {@code rectangles} holds x, y, width, height of each.
+     */
+    public void copyRectangles(VkCommandBuffer commands, Image from, long to, int[] rectangles, int count) {
+        if (count <= 0) return;
+        VkImageCopy.Buffer regions = VkImageCopy.calloc(count);
+        try {
+            for (int i = 0; i < count; i++) {
+                VkImageCopy region = regions.get(i);
+                region.srcSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
+                region.dstSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
+                region.srcOffset().set(rectangles[i * 4], rectangles[i * 4 + 1], 0);
+                region.dstOffset().set(rectangles[i * 4], rectangles[i * 4 + 1], 0);
+                region.extent().set(rectangles[i * 4 + 2], rectangles[i * 4 + 3], 1);
+            }
+            vkCmdCopyImage(commands, from.image, VK_IMAGE_LAYOUT_GENERAL, to, VK_IMAGE_LAYOUT_GENERAL, regions);
         } finally {
             regions.free();
         }

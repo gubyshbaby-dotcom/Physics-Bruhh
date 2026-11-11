@@ -1,5 +1,8 @@
 package physicsbruhh.client;
 
+import java.nio.FloatBuffer;
+import physicsbruhh.sim.GasParams;
+
 /**
  * The box of the world the gas is computed in, and how its grids lie in their textures.
  *
@@ -52,6 +55,35 @@ final class GasBox {
 
     private static int rows(int layers, int tiles) {
         return (layers + tiles - 1) / tiles;
+    }
+
+    /** Blobs the solvers take at once ({@code GAS_BLOBS} in gas.glsl). */
+    static final int BLOBS = 16;
+    /** How many numbers the passes are told about the grid and a step ({@code GasGrid} in gas.glsl): fifteen of four, then the blobs, three of four each. */
+    static final int GRID_FLOATS = (15 + BLOBS * 3) * 4;
+
+    /**
+     * What the passes are told about the grid and a step ({@code GasGrid} in gas.glsl), written from the start of
+     * {@code out}. {@code blobs}: twelve numbers each, places in blocks from the corner of the box. {@code part}: the
+     * part of the box that is computed this step, in blocks from its corner (the least corner, then the corner just
+     * past the greatest).
+     */
+    void grid(FloatBuffer out, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part) {
+        float[] p = GasParams.values();
+        out.put(0, nx).put(1, ny).put(2, nz).put(3, coarseTiles);
+        out.put(4, fx).put(5, fy).put(6, fz).put(7, fineTiles);
+        out.put(8, bx).put(9, by).put(10, bz).put(11, blockTiles);
+        out.put(12, dt).put(13, time).put(14, cpb).put(15, ratio);
+        out.put(16, movedX).put(17, movedY).put(18, movedZ).put(19, Math.min(blobCount, BLOBS));
+        for (int i = 0; i < 16; i++) out.put(20 + i, p[i]);
+        out.put(33, rounds);
+        out.put(36, p[GasParams.MOST_HEAT]).put(37, p[GasParams.MOST_FUEL]).put(38, 0.0F).put(39, 0.0F);
+        out.put(40, part[0]).put(41, part[1]).put(42, part[2]).put(43, 0.0F);
+        out.put(44, part[3]).put(45, part[4]).put(46, part[5]).put(47, 0.0F);
+        for (int level = 0; level < UNDER; level++) {
+            out.put(48 + level * 4, underX[level]).put(49 + level * 4, underY[level]).put(50 + level * 4, underZ[level]).put(51 + level * 4, underTiles[level]);
+        }
+        for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(60 + i, blobs[i]);
     }
 
     boolean same(GasBox other) {

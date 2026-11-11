@@ -42,10 +42,10 @@ import physicsbruhh.sim.NativeSim;
  * feeds it: blocks of fire and campfires, torches, lava, lit furnaces, burning creatures and the
  * player, explosions. Blocks are walls to it.
  *
- * <p>The solver runs on the graphics card ({@link GasGpu}); where its passes do not work, the Rust
- * core computes a coarser box on a thread of its own ({@link GasCpu}). Either way the result is
- * drawn by {@link GasDraw}. {@code /gaslook} sets how fine the grid is on this client and says how
- * long a step takes.
+ * <p>The solver runs on the graphics card ({@link GasGpu}; if asked for, the same steps as compute
+ * shaders, {@link GasComputeHost}); where its passes do not work, the Rust core computes a coarser
+ * box on a thread of its own ({@link GasCpu}). Either way the result is drawn by {@link GasDraw}.
+ * {@code /gaslook} sets how fine the grid is on this client and says how long a step takes.
  *
  * <p>This class keeps the box where the player is, keeps the map of the world in it up to date
  * (a few columns each tick, all of it when the box moves), collects the burning creatures and the
@@ -68,7 +68,7 @@ final class GasClient {
     /** What the processor's solver computes, whatever the quality asked for: the same reach as "low", half as fine. */
     private static final GasBox COARSE = new GasBox(24, 16, 24, 2, 1, 4);
 
-    /** This client's choices ({@code /gaslook}; the command line wins: {@code -Dphysicsbruhh.gas=off|low|medium|high|ultra}, {@code -Dphysicsbruhh.gas.solver=auto|gpu|cpu}). */
+    /** This client's choices ({@code /gaslook}; the command line wins: {@code -Dphysicsbruhh.gas=off|low|medium|high|ultra}, {@code -Dphysicsbruhh.gas.solver=auto|gpu|compute|cpu}). */
     static volatile Quality quality = Quality.MEDIUM;
     static volatile String solver = "auto";
     /** The picture of the gas is computed at the screen's size divided by this. */
@@ -77,7 +77,7 @@ final class GasClient {
     static volatile boolean ruleOn;
     /** Set when neither solver works on this machine; the gas then stays off until the game is restarted. */
     static volatile boolean broken;
-    private static boolean gpuFailed;
+    private static boolean gpuFailed, computeFailed;
 
     private GasClient() {}
 
@@ -85,7 +85,10 @@ final class GasClient {
 
     private static GasBox box;
     private static GasGpu gpu;
+    private static GasComputeHost compute;
     private static GasCpu cpu;
+    /** Whether the map of the world has changed since the compute shaders were last handed it. */
+    private static boolean mapNew = true;
     private static int ox, oy, oz;
     private static boolean placed;
     /** The corner of the box the grids on the graphics card were last stepped for: the box may have moved since. */
@@ -148,9 +151,14 @@ final class GasClient {
         return GasGpu.available() && GasDraw.available(false);
     }
 
+    /** Whether the solver is to run as compute shaders: only when asked for, and where they can be reached. */
+    private static boolean useCompute() {
+        return "compute".equals(solver) && !computeFailed && GasDraw.available(false) && GasComputeHost.possible();
+    }
+
     /** Whether gas is being computed and drawn right now. */
     static boolean showing() {
-        return box != null && placed && !broken && (gpu != null && gpu.steps > 0 || cpu != null && cpu.gas() != null);
+        return box != null && placed && !broken && (gpu != null && gpu.steps > 0 || compute != null && compute.steps() > 0 || cpu != null && cpu.gas() != null);
     }
 
     /** Whether the gas is drawn at this place in the world, so that the game's own smoke and flames there are left out: inside the box, away from its edge, where the gas fades. */
@@ -175,9 +183,9 @@ final class GasClient {
         GasHide.update(level, set);
     }
 
-    /** "graphics card", "processor" or "none". */
+    /** "graphics card", "graphics card (compute shaders)", "processor" or "none". */
     static String solverInUse() {
-        return gpu != null ? "graphics card" : cpu != null ? "processor" : "none";
+        return gpu != null ? "graphics card" : compute != null ? "graphics card (compute shaders)" : cpu != null ? "processor" : "none";
     }
 
     static void reset() {
@@ -189,7 +197,9 @@ final class GasClient {
     private static void release() {
         // called from the client thread and the render thread, which are the same thread
         if (gpu != null) { gpu.close(); gpu = null; }
+        if (compute != null) { compute.close(); compute = null; }
         if (cpu != null) { cpu.close(); cpu = null; }
+        mapNew = true;
         GasDraw.close();
         box = null; placed = false; sources = 0; blobCount = 0; pending = 0.0F;
         GasHide.update(Minecraft.getInstance().level, new it.unimi.dsi.fastutil.longs.LongOpenHashSet());
@@ -203,7 +213,7 @@ final class GasClient {
             return;
         }
         try {
-            GasBox want = useGpu() ? quality.box() : COARSE;
+            GasBox want = useGpu() || useCompute() ? quality.box() : COARSE;
             if (!want.same(box)) {
                 release();
                 box = want;
@@ -441,20 +451,33 @@ final class GasClient {
     }
 
     private static void frame(Minecraft mc, RenderLevelStageEvent.AfterLevel event) {
-        boolean onCard = useGpu();
-        if (gpu == null && cpu == null && !alive()) return; // nothing burns here: nothing to set up yet
-        if (onCard && gpu == null && box.same(quality.box())) {
+        boolean onCard = useGpu() || useCompute();
+        if (gpu == null && compute == null && cpu == null && !alive()) return; // nothing burns here: nothing to set up yet
+        if (onCard && gpu == null && compute == null && box.same(quality.box())) {
             if (cpu != null) { cpu.close(); cpu = null; }
-            gpu = new GasGpu(box);
-            PhysicsBruhh.LOGGER.info("Gas: computed on the graphics card, {}", box);
+            if (useCompute()) {
+                try {
+                    compute = new GasComputeHost(box);
+                    mapNew = true;
+                    PhysicsBruhh.LOGGER.info("Gas: computed on the graphics card by compute shaders ({}), {}", compute.on(), box);
+                } catch (Throwable t) {
+                    computeFailed = true;
+                    PhysicsBruhh.LOGGER.error("Gas: the compute shaders could not be set up on this machine; the solver's passes are drawn instead", t);
+                }
+            }
+            if (compute == null && useGpu()) {
+                gpu = new GasGpu(box);
+                PhysicsBruhh.LOGGER.info("Gas: computed on the graphics card, {}", box);
+            }
         } else if (!onCard && cpu == null && box.same(COARSE)) {
             if (gpu != null) { gpu.close(); gpu = null; }
+            if (compute != null) { compute.close(); compute = null; }
             if (!NativeSim.available()) throw new IllegalStateException("the graphics card cannot run the gas solver and the Rust core is not there (" + NativeSim.loadMessage() + ")");
             if (!GasDraw.available(true)) throw new IllegalStateException("the passes that draw the gas are not available on this machine");
             cpu = new GasCpu(box);
             PhysicsBruhh.LOGGER.info("Gas: computed by the Rust core on the processor, {}", box);
         }
-        if (gpu == null && cpu == null) return; // the box is about to be remade for the other solver (next tick)
+        if (gpu == null && compute == null && cpu == null) return; // the box is about to be remade for the other solver (next tick)
         if (cpu != null && cpu.failed) throw new IllegalStateException("the gas solver of the Rust core failed");
 
         long now = System.nanoTime();
@@ -463,11 +486,13 @@ final class GasClient {
         boolean awake = alive() && !mc.isPaused();
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
         GpuTextureView world = GasDraw.world(encoder, box, picture, pictureChanged);
+        mapNew |= pictureChanged;
         pictureChanged = false;
+        final boolean card = gpu != null || compute != null;
 
         boolean stepped = false;
         float dt = 0.0F;
-        if (gpu != null && awake) {
+        if (card && awake) {
             pending += passed;
             if (pending >= 1.0F / 61.0F) {
                 dt = Math.min(pending, 1.0F / 20.0F);
@@ -476,14 +501,14 @@ final class GasClient {
             }
         }
         time = (time + dt) % 3600.0F;
-        int n = gpu != null ? blobsInBox(ox, oy, oz) : 0;
+        int n = card ? blobsInBox(ox, oy, oz) : 0;
         int movedX = stepped ? ox - gridX : 0, movedY = stepped ? oy - gridY : 0, movedZ = stepped ? oz - gridZ : 0;
         if (Math.abs(movedX) >= box.bx / 2 || Math.abs(movedY) >= box.by / 2 || Math.abs(movedZ) >= box.bz / 2) {
             // the player is somewhere else altogether: nothing of the old gas is in the box any more
-            gpu.clear();
+            if (gpu != null) gpu.clear(); else compute.forget();
             movedX = 0; movedY = 0; movedZ = 0;
         }
-        if (gpu != null) {
+        if (card) {
             if (stepped) findPart(n);
         } else {
             // the processor's solver computes the whole box
@@ -499,23 +524,36 @@ final class GasClient {
                 stepsDone++;
                 GasDraw.where(encoder, box, grid, gpu.gas(), false, gridX, gridY, gridZ);
             }
+        } else if (compute != null) {
+            if (stepped) {
+                compute.step(encoder, dt, time, movedX, movedY, movedZ, blobsInBox, n, part, mapNew ? picture : null);
+                mapNew = false;
+                gridX = ox; gridY = oy; gridZ = oz;
+                stepsDone++;
+                GasDraw.where(encoder, box, grid, compute.gas(), false, gridX, gridY, gridZ);
+            }
         } else if (cpu.take(encoder)) {
             stepsDone = cpu.steps;
             GasDraw.where(encoder, box, grid, cpu.gas(), true, cpu.shownX(), cpu.shownY(), cpu.shownZ());
         }
         Timer.middle(encoder, stepped);
-        boolean something = gpu != null ? gpu.steps > 0 : cpu.gas() != null;
+        boolean something = gpu != null ? gpu.steps > 0 : compute != null ? compute.steps() > 0 : cpu.gas() != null;
         float[] sums = cpu != null ? cpu.totals() : GasDraw.sums();
         boolean empty = sums.length >= 2 && sums[0] <= 0.0F && sums[1] <= 0.0F && sources == 0 && blobCount == 0;
         if (something && !empty) {
             if (gpu != null) GasDraw.draw(encoder, event, box, grid, gpu.gas(), false, world, gridX, gridY, gridZ);
+            else if (compute != null) GasDraw.draw(encoder, event, box, grid, compute.gas(), false, world, gridX, gridY, gridZ);
             else GasDraw.draw(encoder, event, box, grid, cpu.gas(), true, world, cpu.shownX(), cpu.shownY(), cpu.shownZ());
         }
         Timer.end(encoder);
     }
 
     private static void fail(String what, Throwable t) {
-        if (gpu != null && !gpuFailed) {
+        if (compute != null && !computeFailed) {
+            computeFailed = true;
+            PhysicsBruhh.LOGGER.error("Gas: the compute shaders failed on this machine; the solver's passes are drawn instead from now on", t);
+            release();
+        } else if (gpu != null && !gpuFailed) {
             gpuFailed = true;
             PhysicsBruhh.LOGGER.error("Gas: {} failed on this machine; the Rust core computes the gas on the processor from now on", what, t);
             release();
@@ -614,7 +652,7 @@ final class GasClient {
         if (fine != null) {
             try { quality = Quality.valueOf(fine.trim().toUpperCase(Locale.ROOT)); } catch (IllegalArgumentException e) { PhysicsBruhh.LOGGER.warn("Gas: unknown setting '{}'", fine); }
         }
-        if (by != null && (by.equals("auto") || by.equals("gpu") || by.equals("cpu"))) solver = by;
+        if (by != null && (by.equals("auto") || by.equals("gpu") || by.equals("compute") || by.equals("cpu"))) solver = by;
         drawScale = Integer.getInteger("physicsbruhh.gas.scale", 2) <= 1 ? 1 : 2;
     }
 
@@ -623,7 +661,7 @@ final class GasClient {
             Properties properties = new Properties();
             properties.setProperty("gas", quality.name().toLowerCase(Locale.ROOT));
             properties.setProperty("solver", solver);
-            try (var out = Files.newOutputStream(file())) { properties.store(out, "Physics Bruhh, smoke and fire, this client only. gas = off | low | medium | high | ultra; solver = auto | gpu | cpu"); }
+            try (var out = Files.newOutputStream(file())) { properties.store(out, "Physics Bruhh, smoke and fire, this client only. gas = off | low | medium | high | ultra; solver = auto | gpu | compute | cpu"); }
         } catch (Exception e) {
             PhysicsBruhh.LOGGER.warn("Could not save the gas setting: {}", e.toString());
         }
@@ -641,13 +679,18 @@ final class GasClient {
                 return 1;
             }));
         }
-        for (String by : new String[] { "auto", "gpu", "cpu" }) {
+        for (String by : new String[] { "auto", "gpu", "compute", "cpu" }) {
             command.then(Commands.literal("solver").then(Commands.literal(by).executes(context -> {
                 solver = by;
                 gpuFailed = false;
+                computeFailed = false;
                 save();
+                // (whatever computes the gas now is let go; the one asked for is set up when the next frame is drawn)
+                release();
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.solver." + by,
-                        by.equals("cpu") ? "Fire and smoke are computed by the Rust core on the processor (coarser)" : "Fire and smoke are computed on the graphics card where it can do it"), false);
+                        by.equals("cpu") ? "Fire and smoke are computed by the Rust core on the processor (coarser)"
+                                : by.equals("compute") ? "Fire and smoke are computed on the graphics card by compute shaders where it can run them (not tried on a real graphics card yet: /gaslook info says how long a step takes, /gaslook solver gpu goes back)"
+                                : "Fire and smoke are computed on the graphics card where it can do it"), false);
                 return 1;
             })));
         }
@@ -656,7 +699,7 @@ final class GasClient {
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info.rule", "Fire and smoke are not gas here: the game rule physicsbruhh:physical_gas is off"), false);
             } else if (broken) {
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info.broken", "Fire and smoke as gas did not work on this machine (see the log)"), false);
-            } else if (box == null || gpu == null && cpu == null) {
+            } else if (box == null || gpu == null && compute == null && cpu == null) {
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info.idle", "Fire and smoke: nothing is being computed right now (%s)", quality.name().toLowerCase(Locale.ROOT)), false);
             } else {
                 final GasBox b = box;
@@ -665,7 +708,7 @@ final class GasClient {
                 String million = String.format(Locale.ROOT, "%.2f", b.fineCells() / 1.0e6), share = String.valueOf(Math.round(partOfBox * 100.0F));
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info",
                         "Fire and smoke: computed on the %s, %s x %s x %s cells (%s million), a step takes %s ms and the drawing %s ms; %s blocks and %s creatures feed it; %s%% of the box is computed right now",
-                        Component.translatableWithFallback("commands.physicsbruhh.gas.on." + (gpu != null ? "gpu" : "cpu"), solverInUse()), b.fx, b.fy, b.fz, million, step, picture, sources, burning, share), false);
+                        Component.translatableWithFallback("commands.physicsbruhh.gas.on." + (gpu != null ? "gpu" : compute != null ? "compute" : "cpu"), solverInUse()), b.fx, b.fy, b.fz, million, step, picture, sources, burning, share), false);
             }
             return 1;
         }));

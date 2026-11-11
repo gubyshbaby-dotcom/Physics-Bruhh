@@ -52,8 +52,8 @@ import physicsbruhh.sim.GasParams;
  */
 final class GasDraw {
     /** Blobs the solvers take at once ({@code GAS_BLOBS} in gas.glsl). */
-    static final int BLOBS = 16;
-    private static final int GRID_BYTES = (15 + BLOBS * 3) * 16, VIEW_BYTES = 64 + 4 * 16;
+    static final int BLOBS = GasBox.BLOBS;
+    private static final int GRID_BYTES = GasBox.GRID_FLOATS * 4, VIEW_BYTES = 64 + 4 * 16;
 
     static final BindGroupLayout GRID = BindGroupLayout.builder().withUniform("GasGrid", UniformType.UNIFORM_BUFFER).build();
     private static final BindGroupLayout VIEW = BindGroupLayout.builder().withUniform("GasView", UniformType.UNIFORM_BUFFER).build();
@@ -142,24 +142,9 @@ final class GasDraw {
      */
     static GpuBuffer writeGrid(GasBox box, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part) {
         if (gridBuffer == null) gridBuffer = new MappableRingBuffer(() -> "Gas grid", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, GRID_BYTES);
-        float[] p = GasParams.values();
         gridBuffer.rotate();
         try (GpuBufferSlice.MappedView view = gridBuffer.currentBuffer().map(false, true)) {
-            FloatBuffer out = view.data().order(ByteOrder.nativeOrder()).asFloatBuffer();
-            out.put(0, box.nx).put(1, box.ny).put(2, box.nz).put(3, box.coarseTiles);
-            out.put(4, box.fx).put(5, box.fy).put(6, box.fz).put(7, box.fineTiles);
-            out.put(8, box.bx).put(9, box.by).put(10, box.bz).put(11, box.blockTiles);
-            out.put(12, dt).put(13, time).put(14, box.cpb).put(15, box.ratio);
-            out.put(16, movedX).put(17, movedY).put(18, movedZ).put(19, Math.min(blobCount, BLOBS));
-            for (int i = 0; i < 16; i++) out.put(20 + i, p[i]);
-            out.put(33, box.rounds);
-            out.put(36, p[GasParams.MOST_HEAT]).put(37, p[GasParams.MOST_FUEL]).put(38, 0.0F).put(39, 0.0F);
-            out.put(40, part[0]).put(41, part[1]).put(42, part[2]).put(43, 0.0F);
-            out.put(44, part[3]).put(45, part[4]).put(46, part[5]).put(47, 0.0F);
-            for (int level = 0; level < GasBox.UNDER; level++) {
-                out.put(48 + level * 4, box.underX[level]).put(49 + level * 4, box.underY[level]).put(50 + level * 4, box.underZ[level]).put(51 + level * 4, box.underTiles[level]);
-            }
-            for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(60 + i, blobs[i]);
+            box.grid(view.data().order(ByteOrder.nativeOrder()).asFloatBuffer(), dt, time, movedX, movedY, movedZ, blobs, blobCount, part);
         }
         return gridBuffer.currentBuffer();
     }
