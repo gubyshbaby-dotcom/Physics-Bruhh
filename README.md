@@ -143,7 +143,9 @@ simulated: how it moves, how hot it is, how much smoke and unburnt fuel it carri
   rises and cools, smoke is carried along, curls, thins out; blocks are walls: smoke gathers
   under a roof and comes out round its edges.
 - **What it looks like**: flames glow in the colour of their temperature (yellow-white where
-  hottest, orange, dark red at the tips), brighter the hotter; smoke is lit by the sun and the sky,
+  hottest, orange, dark red at the tips), brighter the hotter, in tongues and gaps finer than the
+  grid (a pattern carried up with the hot gas), with edges that waver and a glow that spills over
+  what is around them; smoke is dark and thick, lit by the sun and the sky,
   shaded by the smoke between it and the sun, and lit from below by the flames under it. At night
   the fire is what lights its smoke. What is seen through a flame and the hot air over it wavers.
 - **The game's own fire** is left out where the gas is drawn: the flat flames of fire blocks and

@@ -22,7 +22,7 @@ layout(location = 0) in vec2 texCoord;
 layout(location = 0) out vec4 fragColor;
 
 // Steps along the ray, in fine cells.
-const float STRIDE = 0.6;
+const float STRIDE = 0.5;
 
 vec4 gasHere(vec3 blocks, float fpb) {
     return gasValue(gasAt(GasSampler, GasFine, blocks * fpb));
@@ -74,11 +74,19 @@ void main() {
         for (int i = 0; i < 64 && at < end && clear > 0.01; i++, at += ds) {
             vec3 p = eye + dir * at;
             vec4 v = gasHere(p, fpb);
+            if (v.x < 0.002 && v.y < 0.12) continue;
+            // a flame's edge is not the smooth one the grid gives it: it wavers
+            if (info.g > 0.25) {
+                vec2 sway = gasSway(p, GasSunLight.a) * (GAS_SWAY * smoothstep(0.1, 0.5, v.y + 0.3 * info.g));
+                v = gasHere(p + vec3(sway.x, 0.0, sway.y), fpb);
+            }
             float heat = v.y;
-            if (v.x < 0.002 && heat < 0.12) continue;
+            // what the grid is too coarse for: a flame is not a smooth lump but tongues and gaps, smoke is not a mist but curls
+            float lumps = gasDetail(p, heat, GasSunLight.a, 2.3, 6.1);
+            if (heat > 0.12) heat *= 1.0 + GAS_FLAME_DETAIL * (lumps - 0.5) * smoothstep(0.12, 0.45, heat);
             // hot gas is thin gas: as many times fewer specks of smoke to the block as it is hotter than the air;
             // and inside a flame what will be smoke is still glowing soot, seen by its own light and not by the sun's
-            float smoke = v.x / (1.0 + 5.0 * heat) * (1.0 - smoothstep(0.3, 0.75, heat));
+            float smoke = v.x / (1.0 + 5.0 * heat) * (1.0 - smoothstep(0.3, 0.75, heat)) * clamp(1.0 + GAS_SMOKE_DETAIL * (2.0 * lumps - 1.0), 0.0, 2.0);
             vec3 lit = vec3(0.0);
             if (smoke > 0.002) {
                 // how much smoke the sun's light crosses on its way here; light scattered more than once gets further than that
@@ -88,7 +96,7 @@ void main() {
                 depth += gasHere(p + sun * 0.725, fpb).x * 0.55;
                 depth += gasHere(p + sun * 1.45, fpb).x * 0.9;
                 depth += gasHere(p + sun * 2.6, fpb).x * 1.4;
-                depth *= GAS_SMOKE_DIMS;
+                depth *= 1.6 * GAS_SMOKE_DIMS;
                 float direct = exp(-depth);
                 float soft = 0.75 * direct + 0.25 * exp(-0.22 * depth);
                 // the flames under the smoke light it from below
@@ -100,8 +108,8 @@ void main() {
                 fire += gasFlame(u.y, soulShare(u)) * 0.2;
                 // the light of the place: how much of the sky is seen from it, and the lamps and fires near it
                 vec4 around = gasAt(LightSampler, GasBlocks, p);
-                lit = around.r * (GasSunLight.rgb * (towards * direct + 0.6 * soft) + GasSkyLight.rgb * (0.35 + 0.65 * soft))
-                    + vec3(1.0, 0.82, 0.6) * (0.3 * around.a * around.a) + 0.12 * fire;
+                lit = around.r * (GasSunLight.rgb * (towards * direct + 0.6 * soft) + GasSkyLight.rgb * (0.22 + 0.78 * soft))
+                    + vec3(1.0, 0.82, 0.6) * (0.3 * around.a * around.a) + 0.2 * fire;
             }
             light += clear * (lit * (GAS_SMOKE_WHITE * (1.0 - exp(-GAS_SMOKE_DIMS * smoke * ds))) + gasFlame(heat, soulShare(v)) * ds);
             clear *= exp(-(GAS_SMOKE_DIMS * smoke + GAS_FLAME_DIMS * smoothstep(0.3, 0.9, heat)) * ds);

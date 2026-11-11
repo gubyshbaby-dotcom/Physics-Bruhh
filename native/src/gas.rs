@@ -69,8 +69,8 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Params {
-            buoyancy: 14.0, weight: 0.6, cool: 0.15, cool4: 5.5, ignite: 0.22, burn: 3.5, heat: 2.6, soot: 0.12,
-            smoke_fade: 0.14, drag: 0.25, confine: 9.0, swell: 1.6, unrest: 5.0, rounds: 16.0, edge: 3.0,
+            buoyancy: 16.0, weight: 0.6, cool: 0.15, cool4: 6.5, ignite: 0.22, burn: 4.0, heat: 2.6, soot: 0.2,
+            smoke_fade: 0.14, drag: 0.2, confine: 15.0, swell: 2.0, unrest: 8.0, rounds: 16.0, edge: 3.0,
             most_smoke: 4.0, most_heat: 1.5, most_fuel: 2.0,
         }
     }
@@ -669,7 +669,7 @@ pub fn source(kind: u8, ix: f32, iy: f32, iz: f32, half: f32, wx: f32, wz: f32, 
             let cover = layer(0.15, 0.6) * disc(0.3);
             if cover <= 0.0 { return [0.0; 3]; }
             let jet = ((lumps(wx * 4.0, wz * 4.0, time, 1.6) - 0.25) / 0.4).clamp(0.0, 1.0);
-            [11.0 * cover * jet * live, 3.0 * cover, if layer(0.15, 0.35) > 0.0 { 0.5 * disc(0.3) * jet } else { 0.0 }]
+            [11.0 * cover * jet * live, 2.2 * cover, if layer(0.15, 0.35) > 0.0 { 0.5 * disc(0.3) * jet } else { 0.0 }]
         }
         kind::TORCH => { let cover = layer(0.6, 0.95) * disc(0.12); if cover > 0.0 { [0.0, 0.7 * cover, 0.16] } else { [0.0; 3] } }
         kind::OVER_LAVA => { let cover = layer(0.0, 0.3); if cover > 0.0 { [0.0, 0.15 * live * cover, 0.2 * live] } else { [0.0; 3] } }

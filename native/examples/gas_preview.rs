@@ -1,7 +1,7 @@
 //! Pictures of the gas solver without the game: `cargo run --release --example gas_preview -- <scene> <seconds> <out prefix> [night]`.
 //! Scenes: fires (a block of fire, a campfire, a soul fire, a torch), blast (an explosion), room (a campfire under a roof).
-//! Writes `<prefix>_<n>.ppm`, one per half second. The drawing is the same sum along each line of sight
-//! as `shaders/core/gas_march.fsh` does, with the same numbers.
+//! Writes `<prefix>_<n>.ppm`, one per half second. The drawing is the plain sum along each line of sight
+//! that `shaders/core/gas_march.fsh` starts from: the game's adds detail finer than the grid, wavering edges and a glow.
 
 use physicsbruhh_native::gas::{kind, Blob, Gas};
 use rayon::prelude::*;

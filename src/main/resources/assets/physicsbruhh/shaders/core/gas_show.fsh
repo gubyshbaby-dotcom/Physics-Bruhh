@@ -19,6 +19,13 @@ layout(location = 0) out vec4 fragColor;
 // How far the picture behind is shifted for a given change in the hot gas, and the furthest (both in screen heights).
 const float SHIMMER = 0.012;
 const float FURTHEST = 0.004;
+// The glow round a flame: how far it reaches (in screen heights), how bright gas has to be to give any, the most one
+// place gives, how strong it is, and how much it lights what is behind.
+const float GLOW_REACH = 0.07;
+const float GLOW_FROM = 1.2;
+const float GLOW_MOST = 6.0;
+const float GLOW = 0.16;
+const float LIT_BY_GLOW = 3.0;
 
 void main() {
     vec4 gas = texture(InSampler, texCoord);
@@ -28,10 +35,30 @@ void main() {
     vec2 shift = clamp(slope * SHIMMER, vec2(-FURTHEST), vec2(FURTHEST));
     vec2 size = vec2(textureSize(SceneSampler, 0));
     shift.x *= size.y / size.x;
-    if (gas.a > 0.999 && gas.r + gas.g + gas.b < 1.0e-4 && dot(shift, shift) * size.y * size.y < 0.04) discard;
+    // the light of a flame spills over what is around it in the picture, as it does in an eye or a lens: the bright
+    // parts of the gas's light, gathered from rings of places about this pixel
+    vec3 spill = vec3(0.0);
+    float turn = 6.2831853 * fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y));
+    // (only where there is hot gas somewhere about: most of the screen has none, and is spared the looking)
+    float about = texture(HazeSampler, texCoord).r;
+    for (int k = 0; k < 8; k++) {
+        float angle = float(k) * 0.7853982;
+        about += texture(HazeSampler, texCoord + vec2(cos(angle) * size.y / size.x, sin(angle)) * GLOW_REACH * ((k & 1) == 0 ? 1.0 : 0.5)).r;
+    }
+    for (int ring = 0; ring < 3 && about > 0.0; ring++) {
+        float reach = GLOW_REACH * (ring == 0 ? 0.18 : ring == 1 ? 0.5 : 1.0);
+        for (int k = 0; k < 8; k++) {
+            float angle = turn + float(k) * 0.7853982 + float(ring) * 0.3926991;
+            vec2 off = vec2(cos(angle) * size.y / size.x, sin(angle)) * reach;
+            spill += min(max(texture(InSampler, texCoord + off).rgb - GLOW_FROM, vec3(0.0)), vec3(GLOW_MOST)) * (ring == 0 ? 0.5 : ring == 1 ? 0.3 : 0.2);
+        }
+    }
+    spill *= GLOW / 8.0;
+    if (gas.a > 0.999 && gas.r + gas.g + gas.b + spill.r < 1.0e-4 && dot(shift, shift) * size.y * size.y < 0.04) discard;
     vec4 behind = texture(SceneSampler, texCoord + shift);
-    vec3 through = pow(behind.rgb, vec3(2.2)) * gas.a;
-    vec3 colour = pow(1.0 - exp(-gas.rgb) * (1.0 - through), vec3(1.0 / 2.2));
+    // what is near a flame in the picture is lit by it, the more the brighter it already is
+    vec3 through = pow(behind.rgb, vec3(2.2)) * gas.a * (1.0 + LIT_BY_GLOW * spill);
+    vec3 colour = pow(1.0 - exp(-(gas.rgb + spill)) * (1.0 - min(through, vec3(1.0))), vec3(1.0 / 2.2));
     // a grain finer than the screen's steps of brightness: smooth smoke does not band
     float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
     fragColor = vec4(colour + grain / 255.0, behind.a);

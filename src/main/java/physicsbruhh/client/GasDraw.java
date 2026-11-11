@@ -328,7 +328,7 @@ final class GasDraw {
             FloatBuffer out = data.asFloatBuffer();
             out.put(16, (float) (camera.x - ox)).put(17, (float) (camera.y - oy)).put(18, (float) (camera.z - oz)).put(19, RenderSystem.getDevice().getDeviceInfo().isZZeroToOne() ? 1.0F : 0.0F);
             out.put(20, lightX / length).put(21, lightY / length).put(22, 0.3F / length).put(23, (float) (drawn % 1024));
-            out.put(24, red).put(25, green).put(26, blue).put(27, 0.0F);
+            out.put(24, red).put(25, green).put(26, blue).put(27, (float) (System.nanoTime() / 1.0e9 % 3600.0));
             out.put(28, skyR).put(29, skyG).put(30, skyB).put(31, 0.0F);
         }
         return viewBuffer.currentBuffer();

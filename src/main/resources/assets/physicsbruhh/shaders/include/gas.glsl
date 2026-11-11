@@ -122,7 +122,7 @@ vec3 gasSource(int kind, vec3 inside, float halfCell, vec3 place, float time, fl
         float cover = gasLayer(inside.y, halfCell, 0.15, 0.6) * gasDisc(off, halfCell, 0.3);
         if (cover <= 0.0) return vec3(0.0);
         float jet = clamp((gasLumps(place.x * 4.0, place.z * 4.0, time, 1.6) - 0.25) / 0.4, 0.0, 1.0);
-        return vec3(11.0 * cover * jet * live, 3.0 * cover, gasLayer(inside.y, halfCell, 0.15, 0.35) > 0.0 ? 0.5 * gasDisc(off, halfCell, 0.3) * jet : 0.0);
+        return vec3(11.0 * cover * jet * live, 2.2 * cover, gasLayer(inside.y, halfCell, 0.15, 0.35) > 0.0 ? 0.5 * gasDisc(off, halfCell, 0.3) * jet : 0.0);
     }
     if (kind == 3) {
         float cover = gasLayer(inside.y, halfCell, 0.6, 0.95) * gasDisc(off, halfCell, 0.12);
