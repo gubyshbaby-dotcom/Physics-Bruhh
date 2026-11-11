@@ -142,6 +142,7 @@ public final class JavaSim implements GooSim {
         rho = new float[maxp]; lam = new float[maxp]; sgx = new float[maxp]; sgy = new float[maxp]; sgz = new float[maxp]; sg2 = new float[maxp];
         dpx = new float[maxp]; dpy = new float[maxp]; dpz = new float[maxp]; damp = new float[maxp];
         born = new float[maxp]; fly = new byte[maxp]; land = new byte[maxp];
+        sup = new float[maxp]; supN = new float[maxp];
         act = new int[maxp];
         cStart = new int[table + 1]; cFill = new int[table]; sorted = new int[maxp]; pkey = new int[maxp]; pbkt = new int[maxp]; cell = new int[maxp * 3];
         bodies = new Body[slots];
@@ -217,6 +218,7 @@ public final class JavaSim implements GooSim {
         p[o] = x; p[o + 1] = y; p[o + 2] = z; q[o] = x; q[o + 1] = y; q[o + 2] = z; v[o] = vx; v[o + 1] = vy; v[o + 2] = vz;
         alive[i] = 1; scale[i] = 1f; sprN[i] = 0; ancKind[i] = 0; ancCool[i] = 0f;
         born[i] = clock; fly[i] = (byte) (flying ? 1 : 0);
+        sup[i] = flying ? 0f : 1f;
         return true;
     }
 
@@ -439,7 +441,7 @@ public final class JavaSim implements GooSim {
             p[o] = px; p[o + 1] = py; p[o + 2] = pz; q[o] = px; q[o + 1] = py; q[o + 2] = pz;
             v[o] = vx; v[o + 1] = vy; v[o + 2] = vz;
             alive[i] = 1; scale[i] = 1f; sprN[i] = 0; ancKind[i] = 0; ancCool[i] = 0f;
-            born[i] = clock; fly[i] = 0;
+            born[i] = clock; fly[i] = 0; sup[i] = 1f;
         }
         // goo that is already where the new block appears: both take it easy for a moment
         boolean crowded = false;
@@ -545,7 +547,13 @@ public final class JavaSim implements GooSim {
             next[k] = b;
         }
         for (int i = 0; i < maxp; i++) {
-            if (alive[i] != 0 && ancKind[i] == 2) { boolean found = false; for (KBox b : next) if (b.id == ancId[i]) { found = true; break; } if (!found) ancKind[i] = 1; }
+            if (alive[i] == 0 || ancKind[i] != 2) continue;
+            KBox box = null;
+            for (KBox b : next) if (b.id == ancId[i]) { box = b; break; }
+            if (box == null) ancKind[i] = 1; // becomes a plain world anchor at its last position
+            // a box that no longer holds on to goo (a creature that has got moving, or is being washed or shaken clean):
+            // what stuck to it lets go, and does not stick again at once
+            else if (box.stick <= 0f) { ancKind[i] = 0; ancCool[i] = LET_GO; }
         }
         kin = next;
     }
@@ -571,6 +579,13 @@ public final class JavaSim implements GooSim {
     private static final float EJECT = 0.04f;
     /** What {@link #resolveBox} returns for a particle that is inside a block and on its way out of it. */
     private static final int LEAVING = 4;
+    /** Seconds goo that was let go by a box that stopped holding it stays unable to stick to anything. */
+    private static final float LET_GO = 0.6f;
+    /**
+     * A thread of honey one particle thick holds nothing. Both ends of a spring count as that thin below this share of
+     * the density at rest, and such a spring goes once it is stretched past this many spacings.
+     */
+    private static final float THREAD_THIN = 0.42f, THREAD_REACH = 1.5f;
 
     /** Whether the point lies inside a block. A box is listed in every cell it lies in, so the point's own cell is enough. */
     private boolean solid(float px, float py, float pz) {
@@ -748,12 +763,13 @@ public final class JavaSim implements GooSim {
             bd.maxL = m.springMaxL + Math.max(0f, m.shockMaxL - m.springMaxL) * sh;
             bd.shock = sh < 0.01f ? 0f : sh * (float) Math.exp(-dt / m.shockDecay);
             bd.soft = Math.max(0f, bd.soft - dt);
-            boolean grounded = bd.anchored > 0 || bd.shock > 0.05f;
             if (bd.pending > 0) streamOut(b, dt);
             int cnt = 0;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
                 if (alive[i] != 0) {
-                    act[nAct++] = i; cnt++; damp[i] = grounded ? bd.kd : 0.15f;
+                    act[nAct++] = i; cnt++;
+                    // as thick as its body where something holds it, falling freely where nothing does
+                    damp[i] = 0.15f + Math.max(0f, bd.kd - 0.15f) * smooth((sup[i] - SUPPORT_LO) / (SUPPORT_HI - SUPPORT_LO));
                     if (fly[i] != 0 && clock - born[i] > FLIGHT_MAX) fly[i] = 0;
                 }
             }
@@ -926,7 +942,9 @@ public final class JavaSim implements GooSim {
                     float dl = r - l, y = m.yield * l;
                     if (Math.abs(dl) > y) { l += (1f - (float) Math.exp(-bd.plast * dt)) * (dl - y * Math.signum(dl)); sprL[si] = l; }
                 }
-                boolean gone = alive[j] == 0 || r > bd.brk * l || l > bd.maxL;
+                // honey drawn out to a single file of particles: the thread snaps, and what hung on it simply falls
+                boolean thread = m.dynamicSprings && r > THREAD_REACH * s && rho[i] < THREAD_THIN * rho0 && rho[j] < THREAD_THIN * rho0;
+                boolean gone = alive[j] == 0 || r > bd.brk * l || l > bd.maxL || thread;
                 if (gone) { int lastS = i * MAX_SPR + sprN[i] - 1; sprJ[si] = sprJ[lastS]; sprL[si] = sprL[lastS]; sprN[i]--; }
                 else sidx++;
             }
@@ -950,13 +968,16 @@ public final class JavaSim implements GooSim {
         // kernel value at 1.3 particle spacings: closer than that counts as touching
         final float wTouch; { float r = 1.3f * s, t = h * h - r * r; wTouch = kp * t * t * t; }
         for (int vi = 0; vi < viscIters; vi++) {
-            for (int a = 0; a < nAct; a++) { int i = act[a]; dpx[i] = 0f; dpy[i] = 0f; dpz[i] = 0f; }
+            // held by a block or a piston part itself (a creature holds nothing up), or through its neighbours
+            for (int a = 0; a < nAct; a++) { int i = act[a]; dpx[i] = 0f; dpy[i] = 0f; dpz[i] = 0f; supN[i] = ancKind[i] == 1 || (ancKind[i] == 2 && ancId[i] > 0) ? 1f : 0f; }
             for (int k = 0; k < nPair; k++) {
                 float w = pw[k]; if (w == 0f) continue;
                 int i = pi[k], j = pj[k], oi = i * 3, oj = j * 3;
                 float ex = v[oj] - v[oi], ey = v[oj + 1] - v[oi + 1], ez = v[oj + 2] - v[oi + 2];
                 float wi = bodies[i / nb].m.xsph * w / rho[i], wj = bodies[j / nb].m.xsph * w / rho[j];
                 dpx[i] += ex * wi; dpy[i] += ey * wi; dpz[i] += ez * wi; dpx[j] -= ex * wj; dpy[j] -= ey * wj; dpz[j] -= ez * wj;
+                if (sup[j] * SUPPORT_HOP > supN[i]) supN[i] = sup[j] * SUPPORT_HOP;
+                if (sup[i] * SUPPORT_HOP > supN[j]) supN[j] = sup[i] * SUPPORT_HOP;
                 // touching goo that has already come to rest: a particle in flight has landed too
                 if (w > wTouch) {
                     if (fly[i] != 0 && fly[j] == 0 && v[oj] * v[oj] + v[oj + 1] * v[oj + 1] + v[oj + 2] * v[oj + 2] < 2.25f) land[i] = 1;
@@ -966,6 +987,7 @@ public final class JavaSim implements GooSim {
             for (int a = 0; a < nAct; a++) {
                 int i = act[a], o = i * 3;
                 v[o] += dpx[i]; v[o + 1] += dpy[i]; v[o + 2] += dpz[i];
+                sup[i] = supN[i];
                 if (land[i] != 0) { land[i] = 0; fly[i] = 0; }
             }
         }
@@ -1067,6 +1089,14 @@ public final class JavaSim implements GooSim {
     private static final int STREAM_BULGE = 12;
     /** Per particle: when it appeared, whether it is still in free flight, scratch for "landed this step". */
     private final float[] born; private final byte[] fly, land;
+    /**
+     * How well each particle is held by something that stands still (1 = it sticks to a block or a piston itself), and
+     * scratch for the next value. Goo is thick because it clings to what it lies on, and that only goes so far through
+     * the goo ({@link #SUPPORT_HOP} per neighbour and step): a block's worth above the floor is still held, a drop two
+     * blocks below what it dripped from is not, and one that has come off altogether simply falls.
+     */
+    private final float[] sup, supN;
+    private static final float SUPPORT_HOP = 0.9f, SUPPORT_LO = 0.1f, SUPPORT_HI = 0.45f;
     private static final int CALM_STEPS = 60;
 
     // bridging of stretched jelly: springs with rest length up to BRIDGE_REST spacings, stretched to

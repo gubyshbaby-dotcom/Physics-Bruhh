@@ -85,6 +85,12 @@ final class GooFluid {
             .withUniform("InSampler", UniformType.COMBINED_IMAGE_SAMPLER)
             .withUniform("FluidSampler", UniformType.COMBINED_IMAGE_SAMPLER)
             .build();
+    private static final BindGroupLayout DEPTH_IN = BindGroupLayout.builder()
+            .withUniform("SceneDepthSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+            .build();
+    private static final BindGroupLayout FAR_IN = BindGroupLayout.builder()
+            .withUniform("FarSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+            .build();
     private static final BindGroupLayout PICTURE_IN = BindGroupLayout.builder()
             .withUniform("SceneSampler", UniformType.COMBINED_IMAGE_SAMPLER)
             .withUniform("SceneDepthSampler", UniformType.COMBINED_IMAGE_SAMPLER)
@@ -105,8 +111,9 @@ final class GooFluid {
                 .withBindGroupLayout(FRAME)
                 .withBindGroupLayout(PARTICLES)
                 .withPrimitiveTopology(PrimitiveTopology.QUADS)
-                // the world's depth is only looked at: goo behind a wall is not drawn, and the goo leaves no trace in it
-                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, false))
+                // No depth test here. A disc cut where something stands in front of it (a streak on a pane of glass, the
+                // edge of a block) left a hole that the smoothing then made wider; what hides goo is decided per pixel instead,
+                // by the last pass for the surface and against the smoothed-out distance of the world for the amount.
                 .withCull(false);
     }
 
@@ -122,7 +129,11 @@ final class GooFluid {
 
     private static final RenderPipeline SURFACE = splat("goo_depth").withFragmentShader(id("core/goo_depth"))
             .withColorTargetState(new ColorTargetState(Optional.of(BlendFunction.MAX), GpuFormat.RG32_FLOAT, ColorTargetState.WRITE_ALL)).build();
-    private static final RenderPipeline AMOUNT = splat("goo_thick").withFragmentShader(id("core/goo_thick"))
+    /** How far away the world is around each pixel. */
+    private static final RenderPipeline FAR = screen("goo_far", "core/goo_far")
+            .withBindGroupLayout(DEPTH_IN)
+            .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RG32_FLOAT, ColorTargetState.WRITE_ALL)).build();
+    private static final RenderPipeline AMOUNT = splat("goo_thick").withFragmentShader(id("core/goo_thick")).withBindGroupLayout(FAR_IN)
             .withColorTargetState(new ColorTargetState(Optional.of(BlendFunction.ADDITIVE), GpuFormat.RGBA16_FLOAT, ColorTargetState.WRITE_ALL)).build();
     /** Seen from above: the amounts add up, alpha keeps the greatest value (minus the height of the goo's underside). */
     private static final RenderPipeline SHADE = RenderPipeline.builder()
@@ -186,6 +197,7 @@ final class GooFluid {
     static void register(RegisterRenderPipelinesEvent event) {
         // optional: if one of them does not compile on some driver the game still starts, and the surface look is used
         event.registerOptionalPipeline(SURFACE);
+        event.registerOptionalPipeline(FAR);
         event.registerOptionalPipeline(AMOUNT);
         event.registerOptionalPipeline(SHADE);
         for (RenderPipeline pipeline : BLUR) event.registerOptionalPipeline(pipeline);
@@ -195,7 +207,7 @@ final class GooFluid {
 
     // ------------------------------------------------------------------ per frame
 
-    private static TextureTarget scene, surfaceA, surfaceB, amountA, amountB, shadeTarget;
+    private static TextureTarget scene, surfaceA, surfaceB, amountA, amountB, farTarget, shadeTarget;
     /** The patch of ground the shade texture covers: least x and z (in the particles' coordinates) and its size. */
     private static float shadeX, shadeZ, shadeWidth = 1.0F, shadeDepth = 1.0F;
     private static MappableRingBuffer frameBuffer, particleBuffer;
@@ -239,7 +251,7 @@ final class GooFluid {
         final int count = stagedCount;
         if (count == 0) return;
 
-        CompiledRenderPipeline surface = compiled(SURFACE), amount = compiled(AMOUNT), shade = compiled(SHADE), picture = compiled(PICTURE);
+        CompiledRenderPipeline surface = compiled(SURFACE), far = compiled(FAR), amount = compiled(AMOUNT), shade = compiled(SHADE), picture = compiled(PICTURE);
         CompiledRenderPipeline[] blur = new CompiledRenderPipeline[BLUR.length], smooth = new CompiledRenderPipeline[SMOOTH.length];
         for (int i = 0; i < BLUR.length; i++) blur[i] = compiled(BLUR[i]);
         for (int i = 0; i < SMOOTH.length; i++) smooth[i] = compiled(SMOOTH[i]);
@@ -256,7 +268,7 @@ final class GooFluid {
         GpuBuffer frame = frameBuffer.currentBuffer(), particles = particleBuffer.currentBuffer();
 
         scene.copyColorFrom(main);
-        try (RenderPass pass = encoder.createRenderPass(() -> "Goo surface", surfaceA.getColorTextureView(), Optional.of(NOTHING), mainDepth, OptionalDouble.empty())) {
+        try (RenderPass pass = encoder.createRenderPass(() -> "Goo surface", surfaceA.getColorTextureView(), Optional.of(NOTHING))) {
             pass.setPipeline(surface);
             pass.setUniform("Projection", projection);
             pass.setUniform("GooFrame", frame);
@@ -265,11 +277,19 @@ final class GooFluid {
             pass.setIndexBuffer(indexBuffer, indices.type());
             pass.drawIndexed(count * 6, 1, 0, 0, 0);
         }
-        try (RenderPass pass = encoder.createRenderPass(() -> "Goo amount", amountA.getColorTextureView(), Optional.of(ZERO), mainDepth, OptionalDouble.empty())) {
+        try (RenderPass pass = encoder.createRenderPass(() -> "Goo: how far the world is", farTarget.getColorTextureView(), Optional.empty())) {
+            pass.setPipeline(far);
+            pass.setUniform("Projection", projection);
+            pass.setUniform("GooFrame", frame);
+            pass.setUniform("SceneDepthSampler", mainDepth, nearest);
+            pass.draw(3, 1, 0, 0);
+        }
+        try (RenderPass pass = encoder.createRenderPass(() -> "Goo amount", amountA.getColorTextureView(), Optional.of(ZERO))) {
             pass.setPipeline(amount);
             pass.setUniform("Projection", projection);
             pass.setUniform("GooFrame", frame);
             pass.setUniform("GooParticles", particles);
+            pass.setUniform("FarSampler", farTarget.getColorTextureView(), nearest);
             pass.setVertexBuffer(0, null);
             pass.setIndexBuffer(indexBuffer, indices.type());
             pass.drawIndexed(count * 6, 1, 0, 0, 0);
@@ -331,13 +351,14 @@ final class GooFluid {
         surfaceB = new TextureTarget("Goo: surface, half blurred", width, height, GpuFormat.RG32_FLOAT, null);
         amountA = new TextureTarget("Goo: amount", width, height, GpuFormat.RGBA16_FLOAT, null);
         amountB = new TextureTarget("Goo: amount, half blurred", width, height, GpuFormat.RGBA16_FLOAT, null);
+        farTarget = new TextureTarget("Goo: how far the world is", width, height, GpuFormat.RG32_FLOAT, null);
     }
 
     private static void closeTargets() {
-        for (TextureTarget target : new TextureTarget[] { scene, surfaceA, surfaceB, amountA, amountB }) {
+        for (TextureTarget target : new TextureTarget[] { scene, surfaceA, surfaceB, amountA, amountB, farTarget }) {
             if (target != null) target.destroyBuffers();
         }
-        scene = null; surfaceA = null; surfaceB = null; amountA = null; amountB = null;
+        scene = null; surfaceA = null; surfaceB = null; amountA = null; amountB = null; farTarget = null;
     }
 
     /**

@@ -724,3 +724,70 @@ fn slime_born_inside_a_block_that_then_goes_away_is_not_blown_apart() {
     }
 }
 
+/// Honey that has been left hanging between two sticky pistons, six blocks above the ground, with the pistons going in and
+/// out every two seconds. Returns, for every 100th step: particles on the ground, particles in the air between the pistons
+/// and the ground, springs longer than half a block that run through that air.
+fn dripping_from_pistons(steps: usize) -> Vec<(usize, usize, usize)> {
+    let mut w = World::new(12, 4);
+    let mut f = Vec::new();
+    for x in -5..6 { for z in -3..4 { f.extend_from_slice(&[x as f32, -7.0, z as f32, x as f32 + 1.0, -6.0, z as f32 + 1.0, 1.0]); } }
+    f.extend_from_slice(&[-2.0, 0.0, 0.0, -1.0, 1.0, 1.0, 1.0]); f.extend_from_slice(&[2.0, 0.0, 0.0, 3.0, 1.0, 1.0, 1.0]);
+    // the block it was placed on is taken away once it has stuck to the piston heads
+    let mut held = f.clone(); held.extend_from_slice(&[0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
+    w.set_static(&held, held.len() / 7);
+    w.add_body(HONEY, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    let both = |a: f32, b: f32, v: f32| { let mut d = plate(1, a, 1.0, -v, STICKY).to_vec(); d.extend_from_slice(&plate(2, b, -1.0, v, STICKY)); d };
+    for _ in 0..240 { w.set_kinematic(&both(0.0, 1.0, 0.0), 2); w.step(DT + 1e-6); }
+    w.set_static(&f, f.len() / 7); w.wake(0);
+    let mut seen = Vec::new();
+    for step in 0..steps {
+        let (a, b, v) = match ((step / 60) % 4, step % 60) {
+            (0, k) if k < 6 => (-(k as f32) / 6.0, 1.0 + k as f32 / 6.0, 10.0),
+            (0, _) | (1, _) => (-1.0, 2.0, 0.0),
+            (2, k) if k < 6 => (-1.0 + k as f32 / 6.0, 2.0 - k as f32 / 6.0, -10.0),
+            _ => (0.0, 1.0, 0.0),
+        };
+        w.set_kinematic(&both(a, b, v), 2); w.step(DT + 1e-6);
+        if step % 100 == 99 {
+            let ground = (0..w.maxp).filter(|&i| w.alive[i] != 0 && w.p[i * 3 + 1] < -5.0).count();
+            let air = (0..w.maxp).filter(|&i| w.alive[i] != 0 && w.p[i * 3 + 1] < -1.0 && w.p[i * 3 + 1] >= -5.0).count();
+            let threads = w.long_springs(0.5).iter().filter(|(p, q)| p[1].min(q[1]) < -1.0 && p[1].max(q[1]) > -5.0).count();
+            seen.push((ground, air, threads));
+        }
+    }
+    for i in 0..w.maxp { if w.alive[i] != 0 { for c in 0..3 { assert!(w.p[i * 3 + c].is_finite()); } assert!(w.p[i * 3 + 1] > -6.01, "particle under the ground: {}", w.p[i * 3 + 1]); } }
+    seen
+}
+
+#[test]
+fn honey_dripping_from_between_pistons_falls_instead_of_hanging_in_the_air() {
+    // Goo used to be as thick as its body all the way through whenever any of it stuck to anything, so what came off
+    // the honey between the pistons sank through the air at a crawl, drawn out into a rope: after twenty seconds
+    // none of it had reached the ground six blocks below.
+    let seen = dripping_from_pistons(1000);
+    let (ground, _, _) = seen[5];
+    assert!(ground > 600, "ten seconds on, most of what will fall has fallen: {} particles on the ground ({:?})", ground, seen);
+    let (_, air, threads) = seen[8];
+    assert!(air < 100 && threads == 0, "fifteen seconds on nothing hangs in the air: {} particles, {} threads ({:?})", air, threads, seen);
+}
+
+#[test]
+fn goo_lets_go_of_a_creature_that_no_longer_holds_it() {
+    let mut w = World::new(12, 4);
+    let f = floor(); w.set_static(&f, f.len() / 7);
+    w.add_body(HONEY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    run(&mut w, 8.0);
+    // someone standing in the puddle: the honey sticks to them
+    let stands = |stick: f32| [-5.0f32, 0.2, 0.0, 0.2, 0.8, 1.8, 0.8, 0.0, 0.0, 0.0, stick, 0.0];
+    for _ in 0..60 { w.set_kinematic(&stands(1.0), 1); w.wake(0); w.step(DT + 1e-6); }
+    assert!(w.anchors_on(-5) > 20, "honey should stick to someone standing in it: {} particles", w.anchors_on(-5));
+    // they get moving (or step into water, or shake themselves): the mod stops their box holding goo
+    w.set_kinematic(&stands(0.0), 1);
+    assert_eq!(w.anchors_on(-5), 0, "nothing stays stuck to a box that does not hold goo");
+    for _ in 0..12 { w.set_kinematic(&stands(1.0), 1); w.step(DT + 1e-6); }
+    assert!(w.anchors_on(-5) < 10, "... and what was let go does not stick again at once: {} particles", w.anchors_on(-5));
+    for _ in 0..60 { w.set_kinematic(&stands(1.0), 1); w.wake(0); w.step(DT + 1e-6); }
+    assert!(w.anchors_on(-5) > 20, "... but does once they stand in it again: {} particles", w.anchors_on(-5));
+    all_finite_above_floor(&w);
+}
+

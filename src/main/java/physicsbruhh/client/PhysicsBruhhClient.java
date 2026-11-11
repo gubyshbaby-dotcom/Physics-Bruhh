@@ -22,6 +22,18 @@ import physicsbruhh.PhysicsBruhh;
 /** Client entry point: wires the goo simulation and its renderer into the game. */
 @Mod(value = PhysicsBruhh.MODID, dist = Dist.CLIENT)
 public class PhysicsBruhhClient {
+    /** Shakes off the goo that sticks to the player (R unless changed in the controls). Water and rain do it by themselves. */
+    static final net.minecraft.client.KeyMapping SHAKE = new net.minecraft.client.KeyMapping("key.physicsbruhh.shake", 82, net.minecraft.client.KeyMapping.Category.GAMEPLAY);
+
+    private static void shake(Minecraft mc) {
+        boolean pressed = false;
+        while (SHAKE.consumeClick()) pressed = true;
+        if (!pressed || mc.player == null || mc.level == null) return;
+        boolean sticky = GooClient.contact() != 0;
+        GooClient.shakeOff();
+        if (sticky) mc.level.playLocalSound(mc.player.getX(), mc.player.getY(), mc.player.getZ(), net.minecraft.sounds.SoundEvents.HONEY_BLOCK_BREAK, net.minecraft.sounds.SoundSource.PLAYERS, 0.6F, 1.3F, false);
+    }
+
     public PhysicsBruhhClient(IEventBus modBus, ModContainer container) {
         // the marker entities draw nothing themselves; all goo is drawn as one merged surface
         modBus.addListener((EntityRenderersEvent.RegisterRenderers e) -> {
@@ -36,8 +48,9 @@ public class PhysicsBruhhClient {
         });
         modBus.addListener(GooPipelines::register);
         modBus.addListener(GooFluid::register);
+        modBus.addListener((net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent e) -> e.register(SHAKE));
         NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> GooFluid.render(e));
-        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { Packs.tick(); GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); });
+        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { Packs.tick(); GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); shake(Minecraft.getInstance()); });
         NeoForge.EVENT_BUS.addListener((InputEvent.InteractionKeyMappingTriggered e) -> guarded(1, "click", () -> GooTouch.onClick(e)));
         NeoForge.EVENT_BUS.addListener((InputEvent.MouseScrollingEvent e) -> guarded(1, "wheel", () -> GooWheel.onScroll(e)));
         NeoForge.EVENT_BUS.addListener((ItemTooltipEvent e) -> GooWheel.onTooltip(e));

@@ -8,6 +8,8 @@
 
 #include <physicsbruhh:goo_frame.glsl>
 
+uniform sampler2D FarSampler;   // how far away the world is around this pixel (goo_far)
+
 layout(location = 0) in vec2 corner;
 layout(location = 1) in vec3 centre;
 layout(location = 2) in vec4 particle;
@@ -18,6 +20,10 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     float k = 1.0 - dot(corner, corner);
     if (k <= 0.0) {
+        discard;
+    }
+    // goo behind the world does not count
+    if (-centre.z > texelFetch(FarSampler, ivec2(gl_FragCoord.xy), 0).r + 0.02) {
         discard;
     }
     // a particle stands for a cube of goo one spacing wide; spread over the disc with this falloff

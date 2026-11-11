@@ -173,6 +173,8 @@ pub struct World {
     pub(crate) spr_n: Vec<u8>, pub(crate) spr_j: Vec<u32>, pub(crate) spr_l: Vec<f32>,
     rho: Vec<f32>, lam: Vec<f32>,
     dpx: Vec<f32>, dpy: Vec<f32>, dpz: Vec<f32>, damp: Vec<f32>,
+    /// How well each particle is held by something that stands still (1 = it sticks to a block or a piston itself), and scratch for the next value.
+    sup: Vec<f32>, sup_n: Vec<f32>,
     /// Per particle: when it appeared (world clock); whether it is still in flight (a stream or lump
     /// that has not touched anything yet falls freely instead of being slowed with the rest of its
     /// body); scratch for "landed this step".
@@ -292,6 +294,22 @@ const CHUNK: usize = 256;
 const CALM_STEPS: u32 = 60;
 /// Seconds a removed body takes to shrink away.
 const FADE_TIME: f32 = 0.45;
+/// Seconds goo that was let go by a box that stopped holding it stays unable to stick to anything.
+const LET_GO: f32 = 0.6;
+/// A thread of honey one particle thick holds nothing. Both ends of a spring count as that thin below
+/// this share of the density at rest (a single file of particles a spacing apart comes to 0.34, the edge
+/// of a sheet one particle thick to 0.5) ...
+const THREAD_THIN: f32 = 0.42;
+/// ... and such a spring goes once it is stretched past this many spacings.
+const THREAD_REACH: f32 = 1.5;
+/// How much of a particle's hold on the world reaches its neighbours, per neighbour and per step. Goo is thick
+/// because it clings to what it lies on, and that only goes so far through the goo: a block's worth of it above
+/// the floor is still held (six neighbours up, 0.53), a drop two blocks below what it dripped from is not, and
+/// one that has come off altogether loses its hold in a fraction of a second and simply falls.
+const SUPPORT_HOP: f32 = 0.9;
+/// Hold below which a particle falls freely, and from which it is as thick as its body is.
+const SUPPORT_LO: f32 = 0.1;
+const SUPPORT_HI: f32 = 0.45;
 /// Seconds overlapping goo is given to move apart gently after a block appears inside it.
 const SOFT_TIME: f32 = 0.9;
 /// Seconds a freshly emitted slime particle keeps bonding to slime of its own body that it touches.
@@ -435,6 +453,7 @@ impl World {
             spr_n: vec![0; maxp], spr_j: vec![0; maxp * MAX_SPR], spr_l: vec![0.0; maxp * MAX_SPR],
             rho: vec![0.0; maxp], lam: vec![0.0; maxp],
             dpx: vec![0.0; maxp], dpy: vec![0.0; maxp], dpz: vec![0.0; maxp], damp: vec![0.0; maxp],
+            sup: vec![0.0; maxp], sup_n: vec![0.0; maxp],
             born: vec![0.0; maxp], fly: vec![0; maxp], land: vec![0; maxp],
             act: Vec::with_capacity(maxp),
             mask: (table - 1) as u32, c_start: vec![0; table + 1], c_fill: vec![0; table], sorted: vec![0; maxp], pkey: vec![0; maxp], pbkt: vec![0; maxp], cell: vec![0; maxp * 3],
@@ -486,6 +505,7 @@ impl World {
         for a in 0..3 { self.p[o + a] = pos[a]; self.q[o + a] = pos[a]; self.v[o + a] = vel[a]; }
         self.alive[i] = 1; self.scale[i] = 1.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.anc_cool[i] = 0.0;
         self.born[i] = self.clock; self.fly[i] = flying as u8;
+        self.sup[i] = if flying { 0.0 } else { 1.0 };
         true
     }
 
@@ -669,7 +689,7 @@ impl World {
             self.q[o] = px; self.q[o + 1] = py; self.q[o + 2] = pz;
             self.v[o] = vx; self.v[o + 1] = vy; self.v[o + 2] = vz;
             self.alive[i] = 1; self.scale[i] = 1.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.anc_cool[i] = 0.0;
-            self.born[i] = self.clock; self.fly[i] = 0;
+            self.born[i] = self.clock; self.fly[i] = 0; self.sup[i] = 1.0;
         } } }
         // goo that is already where the new block appears: both take it easy for a moment
         let mut crowded = false;
@@ -887,8 +907,13 @@ impl World {
             next.push(KBox { id, min, max, pmin, pmax, vel: [d[7], d[8], d[9]], stick: d[10], t: 0.0, front: (d[11] as i32).clamp(0, 6) as u8 });
         }
         for i in 0..self.maxp {
-            if self.alive[i] != 0 && self.anc_kind[i] == 2 && !next.iter().any(|b| b.id == self.anc_id[i]) {
-                self.anc_kind[i] = 1; // becomes a plain world anchor at its last position
+            if self.alive[i] == 0 || self.anc_kind[i] != 2 { continue; }
+            match next.iter().find(|b| b.id == self.anc_id[i]) {
+                None => self.anc_kind[i] = 1, // becomes a plain world anchor at its last position
+                // a box that no longer holds on to goo (a creature that has got moving, or is being washed or shaken clean):
+                // what stuck to it lets go, and does not stick again at once
+                Some(b) if b.stick <= 0.0 => { self.anc_kind[i] = 0; self.anc_cool[i] = LET_GO; }
+                _ => {}
             }
         }
         self.kin = next;
@@ -1013,13 +1038,14 @@ impl World {
             bd.max_l = m.spring_max_l + (m.shock_max_l - m.spring_max_l).max(0.0) * sh;
             bd.shock = if sh < 0.01 { 0.0 } else { sh * (-dt / m.shock_decay).exp() };
             bd.soft = (bd.soft - dt).max(0.0);
-            let (grounded, kd) = (bd.anchored > 0 || bd.shock > 0.05, bd.kd);
+            let kd = bd.kd;
             if self.bodies[b].pending > 0 { self.stream_out(b, dt); }
             let mut cnt = 0u32;
             for i in b * nb..(b + 1) * nb {
                 if self.alive[i] != 0 {
                     self.act.push(i as u32); cnt += 1;
-                    self.damp[i] = if grounded { kd } else { 0.15 };
+                    // as thick as its body where something holds it, falling freely where nothing does
+                    self.damp[i] = 0.15 + (kd - 0.15).max(0.0) * smooth((self.sup[i] - SUPPORT_LO) / (SUPPORT_HI - SUPPORT_LO));
                     if self.fly[i] != 0 && self.clock - self.born[i] > FLIGHT_MAX { self.fly[i] = 0; }
                 }
             }
@@ -1366,6 +1392,7 @@ impl World {
             let (anc_kind, anc_cool, anc_pt, anc_loc) = (Shared::of(&mut self.anc_kind), Shared::of(&mut self.anc_cool), Shared::of(&mut self.anc_pt), Shared::of(&mut self.anc_loc));
             let (spr_n, spr_j, spr_l) = (Shared::of(&mut self.spr_n), Shared::of(&mut self.spr_j), Shared::of(&mut self.spr_l));
             let rho_break = 1.6 * self.rho0;
+            let (thread_thin, thread_reach) = (THREAD_THIN * self.rho0, THREAD_REACH * self.s);
             self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
                 let bd = &bodies[i / nb];
                 let m = &mats[i / nb];
@@ -1390,7 +1417,9 @@ impl World {
                         let dl = r - l; let y = m.yield_ * l;
                         if dl.abs() > y { l += (1.0 - (-bd.plast * dt).exp()) * (dl - y * dl.signum()); *spr_l.at(si) = l; }
                     }
-                    let gone = alive[j] == 0 || r > bd.brk * l || l > bd.max_l;
+                    // honey drawn out to a single file of particles: the thread snaps, and what hung on it simply falls
+                    let thread = m.dynamic_springs && r > thread_reach && rho[i] < thread_thin && rho[j] < thread_thin;
+                    let gone = alive[j] == 0 || r > bd.brk * l || l > bd.max_l || thread;
                     if gone { let end = i * MAX_SPR + *spr_n.at(i) as usize - 1; *spr_j.at(si) = *spr_j.at(end); *spr_l.at(si) = *spr_l.at(end); *spr_n.at(i) -= 1; }
                     else { sidx += 1; }
                 }
@@ -1429,25 +1458,31 @@ impl World {
                 let (nbr, nbr_lo, nbr_hi, nw, v, rho, mats) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.nw[..], &self.v[..], &self.rho[..], &self.bmats[..]);
                 let (dpx, dpy, dpz, land) = (Shared::of(&mut self.dpx), Shared::of(&mut self.dpy), Shared::of(&mut self.dpz), Shared::of(&mut self.land));
                 let fly = &self.fly[..];
+                let (sup, anc_kind, anc_id) = (&self.sup[..], &self.anc_kind[..], &self.anc_id[..]);
+                let sup_n = Shared::of(&mut self.sup_n);
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let oi = i * 3;
                     let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
                     let k = mats[i / nb].xsph / rho[i];
                     let mut landed = false;
+                    // held by a block or a piston part itself (a creature holds nothing up), or through its neighbours
+                    let mut held = if anc_kind[i] == 1 || (anc_kind[i] == 2 && anc_id[i] > 0) { 1.0f32 } else { 0.0 };
                     for e in nbr_lo[i] as usize..nbr_hi[i] as usize {
                         let w = nw[e]; if w == 0.0 { continue; }
                         let j = nbr[e] as usize; let oj = j * 3;
+                        held = held.max(sup[j] * SUPPORT_HOP);
                         let ws = k * w;
                         x += (v[oj] - v[oi]) * ws; y += (v[oj + 1] - v[oi + 1]) * ws; z += (v[oj + 2] - v[oi + 2]) * ws;
                         // touching goo that has already come to rest: this particle has landed too
                         landed |= w > w_touch && fly[j] == 0 && v[oj] * v[oj] + v[oj + 1] * v[oj + 1] + v[oj + 2] * v[oj + 2] < 2.25;
                     }
                     if landed && fly[i] != 0 { unsafe { *land.at(i) = 1; } }
-                    unsafe { *dpx.at(i) = x; *dpy.at(i) = y; *dpz.at(i) = z; }
+                    unsafe { *dpx.at(i) = x; *dpy.at(i) = y; *dpz.at(i) = z; *sup_n.at(i) = held; }
                 } });
             }
             for a in 0..n_act {
                 let i = self.act[a] as usize; let o = i * 3;
                 self.v[o] += self.dpx[i]; self.v[o + 1] += self.dpy[i]; self.v[o + 2] += self.dpz[i];
+                self.sup[i] = self.sup_n[i];
                 if self.land[i] != 0 { self.land[i] = 0; self.fly[i] = 0; }
             }
         }

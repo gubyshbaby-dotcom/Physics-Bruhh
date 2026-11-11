@@ -402,16 +402,33 @@ public final class GooClient {
     }
 
     /** A creature (or item, or the player): its box where it was at the start of this tick, moving to where it is now. */
+    /**
+     * Blocks a tick (2.5 a second) up to which goo holds on to a creature. Someone wading through honey or sneaking is
+     * slower than that and draws strings; someone who walks, runs, jumps or falls is not held: the goo stays where it
+     * is instead of riding along on them (and, for slime, bouncing them in mid-air off what they carry).
+     */
+    private static final double HOLD_SPEED = 0.125;
+    /** Scan tick until which the player's own body holds no goo: they have shaken themselves clean. */
+    private static volatile int shakenUntil;
+
+    /** The player shakes off whatever goo sticks to them; for two seconds none sticks again. */
+    static void shakeOff() {
+        shakenUntil = scanTick + 40;
+    }
+
     private static int addCreature(Entity e, BlockPos o, float[] kin, int nk) {
         AABB box = e.getBoundingBox();
         double dx = e.getX() - e.xo, dy = e.getY() - e.yo, dz = e.getZ() - e.zo;
+        // goo sticks to a creature that is slow and dry; water and rain wash it off
+        boolean holds = dx * dx + dy * dy + dz * dz <= HOLD_SPEED * HOLD_SPEED && !e.isInWaterOrRain()
+                && !(scanTick < shakenUntil && e == Minecraft.getInstance().player);
         if (dx * dx + dy * dy + dz * dz > 4.0) { dx = 0.0; dy = 0.0; dz = 0.0; } // teleported: not a shove
         int i = nk * GooSim.KINEMATIC_FLOATS;
         kin[i] = -(e.getId() % 8_000_000 + 1); // creatures have negative ids: they push goo aside but do not make it stiffen like a piston does
         kin[i + 1] = (float) (box.minX - dx - o.getX()); kin[i + 2] = (float) (box.minY - dy - o.getY()); kin[i + 3] = (float) (box.minZ - dz - o.getZ());
         kin[i + 4] = (float) (box.maxX - dx - o.getX()); kin[i + 5] = (float) (box.maxY - dy - o.getY()); kin[i + 6] = (float) (box.maxZ - dz - o.getZ());
         kin[i + 7] = (float) (dx * 20.0); kin[i + 8] = (float) (dy * 20.0); kin[i + 9] = (float) (dz * 20.0);
-        kin[i + 10] = 1.0F;
+        kin[i + 10] = holds ? 1.0F : 0.0F;
         kin[i + 11] = 0.0F;
         return nk + 1;
     }
@@ -797,6 +814,22 @@ public final class GooClient {
             return new double[] { info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ() };
         }
         return null;
+    }
+
+    /** The simulated bounds, in the world, of every piece of one kind whose marker stands in this column of blocks, lowest first (smoke test). */
+    static List<double[]> boundsInColumn(int material, int x, int z) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        List<double[]> found = new ArrayList<>();
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() != material || goo.isRemoved() || (int) Math.floor(goo.getX()) != x || (int) Math.floor(goo.getZ()) != z) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
+            int b = slot * 8;
+            found.add(new double[] { info[b + 2] + o.getX(), info[b + 3] + o.getY(), info[b + 4] + o.getZ(), info[b + 5] + o.getX(), info[b + 6] + o.getY(), info[b + 7] + o.getZ() });
+        }
+        found.sort((a, b) -> Double.compare(a[1], b[1]));
+        return found;
     }
 
     /** The piece of one kind whose marker is nearest to (x, z), within two blocks; null if none (smoke test). */

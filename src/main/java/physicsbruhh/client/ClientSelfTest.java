@@ -189,6 +189,8 @@ final class ClientSelfTest {
                         "fill 26 198 0 34 199 8 minecraft:grass_block", "fill 26 200 0 34 204 8 minecraft:air",
                         "fill 32 200 1 32 201 3 minecraft:stone", "fill 27 200 2 27 201 2 minecraft:stone",
                         "setblock 29 199 6 minecraft:air",
+                        // panes of glass between the camera and the two pieces that come last: goo behind glass, for the screenshots
+                        "setblock 33 200 4 minecraft:glass", "setblock 33 200 6 minecraft:glass",
                         "fill 30 200 -2 30 202 -2 minecraft:oak_planks",
                         "item replace entity @a weapon.mainhand with minecraft:slime_block 16", "tp @a 29.5 200 3.5 0 40");
                 step(40);
@@ -230,6 +232,11 @@ final class ClientSelfTest {
     /** How a piece of goo that came from a block lies: x and z extent, height, and how far its middle is from the middle of its cell. */
     private static double[] lies(int material, BlockPos cell) {
         double[] b = GooClient.boundsAt(material, cell);
+        if (b == null && cell.getY() > 200) {
+            // a marker with nothing solid under it comes down to the goo it rests on: the upper of the two pieces in this column
+            var column = GooClient.boundsInColumn(material, cell.getX(), cell.getZ());
+            if (column.size() == 2 && column.get(1)[1] > 200.5) b = column.get(1);
+        }
         if (b == null) return null;
         return new double[] { b[3] - b[0], b[5] - b[2], b[4] - b[1], Math.max(Math.abs((b[0] + b[3]) / 2 - cell.getX() - 0.5), Math.abs((b[2] + b[5]) / 2 - cell.getZ() - 0.5)) };
     }

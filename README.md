@@ -35,6 +35,13 @@ Everything is on by default for the vanilla `honey_block` and `slime_block`.
 - Sneak and use a honey bottle to pour it out where you look (the bottle stays); use a slime
   ball to throw it as a lump of slime. Goo that lands on goo of its kind joins it, up to a block's
   worth per piece: four bottles of honey or nine slime balls punched afterwards give the block.
+- Goo is thick where it clings to something: a block, a piston, or more goo that does. What comes
+  off falls freely: a drop of honey no longer sinks through the air on a rope of honey, and a
+  thread drawn out to a single line of particles snaps.
+- Goo sticks to you only while you are slow (wading, sneaking): then you draw strings. Walk, run,
+  jump or fall and it stays where it is instead of riding along on you. What does stick comes off
+  in water or rain, or when you shake yourself: the key for it is R, under Gameplay in the
+  controls ("Shake goo off yourself").
 - A solid block placed where goo lies squeezes the goo out of itself, sideways and upwards, over a
   fraction of a second. (A honey or slime block placed there turns into goo itself.)
 - A stream of honey is not a smooth rod: it starts as a thread, swells, wavers from side to side,
@@ -211,9 +218,10 @@ cargo run --release --example dump -- particles.bin            # a scene with a 
   of what lies behind it, no amber deepening per pixel; how it is lit is the pack's doing. Clear
   goo drawn as a liquid over the pack's picture is the other way round: it looks as it does
   without a pack, and the pack's light, shadows and effects pass it by.
-- The liquid look draws the goo after everything else in the world: goo behind stained glass or
-  water is drawn over them or hidden by them, depending on the graphics settings. It costs a few
-  full-screen passes; `/goolook shader` is the cheaper way.
+- The liquid look draws the goo after everything else in the world. Behind clear glass that is
+  right: the frame and the streaks of the pane stay in front of the goo. Goo behind stained glass
+  or water is drawn over them or hidden by them, depending on the graphics settings. It costs a
+  few full-screen passes; `/goolook shader` is the cheaper way.
 - Vanilla pistons move a block in a tenth of a second. Slime holds on and stays stretched between
   two sticky pistons as a band. Honey cannot follow that fast: it tears into strands, and what is
   left sags into a strand or a puddle between the pistons.
