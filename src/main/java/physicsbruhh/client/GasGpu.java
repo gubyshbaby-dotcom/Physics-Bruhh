@@ -74,19 +74,19 @@ final class GasGpu {
      * part of the box that is computed ({@code shaders/core/gas_region.vsh}); the rest of the texture is cleared.
      */
     private static RenderPipeline step(String name, GpuFormat format, boolean fine, String... textures) {
-        return step(name, name, format, fine ? "core/gas_blocks" : "core/gas_region", null, textures);
+        return pipeline(name, name, format, fine ? "core/gas_blocks" : "core/gas_region", null, textures);
     }
 
     /** The same with the shaders told one more thing ({@code define}): which level of the pressure solve the pass works on. */
     private static RenderPipeline step(String name, String fragment, GpuFormat format, String define, String... textures) {
-        return step(name, fragment, format, "core/gas_region", define, textures);
+        return pipeline(name, fragment, format, "core/gas_region", define, textures);
     }
 
     /**
      * {@code vertex}: what the pass is drawn over. "core/gas_region": a rectangle for each layer of the part of the box
      * that is computed; "core/gas_blocks" (the fine grid): a rectangle for each layer of each block of it that is awake.
      */
-    private static RenderPipeline step(String name, String fragment, GpuFormat format, String vertex, String define, String... textures) {
+    private static RenderPipeline pipeline(String name, String fragment, GpuFormat format, String vertex, String define, String... textures) {
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(id("pipeline/" + name))
                 .withVertexShader(id(vertex))
