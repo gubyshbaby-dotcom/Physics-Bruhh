@@ -11,10 +11,12 @@
 void main() {
 #ifdef FINE
     vec4 grid = GasFine;
-#else
-    vec4 grid = GasCoarse;
-#endif
     ivec3 lo = gasLow(grid), hi = gasHigh(grid);
+#else
+    // (the coarse grid, or one of the grids under it that the pressure is solved on)
+    vec4 grid = gasLevelGrid(GAS_LEVEL);
+    ivec3 lo = gasLevelFrom(GAS_LEVEL), hi = lo + gasLevelCells(GAS_LEVEL) - 1;
+#endif
     int layer = lo.y + gl_VertexIndex / 4;
     int corner = gl_VertexIndex % 4;
     if (layer > hi.y) {

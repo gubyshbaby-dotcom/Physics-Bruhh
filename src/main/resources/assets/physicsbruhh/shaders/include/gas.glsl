@@ -23,6 +23,7 @@ layout(std140) uniform GasGrid {
     vec4 GasE;        // most_heat, most_fuel
     vec4 GasFrom;     // the part of the box that is computed this step, in blocks: its least corner ...
     vec4 GasTo;       // ... and the corner just past its greatest (the rest of the box is empty and is left alone)
+    vec4 GasUnder[3]; // the grids under the coarse one that the pressure is solved on along the way, each twice as coarse as the one before: cells along x, y, z (of the whole box), tiles to a row
     vec4 GasBlob[GAS_BLOBS * 3];   // a blob: centre (blocks from the corner of the box) and radius; fuel, smoke, heat, soul; velocity and how much gas it makes
 };
 
@@ -107,6 +108,70 @@ vec4 gasFetchWas(sampler2D field, vec4 grid, ivec3 cell) {
 
 vec4 gasAtWas(sampler2D field, vec4 grid, vec3 at) {
     return gasAt(field, grid, clamp(at, vec3(gasLow(grid)) + 0.5, vec3(gasHigh(grid)) + 0.5) + GasMoved.xyz * (grid.x / GasBlocks.x));
+}
+
+// ---- the pressure: solved on the coarse grid (level 0) and on three grids under it (levels 1 to 3), each twice as
+// coarse as the one before (Gas::pressure in gas.rs says why). A pass works on the level its pipeline names. The
+// grids under the coarse one start at the corner of the part of the box that is computed: their cell (0, 0, 0)
+// covers the first two cells each way of the level above.
+
+#if defined(LEVEL3)
+#define GAS_LEVEL 3
+#elif defined(LEVEL2)
+#define GAS_LEVEL 2
+#elif defined(LEVEL1)
+#define GAS_LEVEL 1
+#else
+#define GAS_LEVEL 0
+#endif
+
+// How much of a full round the rounds of the pressure solve take (ROUND_WEIGHT in gas.rs).
+const float GAS_ROUND_WEIGHT = 6.0 / 7.0;
+
+// A level's grid as it lies in its texture.
+vec4 gasLevelGrid(int level) {
+    return level == 0 ? GasCoarse : GasUnder[level - 1];
+}
+
+// The first cell of a level that is in use, and how many are in use along x, y, z.
+ivec3 gasLevelFrom(int level) {
+    return level == 0 ? gasLow(GasCoarse) : ivec3(0);
+}
+
+ivec3 gasLevelCells(int level) {
+    ivec3 n = gasHigh(GasCoarse) - gasLow(GasCoarse) + 1;
+    return (n + (1 << level) - 1) >> level;
+}
+
+// How strongly a cell at the edge of what is computed is tied to the zero beyond it: that zero is one coarse cell
+// beyond the last, which for a grid `size` times as coarse is nearer than its own cells are to each other.
+float gasLevelEdge(int level) {
+    float size = float(1 << level);
+    return 2.0 * size / (size + 1.0);
+}
+
+// The square of the size of a level's cell, in blocks.
+float gasLevelCell2(int level) {
+    float size = float(1 << level) / GasStep.z;
+    return size * size;
+}
+
+// x: the sum of the pressures of those of a cell's six neighbours that count, y: how many count. A block does not
+// (nothing is pushed into it); beyond the cells in use the pressure is zero, and that counts the level's edge.
+// `cell` is counted from the first cell in use.
+vec2 gasTies(sampler2D pressure, int level, ivec3 cell) {
+    vec4 grid = gasLevelGrid(level);
+    ivec3 from = gasLevelFrom(level), cells = gasLevelCells(level);
+    float edge = gasLevelEdge(level);
+    vec2 ties = vec2(0.0);
+    for (int i = 0; i < 6; i++) {
+        ivec3 n = cell;
+        n[i >> 1] += (i & 1) == 0 ? 1 : -1;
+        if (any(lessThan(n, ivec3(0))) || any(greaterThanEqual(n, cells))) { ties.y += edge; continue; }
+        float v = texelFetch(pressure, gasPixel(grid, from + n), 0).r;
+        if (v > GAS_WALL_TEST) ties += vec2(v, 1.0);
+    }
+    return ties;
 }
 
 // What a block is to the gas: x 1 if it is solid, y its kind (see gas.rs), z its strength (1 is the usual).

@@ -53,7 +53,7 @@ import physicsbruhh.sim.GasParams;
 final class GasDraw {
     /** Blobs the solvers take at once ({@code GAS_BLOBS} in gas.glsl). */
     static final int BLOBS = 16;
-    private static final int GRID_BYTES = (12 + BLOBS * 3) * 16, VIEW_BYTES = 64 + 4 * 16;
+    private static final int GRID_BYTES = (15 + BLOBS * 3) * 16, VIEW_BYTES = 64 + 4 * 16;
 
     static final BindGroupLayout GRID = BindGroupLayout.builder().withUniform("GasGrid", UniformType.UNIFORM_BUFFER).build();
     private static final BindGroupLayout VIEW = BindGroupLayout.builder().withUniform("GasView", UniformType.UNIFORM_BUFFER).build();
@@ -156,7 +156,10 @@ final class GasDraw {
             out.put(36, p[GasParams.MOST_HEAT]).put(37, p[GasParams.MOST_FUEL]).put(38, 0.0F).put(39, 0.0F);
             out.put(40, part[0]).put(41, part[1]).put(42, part[2]).put(43, 0.0F);
             out.put(44, part[3]).put(45, part[4]).put(46, part[5]).put(47, 0.0F);
-            for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(48 + i, blobs[i]);
+            for (int level = 0; level < GasBox.UNDER; level++) {
+                out.put(48 + level * 4, box.underX[level]).put(49 + level * 4, box.underY[level]).put(50 + level * 4, box.underZ[level]).put(51 + level * 4, box.underTiles[level]);
+            }
+            for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(60 + i, blobs[i]);
         }
         return gridBuffer.currentBuffer();
     }

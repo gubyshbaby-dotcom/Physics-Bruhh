@@ -52,9 +52,9 @@ import physicsbruhh.sim.NativeSim;
  * explosions, and runs a step when a frame is drawn.
  */
 final class GasClient {
-    /** How fine: blocks in the box, coarse cells to a block, fine cells to a coarse one, rounds of the pressure solve. */
+    /** How fine: blocks in the box, coarse cells to a block, fine cells to a coarse one, rounds of the pressure solve on the coarse grid ({@link GasBox#rounds}). */
     enum Quality {
-        OFF(0, 0, 0, 0, 0, 0), LOW(24, 16, 24, 2, 2, 12), MEDIUM(24, 20, 24, 3, 2, 16), HIGH(32, 24, 32, 4, 2, 20), ULTRA(40, 28, 40, 4, 2, 24);
+        OFF(0, 0, 0, 0, 0, 0), LOW(24, 16, 24, 2, 2, 2), MEDIUM(24, 20, 24, 3, 2, 4), HIGH(32, 24, 32, 4, 2, 4), ULTRA(40, 28, 40, 4, 2, 8);
 
         final int bx, by, bz, cpb, ratio, rounds;
 
@@ -66,7 +66,7 @@ final class GasClient {
     }
 
     /** What the processor's solver computes, whatever the quality asked for: the same reach as "low", half as fine. */
-    private static final GasBox COARSE = new GasBox(24, 16, 24, 2, 1, 16);
+    private static final GasBox COARSE = new GasBox(24, 16, 24, 2, 1, 4);
 
     /** This client's choices ({@code /gaslook}; the command line wins: {@code -Dphysicsbruhh.gas=off|low|medium|high|ultra}, {@code -Dphysicsbruhh.gas.solver=auto|gpu|cpu}). */
     static volatile Quality quality = Quality.MEDIUM;

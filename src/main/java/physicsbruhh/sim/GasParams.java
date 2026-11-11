@@ -12,7 +12,7 @@ public final class GasParams {
             "confine", "swell", "unrest", "rounds", "edge", "most_smoke", "most_heat", "most_fuel" };
     private static final float[] VALUES = {
             16.0F, 0.6F, 0.15F, 6.5F, 0.22F, 4.0F, 2.6F, 0.2F, 0.14F, 0.2F,
-            15.0F, 2.0F, 8.0F, 16.0F, 3.0F, 4.0F, 1.5F, 2.0F };
+            15.0F, 2.0F, 8.0F, 4.0F, 3.0F, 4.0F, 1.5F, 2.0F };
     public static final int COUNT = VALUES.length;
     /** Where the number of rounds of the pressure solve is in the list. */
     public static final int ROUNDS = 13;

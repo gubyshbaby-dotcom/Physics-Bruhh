@@ -9,7 +9,11 @@
 //! 2. the velocity carried along by itself, then pushed: hot gas up, smoke-laden gas a little
 //!    down, small whirls kept from dying out (vorticity confinement), a little unrest over flames;
 //! 3. how much the velocity piles gas up or thins it out in each cell, less what explosions add;
-//! 4. the pressure that undoes that (Jacobi rounds, starting from last step's pressure);
+//! 4. the pressure that undoes that, starting from last step's pressure: a few rounds that even it
+//!    out from cell to cell, then what is still left is handed to a grid twice as coarse and solved
+//!    there the same way (and from there to one coarser still), and the answer taken back up
+//!    (see [`Gas::pressure`]: rounds alone get the pressure right from one cell to the next but
+//!    take hundreds to get it right across the box);
 //! 5. the velocity with that pressure taken off: gas goes round blocks instead of into them;
 //! 6. smoke, heat, fuel and the colour of the flame carried along by the velocity; fuel that is
 //!    hot enough burns into heat and smoke; heat is lost, smoke thins; burning blocks, burning
@@ -57,6 +61,8 @@ pub struct Params {
     /// Random sideways push over a source, blocks/s².
     pub unrest: f32,
     /// Rounds of the pressure solve.
+    /// Rounds of the pressure solve on the solver's own grid each step: half before the coarser grids are asked, half
+    /// after (4: two and two). From 8 on the whole thing is done `rounds / 4` times over.
     pub rounds: f32,
     /// Cells from the edge of the box over which gas fades out.
     pub edge: f32,
@@ -70,7 +76,7 @@ impl Default for Params {
     fn default() -> Self {
         Params {
             buoyancy: 16.0, weight: 0.6, cool: 0.15, cool4: 6.5, ignite: 0.22, burn: 4.0, heat: 2.6, soot: 0.2,
-            smoke_fade: 0.14, drag: 0.2, confine: 15.0, swell: 2.0, unrest: 8.0, rounds: 16.0, edge: 3.0,
+            smoke_fade: 0.14, drag: 0.2, confine: 15.0, swell: 2.0, unrest: 8.0, rounds: 4.0, edge: 3.0,
             most_smoke: 4.0, most_heat: 1.5, most_fuel: 2.0,
         }
     }
@@ -136,6 +142,144 @@ impl Blob {
     }
 }
 
+/// How many grids coarser than the solver's own the pressure is solved on, each twice as coarse as the one before.
+pub const COARSER: usize = 3;
+/// How much of a full round the rounds of the pressure solve take: a little less than all of it evens the pressure
+/// out between neighbours fastest.
+pub const ROUND_WEIGHT: f32 = 6.0 / 7.0;
+
+/// A grid for the pressure: the solver's own, or one of the coarser ones under it.
+///
+/// `edge`: how strongly a cell at the edge of the box is tied to the zero outside it. On the solver's own grid the
+/// zero is one cell beyond the last (1). A coarser grid has to put it at the same place, which is nearer to the
+/// middle of its last cell than its cells are to each other: cells `size` times the solver's give `2 size / (size + 1)`.
+/// (With 1 there too, the coarse grids answer a different question, and the solve gets worse with every cycle.)
+struct Level {
+    nx: usize, ny: usize, nz: usize,
+    /// The square of the size of a cell, in blocks.
+    h2: f32,
+    edge: f32,
+    solid: Vec<u8>,
+    p: Vec<f32>, q: Vec<f32>, f: Vec<f32>,
+}
+
+impl Level {
+    fn new(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32) -> Level {
+        let n = nx * ny * nz;
+        Level { nx, ny, nz, h2, edge, solid: vec![0; n], p: vec![0.0; n], q: vec![0.0; n], f: vec![0.0; n] }
+    }
+}
+
+/// The sum of the pressures of a cell's neighbours and how many of them count: a block does not (nothing is pushed
+/// into it), the outside of the box is zero and counts `edge`.
+#[inline]
+fn neighbours(nx: usize, ny: usize, nz: usize, edge: f32, solid: &[u8], p: &[f32], x: usize, y: usize, z: usize) -> (f32, f32) {
+    let layer = nx * nz;
+    let i = x + nx * z + layer * y;
+    let (mut sum, mut ties) = (0.0, 0.0);
+    let mut one = |j: usize, inside: bool| {
+        if !inside { ties += edge; } else if solid[j] == 0 { sum += p[j]; ties += 1.0; }
+    };
+    one(i + 1, x + 1 < nx); one(i.wrapping_sub(1), x > 0);
+    one(i + layer, y + 1 < ny); one(i.wrapping_sub(layer), y > 0);
+    one(i + nx, z + 1 < nz); one(i.wrapping_sub(nx), z > 0);
+    (sum, ties)
+}
+
+/// Rounds that even the pressure out: each cell moves towards what its neighbours and the piling up in it ask for.
+#[allow(clippy::too_many_arguments)]
+fn even_out(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], f: &[f32], p: &mut Vec<f32>, q: &mut Vec<f32>, rounds: usize) {
+    let layer = nx * nz;
+    for _ in 0..rounds {
+        let from: &[f32] = p;
+        q.par_chunks_mut(layer).enumerate().for_each(|(y, q)| {
+            for z in 0..nz {
+                for x in 0..nx {
+                    let o = x + nx * z;
+                    let i = o + layer * y;
+                    if solid[i] != 0 { q[o] = 0.0; continue; }
+                    let (sum, ties) = neighbours(nx, ny, nz, edge, solid, from, x, y, z);
+                    q[o] = if ties > 0.0 { from[i] + ROUND_WEIGHT * ((sum - h2 * f[i]) / ties - from[i]) } else { from[i] };
+                }
+            }
+        });
+        std::mem::swap(p, q);
+    }
+}
+
+/// What the pressure of a grid still leaves undone, handed to the grid under it: the mean over the eight cells each
+/// of its cells covers. That grid starts from nothing.
+#[allow(clippy::too_many_arguments)]
+fn hand_down(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], f: &[f32], p: &[f32], to: &mut Level) {
+    let layer = nx * nz;
+    let (cx, cz) = (to.nx, to.nz);
+    to.p.iter_mut().for_each(|v| *v = 0.0);
+    to.f.par_chunks_mut(cx * cz).enumerate().for_each(|(cy, out)| {
+        out.iter_mut().for_each(|v| *v = 0.0);
+        for y in (2 * cy)..(2 * cy + 2).min(ny) {
+            for z in 0..nz {
+                for x in 0..nx {
+                    let i = x + nx * z + layer * y;
+                    if solid[i] != 0 { continue; }
+                    let (sum, ties) = neighbours(nx, ny, nz, edge, solid, p, x, y, z);
+                    out[x / 2 + cx * (z / 2)] += 0.125 * (f[i] - (sum - ties * p[i]) / h2);
+                }
+            }
+        }
+    });
+}
+
+/// The answer of the grid under a grid added to it, spread smoothly between that grid's cells. Beyond the last of
+/// them, towards the zero outside the box, the answer falls off to that zero; cells inside blocks are left out.
+fn take_up(nx: usize, nz: usize, solid: &[u8], p: &mut [f32], from: &Level) {
+    let layer = nx * nz;
+    let (cx, cy, cz) = (from.nx, from.ny, from.nz);
+    let out = 1.0 - from.edge;
+    p.par_chunks_mut(layer).enumerate().for_each(|(y, p)| {
+        // (a cell that is not there stands for the zero outside: the last cell's value times 1 - edge)
+        let pick = |v: i32, n: usize| if v < 0 { (0usize, out) } else if v >= n as i32 { (n - 1, out) } else { (v as usize, 1.0) };
+        let gy = (y as f32 + 0.5) * 0.5 - 0.5;
+        let y0 = gy.floor() as i32;
+        let ty = gy - y0 as f32;
+        for z in 0..nz {
+            let gz = (z as f32 + 0.5) * 0.5 - 0.5;
+            let z0 = gz.floor() as i32;
+            let tz = gz - z0 as f32;
+            for x in 0..nx {
+                let o = x + nx * z;
+                if solid[o + layer * y] != 0 { continue; }
+                let gx = (x as f32 + 0.5) * 0.5 - 0.5;
+                let x0 = gx.floor() as i32;
+                let tx = gx - x0 as f32;
+                let (mut sum, mut weight) = (0.0, 0.0);
+                for (yy, wy) in [(y0, 1.0 - ty), (y0 + 1, ty)] { for (zz, wz) in [(z0, 1.0 - tz), (z0 + 1, tz)] { for (xx, wx) in [(x0, 1.0 - tx), (x0 + 1, tx)] {
+                    let ((ix, kx), (iy, ky), (iz, kz)) = (pick(xx, cx), pick(yy, cy), pick(zz, cz));
+                    let c = ix + cx * (iz + cz * iy);
+                    if from.solid[c] == 0 { sum += from.p[c] * kx * ky * kz * wx * wy * wz; weight += wx * wy * wz; }
+                } } }
+                if weight > 1.0e-4 { p[o] += sum / weight; }
+            }
+        }
+    });
+}
+
+/// The coarser grids, from the first of `levels` down and back up: a few rounds, what is left handed down, the answer
+/// taken up, a few rounds more. The coarsest has nothing under it and gets more rounds instead.
+fn down_and_up(levels: &mut [Level], each: usize) {
+    let (here, rest) = levels.split_first_mut().unwrap();
+    let Level { nx, ny, nz, h2, edge, solid, p, q, f } = here;
+    let (nx, ny, nz, h2, edge) = (*nx, *ny, *nz, *h2, *edge);
+    if rest.is_empty() {
+        even_out(nx, ny, nz, h2, edge, solid, f, p, q, 2 * each + 4);
+        return;
+    }
+    even_out(nx, ny, nz, h2, edge, solid, f, p, q, each);
+    hand_down(nx, ny, nz, h2, edge, solid, f, p, &mut rest[0]);
+    down_and_up(rest, each);
+    take_up(nx, nz, solid, p, &rest[0]);
+    even_out(nx, ny, nz, h2, edge, solid, f, p, q, each);
+}
+
 pub struct Gas {
     /// Size of the box in blocks.
     pub bx: usize, pub by: usize, pub bz: usize,
@@ -150,8 +294,14 @@ pub struct Gas {
     vel2: Vec<[f32; 4]>,
     /// How the air spins, and how fast (fourth number).
     curl: Vec<[f32; 4]>,
-    pub p: Vec<f32>, q: Vec<f32>, rhs: Vec<f32>,
-    solid: Vec<u8>,
+    /// The pressure (what is taken off the velocity is its slope), and beside it the scratch copy of the rounds.
+    pub p: Vec<f32>, q: Vec<f32>,
+    /// The coarser grids the pressure is solved on along the way.
+    levels: Vec<Level>,
+    /// How much the air piles up in each coarse cell this step (1/s), less what burning and explosions make: what the pressure has to undo.
+    pub rhs: Vec<f32>,
+    /// Which coarse cells are inside blocks (not zero).
+    pub solid: Vec<u8>,
     /// Smoke, heat, fuel, and how much of the fuel and heat is soul fire's, on the fine grid.
     pub gas: Vec<[f32; 4]>,
     gas2: Vec<[f32; 4]>,
@@ -215,10 +365,17 @@ impl Gas {
         let (nx, ny, nz) = (bx * cpb, by * cpb, bz * cpb);
         let (fx, fy, fz) = (nx * ratio, ny * ratio, nz * ratio);
         let (n, f) = (nx * ny * nz, fx * fy * fz);
+        let mut levels: Vec<Level> = Vec::new();
+        let (mut lx, mut ly, mut lz, mut size) = (nx, ny, nz, 1.0f32);
+        for _ in 0..COARSER {
+            if lx.min(ly).min(lz) < 4 { break; }
+            (lx, ly, lz, size) = (lx.div_ceil(2), ly.div_ceil(2), lz.div_ceil(2), size * 2.0);
+            levels.push(Level::new(lx, ly, lz, size * size / (cpb * cpb) as f32, 2.0 * size / (size + 1.0)));
+        }
         Gas {
             bx, by, bz, cpb, ratio, nx, ny, nz, fx, fy, fz,
             vel: vec![[0.0; 4]; n], vel2: vec![[0.0; 4]; n], curl: vec![[0.0; 4]; n],
-            p: vec![0.0; n], q: vec![0.0; n], rhs: vec![0.0; n], solid: vec![0; n],
+            p: vec![0.0; n], q: vec![0.0; n], levels, rhs: vec![0.0; n], solid: vec![0; n],
             gas: vec![[0.0; 4]; f], gas2: vec![[0.0; 4]; f], gas3: vec![[0.0; 4]; f],
             world: vec![0; bx * by * bz * WORLD_BYTES], params: Params::default(), time: 0.0, sharp: true,
         }
@@ -268,6 +425,25 @@ impl Gas {
             self.velocity(dt, blobs);
             self.divergence(dt, blobs);
             self.pressure();
+            self.project();
+            self.scalars(dt, blobs);
+        });
+        self.time += dt;
+    }
+
+    /// One step with the pressure found by `solve` instead of the usual rounds (it is handed the grid with `rhs` and
+    /// `solid` set and last step's pressure in `p`, and the length of the step): for trying other ways of finding it.
+    pub fn step_with(&mut self, dt: f32, blobs: &[Blob], solve: &mut dyn FnMut(&mut Gas, f32)) {
+        if !(dt > 0.0) { return; }
+        let dt = dt.min(0.1);
+        on_pool(|| {
+            self.mark_solid();
+            self.spin();
+            self.velocity(dt, blobs);
+            self.divergence(dt, blobs);
+        });
+        solve(self, dt);
+        on_pool(|| {
             self.project();
             self.scalars(dt, blobs);
         });
@@ -401,27 +577,54 @@ impl Gas {
         });
     }
 
-    fn pressure(&mut self) {
+    /// The pressure that undoes the piling up, starting from last step's.
+    ///
+    /// Rounds in which every cell moves towards what its neighbours ask for get the pressure right between
+    /// neighbours at once, but news travels one cell a round: across a box of a hundred cells that is hundreds of
+    /// rounds, and a fixed few leave the large shape of the pressure wrong (measured with `examples/gas_pressure.rs`:
+    /// 16 rounds leave what is taken off the velocity 11 % off over a campfire and 53 % off in an explosion). So the
+    /// rounds are few, and what they leave undone is handed to a grid twice as coarse, where the same news travels
+    /// twice as far a round at an eighth of the cost, and from there to coarser ones still; each grid's answer is
+    /// added to the grid above it. Two rounds before and two after on every grid: 4 % off over the campfire, 8 % in
+    /// the explosion, for the work of seven rounds.
+    ///
+    /// A coarse cell counts as a block if at least half of what it covers is block: walls keep the gas apart on the
+    /// coarse grids as well as they can at that size, and the rounds on the finer grids put right what they cannot.
+    pub fn pressure(&mut self) {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
         let h2 = 1.0 / (self.cpb * self.cpb) as f32;
-        let layer = nx * nz;
-        let rounds = (self.params.rounds.max(1.0) as usize + 1) & !1; // even: the result ends up where it started
-        for _ in 0..rounds {
-            let (p, rhs, solid) = (&self.p, &self.rhs, &self.solid);
-            self.q.par_chunks_mut(layer).enumerate().for_each(|(y, q)| {
-                for z in 0..nz {
-                    for x in 0..nx {
-                        let o = x + nx * z;
-                        let i = o + layer * y;
-                        if solid[i] != 0 { q[o] = 0.0; continue; }
-                        // a block has the pressure of the cell beside it (nothing is pushed into it); outside the box it is zero
-                        let at = |j: usize, inside: bool| if !inside { 0.0 } else if solid[j] != 0 { p[i] } else { p[j] };
-                        q[o] = (at(i + 1, x + 1 < nx) + at(i.wrapping_sub(1), x > 0) + at(i + layer, y + 1 < ny) + at(i.wrapping_sub(layer), y > 0)
-                            + at(i + nx, z + 1 < nz) + at(i.wrapping_sub(nx), z > 0) - h2 * rhs[i]) / 6.0;
+        let rounds = (self.params.rounds.max(2.0) as usize + 1) & !1;
+        let cycles = (rounds / 4).max(1);
+        let each = (rounds / (2 * cycles)).max(1);
+        if self.levels.is_empty() {
+            // a box too small for coarser grids: rounds only
+            even_out(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &mut self.p, &mut self.q, 4 * rounds);
+            return;
+        }
+        // which cells of the coarser grids are blocks
+        for l in 0..self.levels.len() {
+            let (above, below) = self.levels.split_at_mut(l);
+            let (fine, fnx, fny, fnz): (&[u8], usize, usize, usize) = match above.last() { Some(a) => (&a.solid, a.nx, a.ny, a.nz), None => (&self.solid, nx, ny, nz) };
+            let level = &mut below[0];
+            let (cx, cz) = (level.nx, level.nz);
+            level.solid.par_chunks_mut(cx * cz).enumerate().for_each(|(cy, out)| {
+                for z in 0..cz {
+                    for x in 0..cx {
+                        let (mut open, mut block) = (0, 0);
+                        for yy in (2 * cy)..(2 * cy + 2).min(fny) { for zz in (2 * z)..(2 * z + 2).min(fnz) { for xx in (2 * x)..(2 * x + 2).min(fnx) {
+                            if fine[xx + fnx * (zz + fnz * yy)] != 0 { block += 1; } else { open += 1; }
+                        } } }
+                        out[x + cx * z] = (block >= open) as u8;
                     }
                 }
             });
-            std::mem::swap(&mut self.p, &mut self.q);
+        }
+        for _ in 0..cycles {
+            even_out(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &mut self.p, &mut self.q, each);
+            hand_down(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &self.p, &mut self.levels[0]);
+            down_and_up(&mut self.levels, each);
+            take_up(nx, nz, &self.solid, &mut self.p, &self.levels[0]);
+            even_out(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &mut self.p, &mut self.q, each);
         }
     }
 
