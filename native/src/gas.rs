@@ -152,46 +152,92 @@ pub const COARSER: usize = 3;
 pub const ROUND_WEIGHT: f32 = 6.0 / 7.0;
 
 /// A grid for the pressure: the solver's own, or one of the coarser ones under it.
-///
-/// `edge`: how strongly a cell at the edge of the box is tied to the zero outside it. On the solver's own grid the
-/// zero is one cell beyond the last (1). A coarser grid has to put it at the same place, which is nearer to the
-/// middle of its last cell than its cells are to each other: cells `size` times the solver's give `2 size / (size + 1)`.
-/// (With 1 there too, the coarse grids answer a different question, and the solve gets worse with every cycle.)
 struct Level {
-    nx: usize, ny: usize, nz: usize,
-    /// The square of the size of a cell, in blocks.
-    h2: f32,
-    edge: f32,
+    shape: Shape,
     solid: Vec<u8>,
     p: Vec<f32>, q: Vec<f32>, f: Vec<f32>,
 }
 
-impl Level {
-    fn new(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32) -> Level {
-        let n = nx * ny * nz;
-        Level { nx, ny, nz, h2, edge, solid: vec![0; n], p: vec![0.0; n], q: vec![0.0; n], f: vec![0.0; n] }
+/// The cells of such a grid: how many, how large, and how they lie over the solver's own cells.
+///
+/// The cells of a coarser grid are `size` of the solver's along each side. Where the box does not divide evenly the
+/// last cell along an axis sticks out past the edge of the box and covers fewer of the solver's cells than the
+/// rest; and beyond the edge the pressure is zero one of the solver's cells out, which for a coarse cell is nearer
+/// than its own neighbours are. How strongly two cells are tied, and a cell to that zero, goes by what the cells
+/// really cover ([`Shape::tie`]). With every tie counted as 1 the coarse grids answer a different question than the
+/// solver's own grid asks, and the solve gets worse with every cycle instead of better: for some sizes of box at once.
+#[derive(Clone, Copy)]
+struct Shape {
+    nx: usize, ny: usize, nz: usize,
+    /// The square of the size of a cell, in blocks.
+    h2: f32,
+    /// How many of the solver's own cells a cell is along each side.
+    size: usize,
+    /// The solver's own cells along x, y, z.
+    fine: [usize; 3],
+}
+
+impl Shape {
+    /// How many of the solver's cells cell `k` covers along an axis (0 x, 1 y, 2 z).
+    #[inline]
+    fn covers(&self, axis: usize, k: usize) -> f32 {
+        (self.fine[axis] - k * self.size).min(self.size) as f32
+    }
+
+    /// How strongly a cell is tied to its neighbour along an axis (towards the greater if `up`), or to the zero
+    /// outside if there is no neighbour: the face they share (as a share of a whole face) over how far apart their
+    /// middles are (in cells). 1 between two whole cells.
+    #[inline]
+    fn tie(&self, at: [usize; 3], axis: usize, up: bool, outside: bool) -> f32 {
+        let s = self.size as f32;
+        let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+        let face = self.covers(a, at[a]) * self.covers(b, at[b]) / (s * s);
+        let here = self.covers(axis, at[axis]);
+        if outside { return face * 2.0 * s / (here + 1.0); }
+        let there = self.covers(axis, if up { at[axis] + 1 } else { at[axis] - 1 });
+        face * 2.0 * s / (here + there)
     }
 }
 
-/// The sum of the pressures of a cell's neighbours and how many of them count: a block does not (nothing is pushed
-/// into it), the outside of the box is zero and counts `edge`.
+impl Level {
+    fn new(shape: Shape) -> Level {
+        let n = shape.nx * shape.ny * shape.nz;
+        Level { shape, solid: vec![0; n], p: vec![0.0; n], q: vec![0.0; n], f: vec![0.0; n] }
+    }
+}
+
+/// The pressures of a cell's neighbours, each times how strongly the cell is tied to it, summed; and the sum of the
+/// ties. A block is not tied to (nothing is pushed into it); outside the box the pressure is zero.
 #[inline]
-fn neighbours(nx: usize, ny: usize, nz: usize, edge: f32, solid: &[u8], p: &[f32], x: usize, y: usize, z: usize) -> (f32, f32) {
+fn neighbours(shape: &Shape, solid: &[u8], p: &[f32], x: usize, y: usize, z: usize) -> (f32, f32) {
+    let (nx, ny, nz) = (shape.nx, shape.ny, shape.nz);
     let layer = nx * nz;
     let i = x + nx * z + layer * y;
     let (mut sum, mut ties) = (0.0, 0.0);
-    let mut one = |j: usize, inside: bool| {
-        if !inside { ties += edge; } else if solid[j] == 0 { sum += p[j]; ties += 1.0; }
+    if shape.size == 1 {
+        // the solver's own grid: every tie is 1
+        let mut one = |j: usize, inside: bool| {
+            if !inside { ties += 1.0; } else if solid[j] == 0 { sum += p[j]; ties += 1.0; }
+        };
+        one(i + 1, x + 1 < nx); one(i.wrapping_sub(1), x > 0);
+        one(i + layer, y + 1 < ny); one(i.wrapping_sub(layer), y > 0);
+        one(i + nx, z + 1 < nz); one(i.wrapping_sub(nx), z > 0);
+        return (sum, ties);
+    }
+    let at = [x, y, z];
+    let mut one = |j: usize, inside: bool, axis: usize, up: bool| {
+        if !inside { ties += shape.tie(at, axis, up, true); }
+        else if solid[j] == 0 { let t = shape.tie(at, axis, up, false); sum += t * p[j]; ties += t; }
     };
-    one(i + 1, x + 1 < nx); one(i.wrapping_sub(1), x > 0);
-    one(i + layer, y + 1 < ny); one(i.wrapping_sub(layer), y > 0);
-    one(i + nx, z + 1 < nz); one(i.wrapping_sub(nx), z > 0);
+    one(i + 1, x + 1 < nx, 0, true); one(i.wrapping_sub(1), x > 0, 0, false);
+    one(i + layer, y + 1 < ny, 1, true); one(i.wrapping_sub(layer), y > 0, 1, false);
+    one(i + nx, z + 1 < nz, 2, true); one(i.wrapping_sub(nx), z > 0, 2, false);
     (sum, ties)
 }
 
 /// Rounds that even the pressure out: each cell moves towards what its neighbours and the piling up in it ask for.
-#[allow(clippy::too_many_arguments)]
-fn even_out(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], f: &[f32], p: &mut Vec<f32>, q: &mut Vec<f32>, rounds: usize) {
+fn even_out(shape: &Shape, solid: &[u8], f: &[f32], p: &mut Vec<f32>, q: &mut Vec<f32>, rounds: usize) {
+    let (nx, nz, h2) = (shape.nx, shape.nz, shape.h2);
     let layer = nx * nz;
     for _ in 0..rounds {
         let from: &[f32] = p;
@@ -201,7 +247,7 @@ fn even_out(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], f
                     let o = x + nx * z;
                     let i = o + layer * y;
                     if solid[i] != 0 { q[o] = 0.0; continue; }
-                    let (sum, ties) = neighbours(nx, ny, nz, edge, solid, from, x, y, z);
+                    let (sum, ties) = neighbours(shape, solid, from, x, y, z);
                     q[o] = if ties > 0.0 { from[i] + ROUND_WEIGHT * ((sum - h2 * f[i]) / ties - from[i]) } else { from[i] };
                 }
             }
@@ -212,10 +258,10 @@ fn even_out(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], f
 
 /// What the pressure of a grid still leaves undone, handed to the grid under it: the mean over the eight cells each
 /// of its cells covers. That grid starts from nothing.
-#[allow(clippy::too_many_arguments)]
-fn hand_down(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], f: &[f32], p: &[f32], to: &mut Level) {
+fn hand_down(shape: &Shape, solid: &[u8], f: &[f32], p: &[f32], to: &mut Level) {
+    let (nx, ny, nz, h2) = (shape.nx, shape.ny, shape.nz, shape.h2);
     let layer = nx * nz;
-    let (cx, cz) = (to.nx, to.nz);
+    let (cx, cz) = (to.shape.nx, to.shape.nz);
     to.p.iter_mut().for_each(|v| *v = 0.0);
     to.f.par_chunks_mut(cx * cz).enumerate().for_each(|(cy, out)| {
         out.iter_mut().for_each(|v| *v = 0.0);
@@ -224,7 +270,7 @@ fn hand_down(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], 
                 for x in 0..nx {
                     let i = x + nx * z + layer * y;
                     if solid[i] != 0 { continue; }
-                    let (sum, ties) = neighbours(nx, ny, nz, edge, solid, p, x, y, z);
+                    let (sum, ties) = neighbours(shape, solid, p, x, y, z);
                     out[x / 2 + cx * (z / 2)] += 0.125 * (f[i] - (sum - ties * p[i]) / h2);
                 }
             }
@@ -236,10 +282,11 @@ fn hand_down(nx: usize, ny: usize, nz: usize, h2: f32, edge: f32, solid: &[u8], 
 /// them, towards the zero outside the box, the answer falls off to that zero; cells inside blocks are left out.
 fn take_up(nx: usize, nz: usize, solid: &[u8], p: &mut [f32], from: &Level) {
     let layer = nx * nz;
-    let (cx, cy, cz) = (from.nx, from.ny, from.nz);
-    let out = 1.0 - from.edge;
+    let (cx, cy, cz) = (from.shape.nx, from.shape.ny, from.shape.nz);
+    let size = from.shape.size as f32;
+    let out = 1.0 - 2.0 * size / (size + 1.0);
     p.par_chunks_mut(layer).enumerate().for_each(|(y, p)| {
-        // (a cell that is not there stands for the zero outside: the last cell's value times 1 - edge)
+        // (a cell that is not there stands for the zero outside: the last cell's value times what makes the answer reach zero there)
         let pick = |v: i32, n: usize| if v < 0 { (0usize, out) } else if v >= n as i32 { (n - 1, out) } else { (v as usize, 1.0) };
         let gy = (y as f32 + 0.5) * 0.5 - 0.5;
         let y0 = gy.floor() as i32;
@@ -270,17 +317,16 @@ fn take_up(nx: usize, nz: usize, solid: &[u8], p: &mut [f32], from: &Level) {
 /// taken up, a few rounds more. The coarsest has nothing under it and gets more rounds instead.
 fn down_and_up(levels: &mut [Level], each: usize) {
     let (here, rest) = levels.split_first_mut().unwrap();
-    let Level { nx, ny, nz, h2, edge, solid, p, q, f } = here;
-    let (nx, ny, nz, h2, edge) = (*nx, *ny, *nz, *h2, *edge);
+    let Level { shape, solid, p, q, f } = here;
     if rest.is_empty() {
-        even_out(nx, ny, nz, h2, edge, solid, f, p, q, 2 * each + 4);
+        even_out(shape, solid, f, p, q, 2 * each + 4);
         return;
     }
-    even_out(nx, ny, nz, h2, edge, solid, f, p, q, each);
-    hand_down(nx, ny, nz, h2, edge, solid, f, p, &mut rest[0]);
+    even_out(shape, solid, f, p, q, each);
+    hand_down(shape, solid, f, p, &mut rest[0]);
     down_and_up(rest, each);
-    take_up(nx, nz, solid, p, &rest[0]);
-    even_out(nx, ny, nz, h2, edge, solid, f, p, q, each);
+    take_up(shape.nx, shape.nz, solid, p, &rest[0]);
+    even_out(shape, solid, f, p, q, each);
 }
 
 /// A block counts as holding gas to be seen if a cell of it, or a cell next to it, has more smoke or more heat than
@@ -382,7 +428,7 @@ impl Gas {
         for _ in 0..COARSER {
             if lx.min(ly).min(lz) < 4 { break; }
             (lx, ly, lz, size) = (lx.div_ceil(2), ly.div_ceil(2), lz.div_ceil(2), size * 2.0);
-            levels.push(Level::new(lx, ly, lz, size * size / (cpb * cpb) as f32, 2.0 * size / (size + 1.0)));
+            levels.push(Level::new(Shape { nx: lx, ny: ly, nz: lz, h2: size * size / (cpb * cpb) as f32, size: size as usize, fine: [nx, ny, nz] }));
         }
         Gas {
             bx, by, bz, cpb, ratio, nx, ny, nz, fx, fy, fz,
@@ -659,17 +705,18 @@ impl Gas {
         let rounds = (self.params.rounds.max(2.0) as usize + 1) & !1;
         let cycles = (rounds / 4).max(1);
         let each = (rounds / (2 * cycles)).max(1);
+        let own = Shape { nx, ny, nz, h2, size: 1, fine: [nx, ny, nz] };
         if self.levels.is_empty() {
             // a box too small for coarser grids: rounds only
-            even_out(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &mut self.p, &mut self.q, 4 * rounds);
+            even_out(&own, &self.solid, &self.rhs, &mut self.p, &mut self.q, 4 * rounds);
             return;
         }
         // which cells of the coarser grids are blocks
         for l in 0..self.levels.len() {
             let (above, below) = self.levels.split_at_mut(l);
-            let (fine, fnx, fny, fnz): (&[u8], usize, usize, usize) = match above.last() { Some(a) => (&a.solid, a.nx, a.ny, a.nz), None => (&self.solid, nx, ny, nz) };
+            let (fine, fnx, fny, fnz): (&[u8], usize, usize, usize) = match above.last() { Some(a) => (&a.solid, a.shape.nx, a.shape.ny, a.shape.nz), None => (&self.solid, nx, ny, nz) };
             let level = &mut below[0];
-            let (cx, cz) = (level.nx, level.nz);
+            let (cx, cz) = (level.shape.nx, level.shape.nz);
             level.solid.par_chunks_mut(cx * cz).enumerate().for_each(|(cy, out)| {
                 for z in 0..cz {
                     for x in 0..cx {
@@ -683,11 +730,11 @@ impl Gas {
             });
         }
         for _ in 0..cycles {
-            even_out(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &mut self.p, &mut self.q, each);
-            hand_down(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &self.p, &mut self.levels[0]);
+            even_out(&own, &self.solid, &self.rhs, &mut self.p, &mut self.q, each);
+            hand_down(&own, &self.solid, &self.rhs, &self.p, &mut self.levels[0]);
             down_and_up(&mut self.levels, each);
             take_up(nx, nz, &self.solid, &mut self.p, &self.levels[0]);
-            even_out(nx, ny, nz, h2, 1.0, &self.solid, &self.rhs, &mut self.p, &mut self.q, each);
+            even_out(&own, &self.solid, &self.rhs, &mut self.p, &mut self.q, each);
         }
     }
 

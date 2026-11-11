@@ -181,6 +181,44 @@ fn a_big_fire_in_a_closed_room_stays_sane() {
     assert!(g.gas.iter().all(|v| v[0] <= pr.most_smoke && v[2] <= pr.most_fuel && v[0] >= 0.0 && v[1] >= 0.0 && v[2] >= 0.0));
 }
 
+/// How much of the piling up of the last step its pressure left undone (root of the sums of squares, one over the other).
+fn left_undone(g: &Gas) -> f64 {
+    let (nx, ny, nz) = (g.nx, g.ny, g.nz);
+    let h2 = 1.0 / (g.cpb * g.cpb) as f32;
+    let layer = nx * nz;
+    let (mut left, mut all) = (0.0f64, 0.0f64);
+    for y in 0..ny { for z in 0..nz { for x in 0..nx {
+        let i = x + nx * z + layer * y;
+        if g.solid[i] != 0 { continue; }
+        let (mut sum, mut ties) = (0.0f32, 0.0f32);
+        for (j, inside) in [(i + 1, x + 1 < nx), (i.wrapping_sub(1), x > 0), (i + layer, y + 1 < ny), (i.wrapping_sub(layer), y > 0), (i + nx, z + 1 < nz), (i.wrapping_sub(nx), z > 0)] {
+            if !inside { ties += 1.0; } else if g.solid[j] == 0 { sum += g.p[j]; ties += 1.0; }
+        }
+        let asked = h2 * g.rhs[i];
+        left += ((sum - ties * g.p[i] - asked) as f64).powi(2);
+        all += (asked as f64).powi(2);
+    } } }
+    (left / all.max(1.0e-30)).sqrt()
+}
+
+#[test]
+fn the_pressure_is_found_in_boxes_that_do_not_halve_evenly() {
+    // the grids under the solver's own are each twice as coarse as the one before; where a box does not divide by
+    // two, four and eight, their last cells stick out past its edge (in the game the part that is computed is such a
+    // box, of whatever size the gas happens to take up)
+    for (bx, by, bz, cpb) in [(11, 13, 9, 3), (9, 11, 7, 3), (13, 9, 5, 3), (7, 9, 11, 2), (5, 7, 9, 4)] {
+        let mut g = ground(bx, by, bz, cpb, 1);
+        g.set_block(bx / 2, 2, bz / 2, false, kind::CAMPFIRE, 1.0);
+        let mut worst = 0.0f64;
+        for step in 0..(4.0 / DT) as usize {
+            g.step(DT, &[]);
+            if step > 30 { worst = worst.max(left_undone(&g)); }
+        }
+        assert!(all_finite(&g), "a box of {} x {} x {} blocks, {} cells to the block", bx, by, bz, cpb);
+        assert!(worst < 0.15, "a box of {} x {} x {} blocks, {} cells to the block: the pressure left {:.3} of the piling up undone", bx, by, bz, cpb, worst);
+    }
+}
+
 #[test]
 fn the_picture_of_the_grid_holds_what_the_grid_holds() {
     let mut g = ground(6, 6, 6, 2, 2);

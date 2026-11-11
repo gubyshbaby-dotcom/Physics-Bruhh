@@ -143,8 +143,9 @@ ivec3 gasLevelCells(int level) {
     return (n + (1 << level) - 1) >> level;
 }
 
-// How strongly a cell at the edge of what is computed is tied to the zero beyond it: that zero is one coarse cell
-// beyond the last, which for a grid `size` times as coarse is nearer than its own cells are to each other.
+// How strongly a whole cell at the edge of what is computed is tied to the zero beyond it: that zero is one coarse
+// cell beyond the last, which for a grid `size` times as coarse is nearer than its own cells are to each other.
+// (gas_up.fsh lets a level's answer fall off to that zero by it.)
 float gasLevelEdge(int level) {
     float size = float(1 << level);
     return 2.0 * size / (size + 1.0);
@@ -156,20 +157,36 @@ float gasLevelCell2(int level) {
     return size * size;
 }
 
-// x: the sum of the pressures of those of a cell's six neighbours that count, y: how many count. A block does not
-// (nothing is pushed into it); beyond the cells in use the pressure is zero, and that counts the level's edge.
+// x: the pressures of a cell's six neighbours, each times how strongly the cell is tied to it, summed; y: the sum of
+// the ties. A block is not tied to (nothing is pushed into it); beyond the cells in use the pressure is zero.
+//
+// How strong a tie is goes by what the cells really cover (Shape::tie in gas.rs): where the part that is computed
+// does not divide evenly, the last cell of a level under the coarse grid sticks out past the edge and covers fewer
+// of the coarse grid's cells than the rest; and the zero beyond the edge is one coarse cell out, which for a cell of
+// such a level is nearer than its own neighbours are. A tie is the face two cells share (as a share of a whole face)
+// over how far apart their middles are (in cells): 1 between two whole cells, and on the coarse grid itself always.
 // `cell` is counted from the first cell in use.
 vec2 gasTies(sampler2D pressure, int level, ivec3 cell) {
     vec4 grid = gasLevelGrid(level);
     ivec3 from = gasLevelFrom(level), cells = gasLevelCells(level);
-    float edge = gasLevelEdge(level);
+    int size = 1 << level;
+    float s = float(size);
+    // how many of the coarse grid's cells this one covers along each axis
+    ivec3 all = gasHigh(GasCoarse) - gasLow(GasCoarse) + 1;
+    vec3 here = vec3(min(all - cell * size, ivec3(size)));
     vec2 ties = vec2(0.0);
     for (int i = 0; i < 6; i++) {
+        int axis = i >> 1;
         ivec3 n = cell;
-        n[i >> 1] += (i & 1) == 0 ? 1 : -1;
-        if (any(lessThan(n, ivec3(0))) || any(greaterThanEqual(n, cells))) { ties.y += edge; continue; }
+        n[axis] += (i & 1) == 0 ? 1 : -1;
+        float face = here[(axis + 1) % 3] * here[(axis + 2) % 3] / (s * s);
+        if (any(lessThan(n, ivec3(0))) || any(greaterThanEqual(n, cells))) { ties.y += face * 2.0 * s / (here[axis] + 1.0); continue; }
         float v = texelFetch(pressure, gasPixel(grid, from + n), 0).r;
-        if (v > GAS_WALL_TEST) ties += vec2(v, 1.0);
+        if (v > GAS_WALL_TEST) {
+            float there = float(min(all[axis] - n[axis] * size, size));
+            float tie = face * 2.0 * s / (here[axis] + there);
+            ties += vec2(v * tie, tie);
+        }
     }
     return ties;
 }

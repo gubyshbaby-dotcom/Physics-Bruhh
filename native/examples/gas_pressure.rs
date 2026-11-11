@@ -367,17 +367,19 @@ impl Tried {
 }
 
 fn scene(name: &str, cpb: usize) -> Gas {
-    let (bx, by, bz) = (12, 16, 12);
+    // BOX=x,y,z: a box of another size (sizes that do not halve evenly are the hard ones for the grids under the solver's)
+    let size: Vec<usize> = std::env::var("BOX").ok().map(|s| s.split(',').filter_map(|v| v.parse().ok()).collect()).unwrap_or_default();
+    let (bx, by, bz) = if size.len() == 3 { (size[0], size[1], size[2]) } else { (12, 16, 12) };
     let mut g = Gas::new(bx, by, bz, cpb, 1);
     for z in 0..bz { for x in 0..bx { for y in 0..2 { g.set_block(x, y, z, true, 0, 0.0); } } }
     match name {
-        "fire" => g.set_block(6, 2, 6, false, kind::FIRE, 1.0),
+        "fire" => g.set_block(bx / 2, 2, bz / 2, false, kind::FIRE, 1.0),
         "room" => {
             g.set_block(6, 2, 6, false, kind::CAMPFIRE, 1.0);
             for z in 3..10 { for x in 3..10 { g.set_block(x, 7, z, true, 0, 0.0); } }
             for y in 2..7 { for x in 3..10 { g.set_block(x, y, 9, true, 0, 0.0); } }
         }
-        _ => g.set_block(6, 2, 6, false, kind::CAMPFIRE, 1.0),
+        _ => g.set_block(bx / 2, 2, bz / 2, false, kind::CAMPFIRE, 1.0),
     }
     g
 }
@@ -426,6 +428,8 @@ fn main() {
     let cpb: usize = std::env::var("CPB").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
     let rate: f32 = std::env::var("RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(60.0);
     let guard = std::env::var("GUARD").is_ok();
+    // EVERY=n: the exact pressure is found (to measure against) every n-th step
+    let every: usize = std::env::var("EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
     let only: Option<Vec<String>> = std::env::var("ONLY").ok().map(|s| s.split(',').map(str::to_string).collect());
     let guesses = [Guess::Zero, Guess::Last, Guess::Scaled, Guess::Ahead(1.0), Guess::Ahead(0.5), Guess::Carried, Guess::Split(2, 1.0), Guess::Split(4, 1.0), Guess::Split(4, 0.5), Guess::SplitStill(4, 1.0)];
     // ROUNDS=4,8,16 for plain rounds; STEPS=cycles:before:after:levels,... for the solve in steps
@@ -456,7 +460,7 @@ fn main() {
                     if t >= 1.5 && t < 1.62 { blobs.push(Blob { pos: c, radius: 2.4, fuel: 14.0, smoke: 6.0, heat: 1.4, soul: 0.0, vel: [0.0; 3], expand: 60.0 }); }
                     else if t >= 1.62 && t < 2.0 { blobs.push(Blob { pos: c, radius: 2.0, fuel: 0.0, smoke: 3.0, heat: 0.0, soul: 0.0, vel: [0.0; 3], expand: 0.0 }); }
                 }
-                let measure = t > 0.5 && step % 4 == 0;
+                let measure = t > 0.5 && step % every == 0;
                 g.step_with(dt, &blobs, &mut |g: &mut Gas, dt: f32| tried.solve(g, dt, measure));
                 t += dt;
                 step += 1;
