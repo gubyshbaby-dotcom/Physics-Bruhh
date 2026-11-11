@@ -53,7 +53,7 @@ import physicsbruhh.sim.GasParams;
 final class GasDraw {
     /** Blobs the solvers take at once ({@code GAS_BLOBS} in gas.glsl). */
     static final int BLOBS = 16;
-    private static final int GRID_BYTES = (10 + BLOBS * 3) * 16, VIEW_BYTES = 64 + 4 * 16;
+    private static final int GRID_BYTES = (12 + BLOBS * 3) * 16, VIEW_BYTES = 64 + 4 * 16;
 
     static final BindGroupLayout GRID = BindGroupLayout.builder().withUniform("GasGrid", UniformType.UNIFORM_BUFFER).build();
     private static final BindGroupLayout VIEW = BindGroupLayout.builder().withUniform("GasView", UniformType.UNIFORM_BUFFER).build();
@@ -126,13 +126,21 @@ final class GasDraw {
     private static GasBox worldBox;
     /** Read back from the info texture: smoke in all, heat in all, the hottest, then the smoke in each layer of blocks. */
     private static volatile float[] sums = new float[0];
+    /** Read back with them: where in the world there is gas to be seen (blocks: the least corner, then the corner just past the greatest; all zero if there is none). */
+    private static volatile int[] bounds;
+    /** Steps since that was last read. */
+    private static volatile int boundsAge;
     private static GpuBuffer readBuffer;
     private static boolean reading;
     private static int frame;
     static volatile int drawn, readBacks;
 
-    /** What the passes are told about the grid and this step ({@code GasGrid} in gas.glsl). {@code blobs}: twelve numbers each, places in blocks from the corner of the box. */
-    static GpuBuffer writeGrid(GasBox box, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount) {
+    /**
+     * What the passes are told about the grid and this step ({@code GasGrid} in gas.glsl). {@code blobs}: twelve numbers
+     * each, places in blocks from the corner of the box. {@code part}: the part of the box that is computed this step,
+     * in blocks from its corner (the least corner, then the corner just past the greatest).
+     */
+    static GpuBuffer writeGrid(GasBox box, float dt, float time, int movedX, int movedY, int movedZ, float[] blobs, int blobCount, int[] part) {
         if (gridBuffer == null) gridBuffer = new MappableRingBuffer(() -> "Gas grid", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, GRID_BYTES);
         float[] p = GasParams.values();
         gridBuffer.rotate();
@@ -146,7 +154,9 @@ final class GasDraw {
             for (int i = 0; i < 16; i++) out.put(20 + i, p[i]);
             out.put(33, box.rounds);
             out.put(36, p[GasParams.MOST_HEAT]).put(37, p[GasParams.MOST_FUEL]).put(38, 0.0F).put(39, 0.0F);
-            for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(40 + i, blobs[i]);
+            out.put(40, part[0]).put(41, part[1]).put(42, part[2]).put(43, 0.0F);
+            out.put(44, part[3]).put(45, part[4]).put(46, part[5]).put(47, 0.0F);
+            for (int i = 0; i < Math.min(blobCount, BLOBS) * GasParams.BLOB_FLOATS; i++) out.put(48 + i, blobs[i]);
         }
         return gridBuffer.currentBuffer();
     }
@@ -173,8 +183,11 @@ final class GasDraw {
         worldView = null; worldTexture = null; worldBox = null;
     }
 
-    /** After a step: what each block of the box holds. Every so often the result is read back ({@link #sums}). */
-    static void where(CommandEncoder encoder, GasBox box, GpuBuffer grid, GpuTextureView gas, boolean coded) {
+    /**
+     * After a step: what each block of the box holds. Every so often the result is read back ({@link #sums},
+     * {@link #bounds}). {@code ox, oy, oz}: the corner of the box in the world.
+     */
+    static void where(CommandEncoder encoder, GasBox box, GpuBuffer grid, GpuTextureView gas, boolean coded, int ox, int oy, int oz) {
         if (info == null || !box.same(infoBox)) {
             if (info != null) info.destroyBuffers();
             info = new TextureTarget("Gas: what each block holds", box.blockW, box.blockH, GpuFormat.RGBA16_FLOAT, null);
@@ -187,10 +200,11 @@ final class GasDraw {
             pass.setUniform("GasSampler", gas, nearest);
             pass.draw(3, 1, 0, 0);
         }
-        if (!reading && ++frame % 6 == 0) readBack(encoder, box);
+        boundsAge++;
+        if (!reading && ++frame % 6 == 0) readBack(encoder, box, ox, oy, oz);
     }
 
-    private static void readBack(CommandEncoder encoder, GasBox box) {
+    private static void readBack(CommandEncoder encoder, GasBox box, int ox, int oy, int oz) {
         final long bytes = (long) box.blockW * box.blockH * 8L;
         try {
             if (readBuffer == null || readBuffer.size() != bytes) {
@@ -203,17 +217,30 @@ final class GasDraw {
                 try (GpuBufferSlice.MappedView view = buffer.map(true, false)) {
                     ShortBuffer in = view.data().order(ByteOrder.nativeOrder()).asShortBuffer();
                     float[] out = new float[3 + box.by];
+                    int x0 = box.bx, y0 = box.by, z0 = box.bz, x1 = -1, y1 = -1, z1 = -1;
                     for (int y = 0; y < box.by; y++) {
                         for (int z = 0; z < box.bz; z++) {
                             for (int x = 0; x < box.bx; x++) {
                                 int at = box.blockPixel(x, y, z);
-                                float hottest = Float.float16ToFloat(in.get(at + 1)), smoke = Float.float16ToFloat(in.get(at + 2)), heat = Float.float16ToFloat(in.get(at + 3));
+                                // (the first two are zero where there is too little to be seen: gas_where.fsh)
+                                short thickest = in.get(at), hot = in.get(at + 1);
+                                float hottest = Float.float16ToFloat(hot), smoke = Float.float16ToFloat(in.get(at + 2)), heat = Float.float16ToFloat(in.get(at + 3));
                                 out[0] += smoke; out[1] += heat; out[3 + y] += smoke;
                                 if (hottest > out[2]) out[2] = hottest;
+                                if ((thickest & 0x7FFF) != 0 || (hot & 0x7FFF) != 0) {
+                                    if (x < x0) x0 = x;
+                                    if (y < y0) y0 = y;
+                                    if (z < z0) z0 = z;
+                                    if (x > x1) x1 = x;
+                                    if (y > y1) y1 = y;
+                                    if (z > z1) z1 = z;
+                                }
                             }
                         }
                     }
                     sums = out;
+                    bounds = x1 < 0 ? new int[6] : new int[] { ox + x0, oy + y0, oz + z0, ox + x1 + 1, oy + y1 + 1, oz + z1 + 1 };
+                    boundsAge = 0;
                     readBacks++;
                 } catch (Throwable t) {
                     PhysicsBruhh.LOGGER.warn("Gas: the sums could not be read back: {}", t.toString());
@@ -232,8 +259,17 @@ final class GasDraw {
         return sums;
     }
 
+    /**
+     * Where in the world there is gas to be seen: blocks, the least corner, then the corner just past the greatest
+     * (all zero if there is none). Null while that is not known: nothing read back yet, or not for a long while.
+     */
+    static int[] bounds() {
+        return boundsAge > 40 ? null : bounds;
+    }
+
     static void forget() {
         sums = new float[0];
+        bounds = null;
     }
 
     /** The gas into the picture. {@code ox, oy, oz}: the corner of the box in the world. */
@@ -348,5 +384,6 @@ final class GasDraw {
         closeWorld();
         if (readBuffer != null && !reading) { readBuffer.close(); readBuffer = null; }
         sums = new float[0];
+        bounds = null;
     }
 }

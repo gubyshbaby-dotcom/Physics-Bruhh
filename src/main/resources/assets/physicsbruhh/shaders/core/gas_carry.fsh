@@ -16,7 +16,6 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     ivec3 c = gasCell(GasFine, ivec2(gl_FragCoord.xy));
     int fpb = int(GasStep.z * GasStep.w);
-    if (c.y < 0 || gasBlock(WorldSampler, c / fpb).r > 0.5) { fragColor = vec4(0.0); return; }
-    vec3 moved = GasMoved.xyz * float(fpb);
-    fragColor = gasAt(GasSampler, GasFine, gasCameFrom(VelSampler, WorldSampler, c) + moved);
+    if (c.y < 0 || !gasComputed(GasFine, c) || gasBlock(WorldSampler, c / fpb).r > 0.5) { fragColor = vec4(0.0); return; }
+    fragColor = gasAtWas(GasSampler, GasFine, gasCameFrom(VelSampler, WorldSampler, c));
 }

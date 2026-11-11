@@ -16,22 +16,22 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
     ivec3 c = gasCell(GasCoarse, ivec2(gl_FragCoord.xy));
-    if (c.y < 0) { fragColor = vec4(0.0); return; }
+    if (c.y < 0 || !gasComputed(GasCoarse, c)) { fragColor = vec4(0.0); return; }
     int cpb = int(GasStep.z);
     if (gasBlock(WorldSampler, c / cpb).r > 0.5) { fragColor = vec4(GAS_WALL, 0.0, 0.0, 0.0); return; }
     float dt = GasStep.x;
     ivec3 moved = ivec3(GasMoved.xyz) * cpb;
 
-    // a neighbour inside a block does not move (its velocity is kept at zero); beyond the edge of the box the gas moves as it does here
-    float d = (gasFetch(VelSampler, GasCoarse, c + ivec3(1, 0, 0)).x - gasFetch(VelSampler, GasCoarse, c - ivec3(1, 0, 0)).x
-             + gasFetch(VelSampler, GasCoarse, c + ivec3(0, 1, 0)).y - gasFetch(VelSampler, GasCoarse, c - ivec3(0, 1, 0)).y
-             + gasFetch(VelSampler, GasCoarse, c + ivec3(0, 0, 1)).z - gasFetch(VelSampler, GasCoarse, c - ivec3(0, 0, 1)).z) * 0.5 * GasStep.z;
+    // a neighbour inside a block does not move (its velocity is kept at zero); beyond the edge of what is computed the gas moves as it does here
+    float d = (gasFetchNear(VelSampler, GasCoarse, c + ivec3(1, 0, 0)).x - gasFetchNear(VelSampler, GasCoarse, c - ivec3(1, 0, 0)).x
+             + gasFetchNear(VelSampler, GasCoarse, c + ivec3(0, 1, 0)).y - gasFetchNear(VelSampler, GasCoarse, c - ivec3(0, 1, 0)).y
+             + gasFetchNear(VelSampler, GasCoarse, c + ivec3(0, 0, 1)).z - gasFetchNear(VelSampler, GasCoarse, c - ivec3(0, 0, 1)).z) * 0.5 * GasStep.z;
 
     // gas that burns takes more room; an explosion makes a lot of gas at once
     vec3 p = vec3(c) + 0.5;
     float made = 0.0;
     if (GasC.w > 0.0) {
-        vec4 g = gasAt(GasSampler, GasFine, (p + vec3(moved)) * GasStep.w);
+        vec4 g = gasAtWas(GasSampler, GasFine, p * GasStep.w);
         if (g.g > GasB.x) made += GasC.w * g.b * (1.0 - exp(-GasB.y * dt)) / dt;
     }
     int blobs = int(GasMoved.w);

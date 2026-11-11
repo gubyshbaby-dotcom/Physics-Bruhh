@@ -15,7 +15,8 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
     ivec3 b = gasCell(GasBlocks, ivec2(gl_FragCoord.xy));
-    if (b.y < 0) { fragColor = vec4(0.0); return; }
+    // (blocks outside the part of the box that is computed hold nothing)
+    if (b.y < 0 || any(lessThan(b, ivec3(GasFrom.xyz))) || any(greaterThanEqual(b, ivec3(GasTo.xyz)))) { fragColor = vec4(0.0); return; }
     int fpb = int(GasStep.z * GasStep.w);
     ivec3 from = b * fpb;
     ivec3 last = ivec3(GasFine.xyz) - 1;

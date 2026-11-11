@@ -6,7 +6,7 @@
 vec3 gasCameFrom(sampler2D velocity, sampler2D world, ivec3 cell) {
     float fpb = GasStep.z * GasStep.w;
     vec3 p = vec3(cell) + 0.5;
-    vec3 u = gasAt(velocity, GasCoarse, p / GasStep.w).xyz;
+    vec3 u = gasAtNear(velocity, GasCoarse, p / GasStep.w).xyz;
     vec3 q = p - GasStep.x * u * fpb;
     ivec3 block = ivec3(floor(max(q, vec3(0.0)) / fpb));
     if (all(lessThan(block, ivec3(GasBlocks.xyz))) && gasBlock(world, block).r > 0.5) return p;

@@ -58,17 +58,31 @@ final class GasGpu {
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES);
     }
 
-    private static RenderPipeline step(String name, GpuFormat format, String... textures) {
-        return pass(name, name, textures).withColorTargetState(new ColorTargetState(Optional.empty(), format, ColorTargetState.WRITE_ALL)).build();
+    /**
+     * A step of the solver: drawn not over the whole texture of its grid but over one rectangle for each layer of the
+     * part of the box that is computed ({@code shaders/core/gas_region.vsh}); the rest of the texture is cleared.
+     */
+    private static RenderPipeline step(String name, GpuFormat format, boolean fine, String... textures) {
+        RenderPipeline.Builder builder = RenderPipeline.builder()
+                .withLocation(id("pipeline/" + name))
+                .withVertexShader(id("core/gas_region"))
+                .withFragmentShader(id("core/" + name))
+                .withBindGroupLayout(GasDraw.GRID)
+                .withBindGroupLayout(samplers(textures))
+                .withPrimitiveTopology(PrimitiveTopology.QUADS)
+                .withCull(false)
+                .withColorTargetState(new ColorTargetState(Optional.empty(), format, ColorTargetState.WRITE_ALL));
+        if (fine) builder.withShaderDefine("FINE");
+        return builder.build();
     }
 
-    private static final RenderPipeline SPIN = step("gas_spin", GpuFormat.RGBA16_FLOAT, "VelSampler");
-    private static final RenderPipeline VELOCITY = step("gas_velocity", GpuFormat.RGBA16_FLOAT, "VelSampler", "SpinSampler", "GasSampler", "WorldSampler");
-    private static final RenderPipeline DIVERGENCE = step("gas_divergence", GpuFormat.RG16_FLOAT, "VelSampler", "GasSampler", "PressureSampler", "WorldSampler");
-    private static final RenderPipeline PRESSURE = step("gas_pressure", GpuFormat.RG16_FLOAT, "PressureSampler");
-    private static final RenderPipeline PROJECT = step("gas_project", GpuFormat.RGBA16_FLOAT, "VelSampler", "PressureSampler");
-    private static final RenderPipeline CARRY = step("gas_carry", GpuFormat.RGBA16_FLOAT, "GasSampler", "VelSampler", "WorldSampler");
-    private static final RenderPipeline BURN = step("gas_burn", GpuFormat.RGBA16_FLOAT, "CarriedSampler", "GasSampler", "VelSampler", "WorldSampler");
+    private static final RenderPipeline SPIN = step("gas_spin", GpuFormat.RGBA16_FLOAT, false, "VelSampler");
+    private static final RenderPipeline VELOCITY = step("gas_velocity", GpuFormat.RGBA16_FLOAT, false, "VelSampler", "SpinSampler", "GasSampler", "WorldSampler");
+    private static final RenderPipeline DIVERGENCE = step("gas_divergence", GpuFormat.RG16_FLOAT, false, "VelSampler", "GasSampler", "PressureSampler", "WorldSampler");
+    private static final RenderPipeline PRESSURE = step("gas_pressure", GpuFormat.RG16_FLOAT, false, "PressureSampler");
+    private static final RenderPipeline PROJECT = step("gas_project", GpuFormat.RGBA16_FLOAT, false, "VelSampler", "PressureSampler");
+    private static final RenderPipeline CARRY = step("gas_carry", GpuFormat.RGBA16_FLOAT, true, "GasSampler", "VelSampler", "WorldSampler");
+    private static final RenderPipeline BURN = step("gas_burn", GpuFormat.RGBA16_FLOAT, true, "CarriedSampler", "GasSampler", "VelSampler", "WorldSampler");
     private static final RenderPipeline[] ALL = { SPIN, VELOCITY, DIVERGENCE, PRESSURE, PROJECT, CARRY, BURN };
 
     static void register(RegisterRenderPipelinesEvent event) {
@@ -124,29 +138,38 @@ final class GasGpu {
         return gas[g].getColorTextureView();
     }
 
-    private static void run(CommandEncoder encoder, String name, RenderPipeline pipeline, TextureTarget to, GpuBuffer grid, Consumer<RenderPass> textures) {
-        try (RenderPass pass = encoder.createRenderPass(() -> name, to.getColorTextureView(), Optional.empty())) {
+    /** One pass: the whole texture cleared, then a rectangle for each of {@code layers} layers of the part that is computed. */
+    private static void run(CommandEncoder encoder, String name, RenderPipeline pipeline, TextureTarget to, GpuBuffer grid, int layers, Consumer<RenderPass> textures) {
+        RenderSystem.AutoStorageIndexBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS);
+        GpuBuffer indexBuffer = indices.getBuffer(layers * 6);
+        try (RenderPass pass = encoder.createRenderPass(() -> name, to.getColorTextureView(), Optional.of(NOTHING))) {
             pass.setPipeline(compiled(pipeline));
             pass.setUniform("GasGrid", grid);
             textures.accept(pass);
-            pass.draw(3, 1, 0, 0);
+            pass.setVertexBuffer(0, null);
+            pass.setIndexBuffer(indexBuffer, indices.type());
+            pass.drawIndexed(layers * 6, 1, 0, 0, 0);
         }
     }
 
-    /** One step. The grid's numbers (how long the step is, how far the box has moved, the blobs) are in {@code grid}. */
-    void step(CommandEncoder encoder, GpuBuffer grid, GpuTextureView world) {
+    /**
+     * One step. The grid's numbers (how long the step is, how far the box has moved, the blobs, the part of the box
+     * that is computed) are in {@code grid}; {@code layers} is how many layers of blocks that part is high.
+     */
+    void step(CommandEncoder encoder, GpuBuffer grid, GpuTextureView world, int layers) {
+        final int coarse = layers * box.cpb, fine = coarse * box.ratio;
         GpuSampler nearest = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST), linear = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
         final GpuTextureView was = velocity[v].getColorTextureView(), pushed = velocity[1 - v].getColorTextureView();
         final GpuTextureView before = gas[g].getColorTextureView(), carried = gas[(g + 1) % 3].getColorTextureView();
-        run(encoder, "Gas: spin", SPIN, spin, grid, pass -> pass.setUniform("VelSampler", was, nearest));
-        run(encoder, "Gas: velocity", VELOCITY, velocity[1 - v], grid, pass -> {
+        run(encoder, "Gas: spin", SPIN, spin, grid, coarse, pass -> pass.setUniform("VelSampler", was, nearest));
+        run(encoder, "Gas: velocity", VELOCITY, velocity[1 - v], grid, coarse, pass -> {
             pass.setUniform("VelSampler", was, linear);
             pass.setUniform("SpinSampler", spin.getColorTextureView(), nearest);
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("WorldSampler", world, nearest);
         });
         final GpuTextureView lastPressure = pressure[p].getColorTextureView();
-        run(encoder, "Gas: divergence", DIVERGENCE, pressure[1 - p], grid, pass -> {
+        run(encoder, "Gas: divergence", DIVERGENCE, pressure[1 - p], grid, coarse, pass -> {
             pass.setUniform("VelSampler", pushed, nearest);
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("PressureSampler", lastPressure, nearest);
@@ -156,23 +179,23 @@ final class GasGpu {
         int at = 1 - p;
         for (int round = 0; round < box.rounds; round++) {
             final GpuTextureView from = pressure[at].getColorTextureView();
-            run(encoder, "Gas: pressure", PRESSURE, pressure[1 - at], grid, pass -> pass.setUniform("PressureSampler", from, nearest));
+            run(encoder, "Gas: pressure", PRESSURE, pressure[1 - at], grid, coarse, pass -> pass.setUniform("PressureSampler", from, nearest));
             at = 1 - at;
         }
         p = at;
         final GpuTextureView solved = pressure[p].getColorTextureView();
-        run(encoder, "Gas: project", PROJECT, velocity[v], grid, pass -> {
+        run(encoder, "Gas: project", PROJECT, velocity[v], grid, coarse, pass -> {
             pass.setUniform("VelSampler", pushed, nearest);
             pass.setUniform("PressureSampler", solved, nearest);
         });
         // velocity[v] holds the new velocity again
         final GpuTextureView now = velocity[v].getColorTextureView();
-        run(encoder, "Gas: carry", CARRY, gas[(g + 1) % 3], grid, pass -> {
+        run(encoder, "Gas: carry", CARRY, gas[(g + 1) % 3], grid, fine, pass -> {
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("VelSampler", now, linear);
             pass.setUniform("WorldSampler", world, nearest);
         });
-        run(encoder, "Gas: burn", BURN, gas[(g + 2) % 3], grid, pass -> {
+        run(encoder, "Gas: burn", BURN, gas[(g + 2) % 3], grid, fine, pass -> {
             pass.setUniform("CarriedSampler", carried, linear);
             pass.setUniform("GasSampler", before, nearest);
             pass.setUniform("VelSampler", now, linear);

@@ -21,6 +21,8 @@ layout(std140) uniform GasGrid {
     vec4 GasC;        // smoke_fade, drag, confine, swell
     vec4 GasD;        // unrest, rounds, edge, most_smoke
     vec4 GasE;        // most_heat, most_fuel
+    vec4 GasFrom;     // the part of the box that is computed this step, in blocks: its least corner ...
+    vec4 GasTo;       // ... and the corner just past its greatest (the rest of the box is empty and is left alone)
     vec4 GasBlob[GAS_BLOBS * 3];   // a blob: centre (blocks from the corner of the box) and radius; fuel, smoke, heat, soul; velocity and how much gas it makes
 };
 
@@ -61,6 +63,50 @@ vec4 gasAt(sampler2D field, vec4 grid, vec3 at) {
     vec2 a = (vec2(mod(low, grid.w), floor(low / grid.w)) * n.xz + at.xz) / size;
     vec2 b = (vec2(mod(high, grid.w), floor(high / grid.w)) * n.xz + at.xz) / size;
     return mix(textureLod(field, a, 0.0), textureLod(field, b, 0.0), at.y - 0.5 - low);
+}
+
+// ---- the part of the box that is computed. Gas is seldom everywhere: the solver's passes draw only over the cells of
+// a smaller box round what there is, and to them that box is the world: beyond it there is nothing to read.
+
+// The least and the greatest cell of a grid that are computed this step.
+ivec3 gasLow(vec4 grid) {
+    return ivec3(GasFrom.xyz) * int(grid.x / GasBlocks.x);
+}
+
+ivec3 gasHigh(vec4 grid) {
+    return ivec3(GasTo.xyz) * int(grid.x / GasBlocks.x) - 1;
+}
+
+bool gasComputed(vec4 grid, ivec3 cell) {
+    return all(greaterThanEqual(cell, gasLow(grid))) && all(lessThanEqual(cell, gasHigh(grid)));
+}
+
+// A cell's own value as this step leaves it; cells that are not computed answer with the nearest one that is.
+vec4 gasFetchNear(sampler2D field, vec4 grid, ivec3 cell) {
+    return texelFetch(field, gasPixel(grid, clamp(cell, gasLow(grid), gasHigh(grid))), 0);
+}
+
+// The same for a value between cells.
+vec4 gasAtNear(sampler2D field, vec4 grid, vec3 at) {
+    vec3 n = grid.xyz;
+    ivec3 lo = gasLow(grid), hi = gasHigh(grid);
+    at = clamp(at, vec3(lo) + 0.5, vec3(hi) + 0.5);
+    float low = floor(at.y - 0.5);
+    float high = min(low + 1.0, float(hi.y));
+    vec2 size = vec2(textureSize(field, 0));
+    vec2 a = (vec2(mod(low, grid.w), floor(low / grid.w)) * n.xz + at.xz) / size;
+    vec2 b = (vec2(mod(high, grid.w), floor(high / grid.w)) * n.xz + at.xz) / size;
+    return mix(textureLod(field, a, 0.0), textureLod(field, b, 0.0), at.y - 0.5 - low);
+}
+
+// What the last step left, which was written before the box last moved: the same places, counted from where the box was.
+vec4 gasFetchWas(sampler2D field, vec4 grid, ivec3 cell) {
+    ivec3 moved = ivec3(GasMoved.xyz) * int(grid.x / GasBlocks.x);
+    return gasFetch(field, grid, clamp(cell, gasLow(grid), gasHigh(grid)) + moved);
+}
+
+vec4 gasAtWas(sampler2D field, vec4 grid, vec3 at) {
+    return gasAt(field, grid, clamp(at, vec3(gasLow(grid)) + 0.5, vec3(gasHigh(grid)) + 0.5) + GasMoved.xyz * (grid.x / GasBlocks.x));
 }
 
 // What a block is to the gas: x 1 if it is solid, y its kind (see gas.rs), z its strength (1 is the usual).

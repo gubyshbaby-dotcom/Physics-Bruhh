@@ -36,7 +36,7 @@
   "commands.physicsbruhh.gas.solver.auto": "Огонь и дым считаются на видеокарте, если она это умеет",
   "commands.physicsbruhh.gas.solver.gpu": "Огонь и дым считаются на видеокарте, если она это умеет",
   "commands.physicsbruhh.gas.solver.cpu": "Огонь и дым считает ядро на Rust на процессоре (грубее)",
-  "commands.physicsbruhh.gas.info": "Огонь и дым: считает %s, сетка %s x %s x %s ячеек (%s млн), шаг занимает %s мс, отрисовка %s мс; источников: блоков %s, существ %s",
+  "commands.physicsbruhh.gas.info": "Огонь и дым: считает %s, сетка %s x %s x %s ячеек (%s млн), шаг занимает %s мс, отрисовка %s мс; источников: блоков %s, существ %s; сейчас считается %s%% коробки",
   "commands.physicsbruhh.gas.info.rule": "Огонь и дым здесь не газ: игровое правило physicsbruhh:physical_gas выключено",
   "commands.physicsbruhh.gas.info.broken": "Газ на этой машине не заработал (подробности в журнале)",
   "commands.physicsbruhh.gas.info.idle": "Огонь и дым: сейчас считать нечего (%s)",

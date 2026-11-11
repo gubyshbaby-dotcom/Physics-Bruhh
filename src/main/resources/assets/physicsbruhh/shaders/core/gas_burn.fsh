@@ -25,7 +25,7 @@ void main() {
     float fpbf = GasStep.z * GasStep.w;
     int fpb = int(fpbf);
     ivec3 inBlock = c / fpb;
-    vec4 block = c.y < 0 ? vec4(1.0) : gasBlock(WorldSampler, inBlock);
+    vec4 block = c.y < 0 || !gasComputed(GasFine, c) ? vec4(1.0) : gasBlock(WorldSampler, inBlock);
     if (block.r > 0.5) { fragColor = vec4(0.0); return; }
     float dt = GasStep.x;
     float time = GasStep.y;
@@ -37,9 +37,9 @@ void main() {
         // within what the cells the gas came from held
         ivec3 movedCells = ivec3(GasMoved.xyz) * fpb;
         vec3 q = gasCameFrom(VelSampler, WorldSampler, c);
-        vec4 back = gasAt(CarriedSampler, GasFine, 2.0 * p - q);
-        vec4 was = gasFetch(GasSampler, GasFine, c + movedCells);
-        vec3 at = clamp(q + vec3(movedCells), vec3(0.5), GasFine.xyz - 0.5) - 0.5;
+        vec4 back = gasAtNear(CarriedSampler, GasFine, 2.0 * p - q);
+        vec4 was = gasFetchWas(GasSampler, GasFine, c);
+        vec3 at = clamp(clamp(q, vec3(gasLow(GasFine)) + 0.5, vec3(gasHigh(GasFine)) + 0.5) + vec3(movedCells), vec3(0.5), GasFine.xyz - 0.5) - 0.5;
         ivec3 a = ivec3(floor(at));
         ivec3 b = min(a + 1, ivec3(GasFine.xyz) - 1);
         vec4 lo = gasFetch(GasSampler, GasFine, a), hi = lo, w;
@@ -102,8 +102,8 @@ void main() {
         }
     }
 
-    // nothing at the edge of the box: gas that leaves it is gone, and is not seen to be cut off
-    ivec3 rim = min(c, ivec3(GasFine.xyz) - 1 - c);
+    // nothing at the edge of what is computed: gas that gets there is gone, and is not seen to be cut off
+    ivec3 rim = min(c - gasLow(GasFine), gasHigh(GasFine) - c);
     float edge = min(float(min(rim.x, min(rim.y, rim.z))) / GasD.z, 1.0);
     heat = clamp(heat * edge, 0.0, GasE.x);
     fuel = clamp(fuel * edge, 0.0, GasE.y);

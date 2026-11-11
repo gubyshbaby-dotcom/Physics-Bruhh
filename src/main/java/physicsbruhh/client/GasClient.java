@@ -96,6 +96,8 @@ final class GasClient {
     private static ByteBuffer picture;
     private static boolean pictureChanged;
     private static int[] sourcesInColumn = new int[0];
+    /** For each column along x: between which heights and how far along z the blocks that feed the gas are (if there are any). */
+    private static int[] sourcesFromY = new int[0], sourcesToY = new int[0], sourcesFromZ = new int[0], sourcesToZ = new int[0];
     private static int scanAt;
     /** Blocks in the box that feed the gas. */
     static volatile int sources;
@@ -131,7 +133,7 @@ final class GasClient {
     static void onBlast(GasRules.Blast blast) {
         lastBlastX = blast.x(); lastBlastY = blast.y(); lastBlastZ = blast.z(); lastBlastPower = blast.power(); lastBlast = System.nanoTime();
         synchronized (BLASTS) {
-            if (BLASTS.size() < 8) BLASTS.add(new Blast(blast.x(), blast.y(), blast.z(), blast.power(), System.nanoTime()));
+            if (BLASTS.size() < 32) BLASTS.add(new Blast(blast.x(), blast.y(), blast.z(), blast.power(), System.nanoTime()));
         }
         blastsSeen++;
     }
@@ -208,6 +210,7 @@ final class GasClient {
                 plain = new byte[box.bx * box.by * box.bz * 4];
                 picture = ByteBuffer.allocateDirect(box.blockW * box.blockH * 4).order(ByteOrder.nativeOrder());
                 sourcesInColumn = new int[box.bx];
+                sourcesFromY = new int[box.bx]; sourcesToY = new int[box.bx]; sourcesFromZ = new int[box.bx]; sourcesToZ = new int[box.bx];
             }
             Vec3 eye = mc.player.getEyePosition();
             int wantX = (int) Math.floor(eye.x) - box.bx / 2, wantY = (int) Math.floor(eye.y) - Math.round(box.by * 0.35F), wantZ = (int) Math.floor(eye.z) - box.bz / 2;
@@ -243,7 +246,7 @@ final class GasClient {
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         final int bx = box.bx, by = box.by, bz = box.bz;
         for (int x = from; x < to; x++) {
-            int found = 0;
+            int found = 0, fromY = by, toY = -1, fromZ = bz, toZ = -1;
             for (int z = 0; z < bz; z++) {
                 BlockState state = level.getBlockState(pos.set(ox + x, oy + by - 1, oz + z));
                 int skyAbove = 0, lampsAbove = 0;
@@ -274,7 +277,10 @@ final class GasClient {
                         if (below.is(Blocks.LAVA)) kind = GasParams.OVER_LAVA;
                         else if (below.getBlock() instanceof AbstractFurnaceBlock && below.getValue(AbstractFurnaceBlock.LIT)) kind = GasParams.CHIMNEY;
                     }
-                    if (kind != 0) found++;
+                    if (kind != 0) {
+                        found++;
+                        fromY = Math.min(fromY, y); toY = Math.max(toY, y); fromZ = Math.min(fromZ, z); toZ = Math.max(toZ, z);
+                    }
                     // a block is as light as the open space over it: smoke lying on the ground is not darkened by the ground
                     int sky = solid ? (openAbove ? skyAbove : 0) : level.getBrightness(LightLayer.SKY, pos);
                     int lamps = solid ? (openAbove ? lampsAbove : 0) : level.getBrightness(LightLayer.BLOCK, pos);
@@ -286,8 +292,64 @@ final class GasClient {
                 }
             }
             sourcesInColumn[x] = found;
+            sourcesFromY[x] = fromY; sourcesToY[x] = toY; sourcesFromZ[x] = fromZ; sourcesToZ[x] = toZ;
         }
     }
+
+    // ------------------------------------------------------------------ the part of the box that is computed
+
+    /** In blocks from the corner of the box: the least corner of the part that is computed this step, then the corner just past its greatest. */
+    private static final int[] part = new int[6];
+    /** How much of the box that is, 0 to 1. */
+    static volatile float partOfBox = 1.0F;
+
+    private static void include(double x0, double y0, double z0, double x1, double y1, double z1) {
+        part[0] = Math.min(part[0], (int) Math.floor(x0)); part[1] = Math.min(part[1], (int) Math.floor(y0)); part[2] = Math.min(part[2], (int) Math.floor(z0));
+        part[3] = Math.max(part[3], (int) Math.ceil(x1)); part[4] = Math.max(part[4], (int) Math.ceil(y1)); part[5] = Math.max(part[5], (int) Math.ceil(z1));
+    }
+
+    /**
+     * Gas is seldom everywhere in the box: a campfire and its smoke fill a few dozen blocks of thousands. The solver on
+     * the graphics card computes only a smaller box round what there is: the gas that was last seen (read back now and
+     * then, so a little old: three blocks more on every side), the blocks that feed it and the room over them, the
+     * burning creatures, and for a few seconds the place of an explosion. Whatever gets to the edge of that is gone, as
+     * at the edge of the whole box; while it is not known where the gas is, the whole box is computed.
+     */
+    private static void findPart(int blobs) {
+        final int bx = box.bx, by = box.by, bz = box.bz;
+        int[] seen = GasDraw.bounds();
+        if (seen == null || WHOLE) {
+            part[0] = 0; part[1] = 0; part[2] = 0; part[3] = bx; part[4] = by; part[5] = bz;
+            partOfBox = 1.0F;
+            return;
+        }
+        part[0] = bx; part[1] = by; part[2] = bz; part[3] = 0; part[4] = 0; part[5] = 0;
+        if (seen[3] > seen[0]) include(seen[0] - ox - 3, seen[1] - oy - 3, seen[2] - oz - 3, seen[3] - ox + 3, seen[4] - oy + 3, seen[5] - oz + 3);
+        for (int x = 0; x < bx; x++) {
+            if (sourcesInColumn[x] > 0) include(x - 2, sourcesFromY[x] - 1, sourcesFromZ[x] - 2, x + 3, sourcesToY[x] + 6, sourcesToZ[x] + 3);
+        }
+        for (int i = 0; i < blobs; i++) {
+            int at = i * GasParams.BLOB_FLOATS;
+            float reach = blobsInBox[at + 3] + 3.0F;
+            include(blobsInBox[at] - reach, blobsInBox[at + 1] - reach, blobsInBox[at + 2] - reach, blobsInBox[at] + reach, blobsInBox[at + 1] + reach, blobsInBox[at + 2] + reach);
+        }
+        synchronized (BLASTS) {
+            for (Blast blast : BLASTS) {
+                double reach = 3.0 + 1.5 * blast.power;
+                include(blast.x - ox - reach, blast.y - oy - reach, blast.z - oz - reach, blast.x - ox + reach, blast.y - oy + reach, blast.z - oz + reach);
+            }
+        }
+        part[0] = Math.max(0, part[0]); part[1] = Math.max(0, part[1]); part[2] = Math.max(0, part[2]);
+        part[3] = Math.min(bx, part[3]); part[4] = Math.min(by, part[4]); part[5] = Math.min(bz, part[5]);
+        if (part[3] <= part[0] || part[4] <= part[1] || part[5] <= part[2]) {
+            // nothing anywhere: one block, so that there is something to draw the passes over
+            part[0] = 0; part[1] = 0; part[2] = 0; part[3] = 1; part[4] = 1; part[5] = 1;
+        }
+        partOfBox = (float) (part[3] - part[0]) * (part[4] - part[1]) * (part[5] - part[2]) / ((float) bx * by * bz);
+    }
+
+    /** {@code -Dphysicsbruhh.gas.whole=true}: the whole box is computed every step, as if gas were everywhere (to compare). */
+    private static final boolean WHOLE = Boolean.getBoolean("physicsbruhh.gas.whole");
 
     private static void put(int at, int red, int green, int blue, int alpha) {
         int now = (red & 255) | (green & 255) << 8 | (blue & 255) << 16 | (alpha & 255) << 24;
@@ -305,8 +367,9 @@ final class GasClient {
             for (int i = BLASTS.size() - 1; i >= 0; i--) {
                 Blast blast = BLASTS.get(i);
                 float age = (now - blast.born) / 1.0e9F;
-                if (age > 0.7F) { BLASTS.remove(i); continue; }
-                if (n >= GasDraw.BLOBS) continue;
+                // (kept a while after it has stopped feeding the gas: the solver computes the room round it meanwhile, findPart)
+                if (age > 3.0F) { BLASTS.remove(i); continue; }
+                if (age > 0.7F || n >= GasDraw.BLOBS) continue;
                 float reach = Math.max(1.0F, 0.6F * blast.power);
                 blobAt[n * 3] = blast.x; blobAt[n * 3 + 1] = blast.y; blobAt[n * 3 + 2] = blast.z;
                 // a fireball at first: fuel, heat and a great deal of new gas; then the smoke it leaves
@@ -420,18 +483,25 @@ final class GasClient {
             gpu.clear();
             movedX = 0; movedY = 0; movedZ = 0;
         }
-        GpuBuffer grid = GasDraw.writeGrid(box, dt, time, movedX, movedY, movedZ, blobsInBox, n);
+        if (gpu != null) {
+            if (stepped) findPart(n);
+        } else {
+            // the processor's solver computes the whole box
+            part[0] = 0; part[1] = 0; part[2] = 0; part[3] = box.bx; part[4] = box.by; part[5] = box.bz;
+            partOfBox = 1.0F;
+        }
+        GpuBuffer grid = GasDraw.writeGrid(box, dt, time, movedX, movedY, movedZ, blobsInBox, n, part);
         Timer.begin(encoder);
         if (gpu != null) {
             if (stepped) {
-                gpu.step(encoder, grid, world);
+                gpu.step(encoder, grid, world, part[4] - part[1]);
                 gridX = ox; gridY = oy; gridZ = oz;
                 stepsDone++;
-                GasDraw.where(encoder, box, grid, gpu.gas(), false);
+                GasDraw.where(encoder, box, grid, gpu.gas(), false, gridX, gridY, gridZ);
             }
         } else if (cpu.take(encoder)) {
             stepsDone = cpu.steps;
-            GasDraw.where(encoder, box, grid, cpu.gas(), true);
+            GasDraw.where(encoder, box, grid, cpu.gas(), true, cpu.shownX(), cpu.shownY(), cpu.shownZ());
         }
         Timer.middle(encoder, stepped);
         boolean something = gpu != null ? gpu.steps > 0 : cpu.gas() != null;
@@ -592,10 +662,10 @@ final class GasClient {
                 final GasBox b = box;
                 float ms = stepMs(), draw = drawMs();
                 String step = ms < 0.0F ? "?" : String.format(Locale.ROOT, "%.2f", ms), picture = draw < 0.0F ? "?" : String.format(Locale.ROOT, "%.2f", draw);
-                String million = String.format(Locale.ROOT, "%.2f", b.fineCells() / 1.0e6);
+                String million = String.format(Locale.ROOT, "%.2f", b.fineCells() / 1.0e6), share = String.valueOf(Math.round(partOfBox * 100.0F));
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.info",
-                        "Fire and smoke: computed on the %s, %s x %s x %s cells (%s million), a step takes %s ms and the drawing %s ms; %s blocks and %s creatures feed it",
-                        Component.translatableWithFallback("commands.physicsbruhh.gas.on." + (gpu != null ? "gpu" : "cpu"), solverInUse()), b.fx, b.fy, b.fz, million, step, picture, sources, burning), false);
+                        "Fire and smoke: computed on the %s, %s x %s x %s cells (%s million), a step takes %s ms and the drawing %s ms; %s blocks and %s creatures feed it; %s%% of the box is computed right now",
+                        Component.translatableWithFallback("commands.physicsbruhh.gas.on." + (gpu != null ? "gpu" : "cpu"), solverInUse()), b.fx, b.fy, b.fz, million, step, picture, sources, burning, share), false);
             }
             return 1;
         }));

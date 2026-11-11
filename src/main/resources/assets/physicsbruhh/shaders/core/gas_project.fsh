@@ -12,7 +12,7 @@ layout(location = 0) out vec4 fragColor;
 
 // x: the pressure to count there, y: 1 if that is a block
 vec2 beside(ivec3 cell, float own) {
-    if (!gasInside(GasCoarse, cell)) return vec2(0.0);
+    if (!gasComputed(GasCoarse, cell)) return vec2(0.0);
     float v = texelFetch(PressureSampler, gasPixel(GasCoarse, cell), 0).r;
     return v < GAS_WALL_TEST ? vec2(own, 1.0) : vec2(v, 0.0);
 }
@@ -21,7 +21,7 @@ void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     ivec3 c = gasCell(GasCoarse, pixel);
     float own = texelFetch(PressureSampler, pixel, 0).r;
-    if (c.y < 0 || own < GAS_WALL_TEST) { fragColor = vec4(0.0); return; }
+    if (c.y < 0 || !gasComputed(GasCoarse, c) || own < GAS_WALL_TEST) { fragColor = vec4(0.0); return; }
     vec2 xr = beside(c + ivec3(1, 0, 0), own), xl = beside(c - ivec3(1, 0, 0), own);
     vec2 yr = beside(c + ivec3(0, 1, 0), own), yl = beside(c - ivec3(0, 1, 0), own);
     vec2 zr = beside(c + ivec3(0, 0, 1), own), zl = beside(c - ivec3(0, 0, 1), own);

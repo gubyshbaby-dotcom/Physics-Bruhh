@@ -15,32 +15,29 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
     ivec3 c = gasCell(GasCoarse, ivec2(gl_FragCoord.xy));
-    if (c.y < 0) { fragColor = vec4(0.0); return; }
+    if (c.y < 0 || !gasComputed(GasCoarse, c)) { fragColor = vec4(0.0); return; }
     int cpb = int(GasStep.z);
     vec4 block = gasBlock(WorldSampler, c / cpb);
     if (block.r > 0.5) { fragColor = vec4(0.0); return; }
     float dt = GasStep.x;
-    ivec3 moved = ivec3(GasMoved.xyz) * cpb;
     vec3 p = vec3(c) + 0.5;
-    vec3 was = p + vec3(moved);
 
     // carried along by itself
-    vec3 u = gasFetch(VelSampler, GasCoarse, c + moved).xyz;
-    vec3 a = gasAt(VelSampler, GasCoarse, was - dt * u * GasStep.z).xyz * exp(-GasC.y * dt);
+    vec3 u = gasFetchWas(VelSampler, GasCoarse, c).xyz;
+    vec3 a = gasAtWas(VelSampler, GasCoarse, p - dt * u * GasStep.z).xyz * exp(-GasC.y * dt);
 
     // hot gas up, smoke down
-    vec4 g = gasAt(GasSampler, GasFine, was * GasStep.w);
+    vec4 g = gasAtWas(GasSampler, GasFine, p * GasStep.w);
     a.y += dt * (GasA.x * g.g - GasA.y * g.r);
 
     // small whirls kept alive
-    ivec3 n = ivec3(GasCoarse.xyz);
-    if (all(greaterThan(c, ivec3(0))) && all(lessThan(c, n - 1))) {
-        vec3 grad = vec3(gasFetch(SpinSampler, GasCoarse, c + ivec3(1, 0, 0)).w - gasFetch(SpinSampler, GasCoarse, c - ivec3(1, 0, 0)).w,
-                         gasFetch(SpinSampler, GasCoarse, c + ivec3(0, 1, 0)).w - gasFetch(SpinSampler, GasCoarse, c - ivec3(0, 1, 0)).w,
-                         gasFetch(SpinSampler, GasCoarse, c + ivec3(0, 0, 1)).w - gasFetch(SpinSampler, GasCoarse, c - ivec3(0, 0, 1)).w);
+    if (all(greaterThan(c, gasLow(GasCoarse))) && all(lessThan(c, gasHigh(GasCoarse)))) {
+        vec3 grad = vec3(gasFetchNear(SpinSampler, GasCoarse, c + ivec3(1, 0, 0)).w - gasFetchNear(SpinSampler, GasCoarse, c - ivec3(1, 0, 0)).w,
+                         gasFetchNear(SpinSampler, GasCoarse, c + ivec3(0, 1, 0)).w - gasFetchNear(SpinSampler, GasCoarse, c - ivec3(0, 1, 0)).w,
+                         gasFetchNear(SpinSampler, GasCoarse, c + ivec3(0, 0, 1)).w - gasFetchNear(SpinSampler, GasCoarse, c - ivec3(0, 0, 1)).w);
         float len = length(grad);
         if (len > 1.0e-5) {
-            a += (dt * GasC.z / (GasStep.z * len)) * cross(grad, gasFetch(SpinSampler, GasCoarse, c).xyz);
+            a += (dt * GasC.z / (GasStep.z * len)) * cross(grad, gasFetchNear(SpinSampler, GasCoarse, c).xyz);
         }
     }
 
