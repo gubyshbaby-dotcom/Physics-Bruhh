@@ -77,6 +77,13 @@ final class GooLook {
                         context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info",
                                 "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
                                 info[0], info[1], info[2], info[3], ms, speed), false);
+                        if (info[7] instanceof float[] went) {
+                            String[] ms = new String[went.length];
+                            for (int k = 0; k < went.length; k++) ms[k] = String.format(java.util.Locale.ROOT, "%.1f", went[k]);
+                            context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info.phases",
+                                    "A step, in ms: moving and blocks %s, neighbours %s, new springs %s, constraints %s (density %s, correction %s, springs %s, sticking and blocks %s), afterwards %s, velocities %s",
+                                    ms[0], ms[1], ms[2], ms[3], ms[7], ms[8], ms[9], ms[10], ms[4], ms[5]), false);
+                        }
                         if (GooRenderer.quadsInAll > 0) {
                             String handover = String.format(java.util.Locale.ROOT, "%.2f", GooRenderer.handoverMillis);
                             int inView = GooRenderer.quadsInView, inAll = GooRenderer.quadsInAll;
@@ -97,6 +104,25 @@ final class GooLook {
                 .then(Commands.literal("plain").executes(context -> {
                     context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.plain", "Goo is drawn the plain way, without its own shader"), false);
                     return set("plain");
-                })));
+                }))
+                .then(threads()));
+    }
+
+    /** {@code /goolook threads auto|<n>}: how many threads the Rust core works on, until the game is closed (to find out what a machine does best with). */
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<net.minecraft.commands.CommandSourceStack> threads() {
+        var threads = Commands.literal("threads").then(Commands.literal("auto").executes(context -> {
+            GooClient.wantThreads = 0;
+            context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.threads.auto", "Goo: the core is asked to choose the number of threads itself again"), false);
+            return 1;
+        }));
+        for (int n : new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32 }) {
+            threads.then(Commands.literal(String.valueOf(n)).executes(context -> {
+                GooClient.wantThreads = n;
+                context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.threads",
+                        "Goo: the core is asked to use %s threads (it changes how long a step takes and nothing else; /goolook info shows what it came to)", n), false);
+                return 1;
+            }));
+        }
+        return threads;
     }
 }

@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 7;
+pub const ABI_VERSION: jint = 8;
 const ERR: jint = -9999;
 
 struct Handle { world: World, mesh: Vec<f32>, parts: [Vec<f32>; 2] }
@@ -86,7 +86,11 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nProbe(_env: JNIEnv, _c: 
 }
 
 /// Diagnostics: `what` 0 = particles stuck to the moving box with id `arg`, 1 = particles of body `arg` stuck to blocks,
-/// 2 = fixed steps taken so far (wraps), 3 = threads the solver uses, 4 = particles in body `arg` (with those of a stream still to come).
+/// 2 = fixed steps taken so far (wraps), 3 = threads the solver uses, 4 = particles in body `arg` (with those of a stream still to come),
+/// 5 = use `arg` threads from now on (0: as many as the core takes by itself; answers how many it has now),
+/// 10 + n = microseconds spent so far in part n of a step (wraps): 0 predict and collide, 1 neighbours, 2 new springs,
+/// 3 the rounds of constraints (of which 7 density, 8 correction, 9 springs, 10 anchors and colliders), 4 anchors and springs afterwards,
+/// 5 velocities and viscosity, 6 sleeping.
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCount(_env: JNIEnv, _c: JClass, h: jlong, what: jint, arg: jint) -> jint {
     guard(|| match unsafe { handle(h) } {
@@ -96,6 +100,8 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCount(_env: JNIEnv, _c: 
             2 => (hd.world.ticks & 0x3fff_ffff) as jint,
             3 => crate::sim::threads() as jint,
             4 => hd.world.amount(arg.max(0) as usize) as jint,
+            5 => crate::sim::set_threads(arg.max(0) as usize) as jint,
+            10..=20 => (hd.world.prof[(what - 10) as usize] * 1.0e6) as i64 as jint,
             _ => 0,
         },
         None => ERR,

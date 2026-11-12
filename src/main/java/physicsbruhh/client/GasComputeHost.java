@@ -64,7 +64,7 @@ final class GasComputeHost {
                 String kind = backend().getClass().getName();
                 possible = kind.endsWith(".VulkanDevice") || kind.endsWith(".GlDevice") && GasComputeOpenGl.supported();
                 if (!possible) {
-                    whyNot = kind.endsWith(".GlDevice") ? "the game draws with OpenGL " + GL45C.glGetString(GL45C.GL_VERSION) + " here, and they need 4.5" : "the game draws with something this does not know (" + kind + ")";
+                    whyNot = kind.endsWith(".GlDevice") ? "the game draws with OpenGL " + GL45C.glGetString(GL45C.GL_VERSION) + " here, which lacks what they need (compute shaders, images, the calls of 4.5)" : "the game draws with something this does not know (" + kind + ")";
                     PhysicsBruhh.LOGGER.info("Gas: no compute shaders here: {}", whyNot);
                 }
             } catch (Throwable t) {

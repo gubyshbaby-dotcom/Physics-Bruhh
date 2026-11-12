@@ -9,7 +9,7 @@ import java.util.Locale;
 
 /** Rust core through JNI. Use {@link #available()} before constructing. */
 public final class NativeSim implements GooSim {
-    public static final int ABI_VERSION = 7;
+    public static final int ABI_VERSION = 8;
     private static final int ERR = -9999;
     private static Boolean loaded;
     private static String loadMessage = "not tried";

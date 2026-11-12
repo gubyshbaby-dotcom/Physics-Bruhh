@@ -887,3 +887,17 @@ fn any_number_of_moving_boxes_and_only_the_near_ones_matter() {
     assert!(alone.1 > -0.2, "the piston pushed the slime: its middle is at {}", alone.1);
     assert_eq!(alone.0, among.0, "boxes that are nowhere near must make no difference");
 }
+
+#[test]
+fn the_number_of_threads_can_be_changed_while_it_runs_and_changes_nothing() {
+    let with = |n: usize| {
+        assert_eq!(set_threads(n), n);
+        let mut w = World::new(12, 8);
+        a_little_of_everything(&mut w);
+        bits(&w)
+    };
+    let (one, three, five) = (with(1), with(3), with(5));
+    assert_eq!(one, three, "one thread and three must agree to the last bit");
+    assert_eq!(one, five, "one thread and five must agree to the last bit");
+    assert!(set_threads(0) >= 1);
+}

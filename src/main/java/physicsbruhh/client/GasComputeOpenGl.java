@@ -11,8 +11,10 @@ import org.lwjgl.system.MemoryUtil;
 /**
  * {@link GasCompute} on OpenGL, by OpenGL's own calls on the thread that draws. The game asks for
  * OpenGL 3.3 and makes do with it; compute shaders came with 4.3, and this uses the calls of 4.5
- * that leave the bindings the game keeps track of alone. Graphics cards of the last ten years have
- * it, whatever version the game asked for; where it is not there, {@link #supported} says so.
+ * that leave the bindings the game keeps track of alone. Some drivers answer the game's request
+ * with the newest OpenGL they have, others (NVIDIA's) with 3.3 exactly and everything newer on
+ * top as extensions, under the same names. So what is asked is not which version this is but
+ * whether the calls are there ({@link #supported}).
  *
  * <p>The few bindings that have to be changed while the programs run (the program in use, the
  * first texture units and their samplers, the first uniform buffer) are put back as they were
@@ -22,11 +24,19 @@ final class GasComputeOpenGl extends GasCompute {
     /** Texture units the programs read through: a pass reads five images at most. */
     private static final int UNITS = 6;
 
-    /** Whether the OpenGL of this thread can run the gas solver's programs. */
+    /** Whether the OpenGL of this thread can run the gas solver's programs: whether every call this class makes is there. */
     static boolean supported() {
         try {
-            GLCapabilities capabilities = GL.getCapabilities();
-            return capabilities != null && capabilities.OpenGL45;
+            GLCapabilities c = GL.getCapabilities();
+            if (c == null) return false;
+            if (c.OpenGL45) return true;
+            return c.glDispatchCompute != 0L                                                    // compute shaders (4.3)
+                    && c.glBindImageTexture != 0L && c.glMemoryBarrier != 0L                    // images a program writes (4.2)
+                    && c.glCopyImageSubData != 0L                                               // (4.3)
+                    && c.glClearTexImage != 0L                                                  // (4.4)
+                    && c.glCreateTextures != 0L && c.glTextureStorage2D != 0L && c.glTextureParameteri != 0L && c.glTextureSubImage2D != 0L
+                    && c.glBindTextureUnit != 0L && c.glCreateBuffers != 0L && c.glNamedBufferData != 0L && c.glNamedBufferSubData != 0L
+                    && c.glCreateSamplers != 0L;                                                // by name, without binding (4.5)
         } catch (Throwable t) {
             return false;
         }
@@ -44,7 +54,7 @@ final class GasComputeOpenGl extends GasCompute {
 
     GasComputeOpenGl(GasBox box, Function<String, String> read) {
         super(box);
-        if (!supported()) throw new IllegalStateException("this OpenGL has no compute shaders (4.5 is needed)");
+        if (!supported()) throw new IllegalStateException("this OpenGL lacks what the compute shaders need (compute shaders, images, the calls of 4.5)");
         numbers = glCreateBuffers();
         glNamedBufferData(numbers, GasBox.GRID_FLOATS * 4L, GL_DYNAMIC_DRAW);
         linearSampler = sampler(GL_LINEAR);

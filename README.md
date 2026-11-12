@@ -173,12 +173,12 @@ graphics card only draws it. If that does not work either, fire and smoke stay a
 them, and the log says why.
 
 `/gaslook solver compute` runs the same steps as compute shaders instead of drawing them: the
-game's graphics layer has no such thing, so they are run by what is under it (Vulkan, or OpenGL
-4.5). The programs are the passes' own shaders, called for every cell instead of for every pixel,
-so the numbers are the same; what is saved is setting up and clearing a render target for every
-pass. It is asked for and not chosen because it has never run on a real graphics card (see
-Limits): if it fails to start, the passes are drawn as before and the log says why;
-`/gaslook solver gpu` goes back.
+game's graphics layer has no such thing, so they are run by what is under it (Vulkan, or an
+OpenGL that has the calls of 4.5, whatever version it says it is). The programs are the passes'
+own shaders, called for every cell instead of for every pixel, so the numbers are the same; what
+is saved is setting up and clearing a render target for every pass. It is asked for and not
+chosen because it has run on one real graphics card only (see Limits): if it fails to start, the
+passes are drawn as before and the chat says why; `/gaslook solver gpu` goes back.
 
 **What is not computed.** Gas is seldom everywhere in the box: a campfire and its smoke fill a few
 dozen blocks of thousands. The solver on the graphics card works only on a smaller box round what
@@ -325,8 +325,12 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
   or push anything, and two players see different curls of the same smoke.
 - The gas solver's passes have been run on the software renderers of the build machines (Vulkan
   and OpenGL) and in a browser's WebGL, where they give the same numbers as the Rust solver to
-  four digits; they have never been run on a real graphics card. How fast they are there is not
-  known. The same holds for the compute shaders (`/gaslook solver compute`), with more at stake:
+  four digits. On a real graphics card they have been run by one player, on one NVIDIA card: at
+  `medium` a step took 0.6 to 1.1 ms and the drawing 2 to 4 ms. The compute shaders
+  (`/gaslook solver compute`) started on that card with Vulkan; how fast they are there has not
+  been reported. With OpenGL they did not start there, because the driver calls itself 3.3 and
+  the mod asked for 4.5; it now asks for the calls instead of the version, which no real card has
+  confirmed yet. More is at stake with them than with the passes:
   they go round the game's graphics layer, and a mistake there that a software renderer forgives
   can take the game down on a real driver instead of being caught. That is why they are not the
   default. The model itself is the common one for real-time smoke (velocity and pressure on a coarse

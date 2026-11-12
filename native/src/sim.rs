@@ -185,6 +185,8 @@ pub struct World {
     c_start: Vec<u32>, c_fill: Vec<u32>, sorted: Vec<u32>, pkey: Vec<u32>, pbkt: Vec<u32>, cell: Vec<i32>,
     /// Neighbour lists: particle `i` owns entries `nbr_lo[i]..nbr_hi[i]` of `nbr` (the neighbour), `nw` (kernel value) and `ngx`, `ngy`, `ngz` (kernel gradient).
     nbr: Vec<u32>, nbr_lo: Vec<u32>, nbr_hi: Vec<u32>, nw: Vec<f32>, ngx: Vec<f32>, ngy: Vec<f32>, ngz: Vec<f32>,
+    /// Where the particles were when the density was taken (only kept where the wide registers are used: [`correct_wide`]).
+    was: Vec<f32>,
     /// Scratch for the neighbour search: positions in cell order, and where each cell's particles start in that order.
     sp: Vec<f32>, runs: Vec<u32>,
     kp: f32, ks: f32, w0: f32, rho0: f32, wq: f32,
@@ -338,17 +340,38 @@ pub const PARTICLE_FILLERS: usize = 16_000;
 /// The core's own worker threads: two thirds of the machine's processors (the game needs the rest),
 /// twelve at most; on a machine with four or fewer, half of them. They only work while goo is
 /// moving. `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
-fn pool() -> Option<&'static rayon::ThreadPool> {
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let n = std::env::var("PHYSICSBRUHH_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or_else(|| { let all = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2); if all <= 4 { (all / 2).max(1) } else { (all * 2 / 3).min(12) } });
-        rayon::ThreadPoolBuilder::new().num_threads(n.clamp(1, 32)).thread_name(|i| format!("PhysicsBruhh-core-{}", i)).build().ok()
-    }).as_ref()
+fn pool() -> Option<std::sync::Arc<rayon::ThreadPool>> {
+    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if pool.is_none() {
+        let n = std::env::var("PHYSICSBRUHH_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(default_threads);
+        *pool = Some(make_pool(n));
+    }
+    pool.as_ref().and_then(|p| p.clone())
+}
+
+/// The pool, once it has been asked for (the inner `None`: it could not be made).
+static POOL: std::sync::Mutex<Option<Option<std::sync::Arc<rayon::ThreadPool>>>> = std::sync::Mutex::new(None);
+
+fn default_threads() -> usize {
+    let all = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    if all <= 4 { (all / 2).max(1) } else { (all * 2 / 3).min(12) }
+}
+
+fn make_pool(n: usize) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+    rayon::ThreadPoolBuilder::new().num_threads(n.clamp(1, 64)).thread_name(|i| format!("PhysicsBruhh-core-{}", i)).build().ok().map(std::sync::Arc::new)
 }
 
 /// How many threads the solver uses.
 pub fn threads() -> usize { pool().map(|p| p.current_num_threads()).unwrap_or(1) }
+
+/// Makes the pool anew with `n` threads (0: as many as it would take by itself) and says how many
+/// it has now. What is running on the old pool finishes there. The number of threads changes how
+/// long a step takes and nothing else.
+pub fn set_threads(n: usize) -> usize {
+    let made = make_pool(if n == 0 { default_threads() } else { n });
+    if made.is_some() { *POOL.lock().unwrap_or_else(|e| e.into_inner()) = Some(made); }
+    threads()
+}
 
 /// Runs `f` on the core's thread pool, so parallel loops inside it use those threads.
 pub fn on_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R { match pool() { Some(p) => p.install(f), None => f() } }
@@ -538,53 +561,72 @@ unsafe fn density_plain(chunk: &[u32], q: &[f32], l: Lists, k: &Kern, mats: &[Ma
     }
 }
 
-/// [`density_plain`] eight neighbours at a time: the kernel of all eight is worked out side by side,
-/// every operation the same one as for a single neighbour; the sums then take the eight results one
-/// after the other, in the order of the list. So the numbers are those of [`density_plain`] to the
-/// last bit (an entry out of reach adds a zero here and nothing there, which is the same).
+/// The kernel and its gradient for eight neighbours of a particle at once, every operation the same
+/// one as for a single neighbour ([`density_plain`]): `$q` is where the positions are read, `$nbr`
+/// the neighbour lists, `$e` the first of the eight entries, `$n` how many of them belong to the
+/// list, `$at` the particle's own place as three vectors, `$c` the constants (reach, reach squared,
+/// minus the gradient's factor, the kernel's factor, 1e-7). Gives (within reach and of this list,
+/// kernel, gradient x, y, z); the kernel is zero out of reach, the gradient is not masked.
+#[cfg(target_arch = "x86_64")]
+macro_rules! kernel_wide {
+    ($q:expr, $nbr:expr, $e:expr, $n:expr, $at:expr, $c:expr) => {{
+        let (qp, np, e, n): (*const f32, *const u32, usize, usize) = ($q, $nbr, $e, $n);
+        let (vx, vy, vz) = $at;
+        let (vh, vh2, vks, vkp, tiny) = $c;
+        // where the eight neighbours are: x, y, z (and one number more) of each, then turned into eight x, eight y, eight z
+        let at = |m: usize| qp.add(*np.add(e + m) as usize * 3);
+        let v0 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(0))), _mm_loadu_ps(at(4)));
+        let v1 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(1))), _mm_loadu_ps(at(5)));
+        let v2 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(2))), _mm_loadu_ps(at(6)));
+        let v3 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(3))), _mm_loadu_ps(at(7)));
+        let (t0, t1, t2, t3) = (_mm256_unpacklo_ps(v0, v1), _mm256_unpackhi_ps(v0, v1), _mm256_unpacklo_ps(v2, v3), _mm256_unpackhi_ps(v2, v3));
+        let ex = _mm256_sub_ps(vx, _mm256_shuffle_ps::<0x44>(t0, t2));
+        let ey = _mm256_sub_ps(vy, _mm256_shuffle_ps::<0xEE>(t0, t2));
+        let ez = _mm256_sub_ps(vz, _mm256_shuffle_ps::<0x44>(t1, t3));
+        let r2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ex, ex), _mm256_mul_ps(ey, ey)), _mm256_mul_ps(ez, ez));
+        // within reach (and an entry of this list at all: behind its end are other particles' entries)
+        let mut near = _mm256_cmp_ps::<_CMP_NGE_UQ>(r2, vh2);
+        if n < LANES { near = _mm256_and_ps(near, _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)))); }
+        let d = _mm256_add_ps(_mm256_sqrt_ps(r2), tiny);
+        let t = _mm256_sub_ps(vh2, r2); let u = _mm256_sub_ps(vh, d);
+        let gm = _mm256_div_ps(_mm256_mul_ps(_mm256_mul_ps(vks, u), u), d);
+        let w = _mm256_and_ps(near, _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(vkp, t), t), t));
+        (near, w, _mm256_mul_ps(gm, ex), _mm256_mul_ps(gm, ey), _mm256_mul_ps(gm, ez))
+    }};
+}
+
+/// [`density_plain`] eight neighbours at a time: the kernel of all eight is worked out side by side
+/// ([`kernel_wide`]); the sums then take the eight results one after the other, in the order of
+/// the list. So the numbers are those of [`density_plain`] to the last bit (an entry out of reach
+/// adds a zero here and nothing there, which is the same).
+///
+/// Nothing is kept for the correction here: [`correct_wide`] works the kernel out again. That is
+/// less to do than it sounds and much less to carry: sixteen bytes for every neighbour of every
+/// particle, written here and read there three times a step, were half a gigabyte a step for
+/// eighty thousand particles, and with ten threads at it the memory, not the processor, set the
+/// pace. Only the kernel of the last round is kept (`keep`), for the viscosity that follows.
 /// Safety: as [`density_plain`]; the processor has AVX2; `q` has room for a load of four behind its last particle.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn density_wide(chunk: &[u32], q: &[f32], l: Lists, k: &Kern, mats: &[Material], nb: usize, kept: Kept, rho: Shared<f32>, lam: Shared<f32>) {
+unsafe fn density_wide(chunk: &[u32], q: &[f32], l: Lists, k: &Kern, mats: &[Material], nb: usize, keep: Option<Shared<f32>>, rho: Shared<f32>, lam: Shared<f32>) {
     use std::arch::x86_64::*;
     let (qp, np) = (q.as_ptr(), l.nbr.as_ptr());
-    let (vh, vh2, vks, vkp, tiny) = (_mm256_set1_ps(k.h), _mm256_set1_ps(k.h2), _mm256_set1_ps(-k.ks), _mm256_set1_ps(k.kp), _mm256_set1_ps(1e-7));
-    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let consts = (_mm256_set1_ps(k.h), _mm256_set1_ps(k.h2), _mm256_set1_ps(-k.ks), _mm256_set1_ps(k.kp), _mm256_set1_ps(1e-7));
     for &iu in chunk { let i = iu as usize; let o = i * 3;
-        let (vx, vy, vz) = (_mm256_set1_ps(q[o]), _mm256_set1_ps(q[o + 1]), _mm256_set1_ps(q[o + 2]));
+        let at = (_mm256_set1_ps(q[o]), _mm256_set1_ps(q[o + 1]), _mm256_set1_ps(q[o + 2]));
         let mut sums = [k.w0, 0.0f32, 0.0f32, 0.0f32, 0.0f32];
         let (mut e, hi) = (l.lo[i] as usize, l.hi[i] as usize);
         while e < hi {
             let n = (hi - e).min(LANES);
-            // where the eight neighbours are: x, y, z (and one number more) of each, then turned into eight x, eight y, eight z
-            let at = |m: usize| qp.add(*np.add(e + m) as usize * 3);
-            let v0 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(0))), _mm_loadu_ps(at(4)));
-            let v1 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(1))), _mm_loadu_ps(at(5)));
-            let v2 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(2))), _mm_loadu_ps(at(6)));
-            let v3 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(3))), _mm_loadu_ps(at(7)));
-            let (t0, t1, t2, t3) = (_mm256_unpacklo_ps(v0, v1), _mm256_unpackhi_ps(v0, v1), _mm256_unpacklo_ps(v2, v3), _mm256_unpackhi_ps(v2, v3));
-            let ex = _mm256_sub_ps(vx, _mm256_shuffle_ps::<0x44>(t0, t2));
-            let ey = _mm256_sub_ps(vy, _mm256_shuffle_ps::<0xEE>(t0, t2));
-            let ez = _mm256_sub_ps(vz, _mm256_shuffle_ps::<0x44>(t1, t3));
-            let r2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ex, ex), _mm256_mul_ps(ey, ey)), _mm256_mul_ps(ez, ez));
-            // within reach (and an entry of this list at all: behind its end are other particles' entries)
-            let mut near = _mm256_cmp_ps::<_CMP_NGE_UQ>(r2, vh2);
-            if n < LANES { near = _mm256_and_ps(near, _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), lanes))); }
-            let d = _mm256_add_ps(_mm256_sqrt_ps(r2), tiny);
-            let t = _mm256_sub_ps(vh2, r2); let u = _mm256_sub_ps(vh, d);
-            let gm = _mm256_div_ps(_mm256_mul_ps(_mm256_mul_ps(vks, u), u), d);
-            let w = _mm256_and_ps(near, _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(vkp, t), t), t));
-            let (gx, gy, gz) = (_mm256_mul_ps(gm, ex), _mm256_mul_ps(gm, ey), _mm256_mul_ps(gm, ez));
+            let (near, w, gx, gy, gz) = kernel_wide!(qp, np, e, n, at, consts);
             let g2 = _mm256_and_ps(near, _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(gx, gx), _mm256_mul_ps(gy, gy)), _mm256_mul_ps(gz, gz)));
-            let (gx, gy, gz) = (_mm256_and_ps(near, gx), _mm256_and_ps(near, gy), _mm256_and_ps(near, gz));
             let mut t = [[0.0f32; LANES]; 5];
-            _mm256_storeu_ps(t[0].as_mut_ptr(), w); _mm256_storeu_ps(t[1].as_mut_ptr(), g2); _mm256_storeu_ps(t[2].as_mut_ptr(), gx); _mm256_storeu_ps(t[3].as_mut_ptr(), gy); _mm256_storeu_ps(t[4].as_mut_ptr(), gz);
-            if n == LANES {
-                _mm256_storeu_ps(kept.w.0.add(e), w); _mm256_storeu_ps(kept.gx.0.add(e), gx); _mm256_storeu_ps(kept.gy.0.add(e), gy); _mm256_storeu_ps(kept.gz.0.add(e), gz);
-            } else {
-                // the end of the list: only its own entries are written
-                for m in 0..n { *kept.w.at(e + m) = t[0][m]; *kept.gx.at(e + m) = t[2][m]; *kept.gy.at(e + m) = t[3][m]; *kept.gz.at(e + m) = t[4][m]; }
+            _mm256_storeu_ps(t[0].as_mut_ptr(), w); _mm256_storeu_ps(t[1].as_mut_ptr(), g2);
+            _mm256_storeu_ps(t[2].as_mut_ptr(), _mm256_and_ps(near, gx)); _mm256_storeu_ps(t[3].as_mut_ptr(), _mm256_and_ps(near, gy)); _mm256_storeu_ps(t[4].as_mut_ptr(), _mm256_and_ps(near, gz));
+            if let Some(kept) = keep {
+                // (the end of a list: only its own entries are written)
+                if n == LANES { _mm256_storeu_ps(kept.0.add(e), w); } else { for m in 0..n { *kept.at(e + m) = t[0][m]; } }
             }
             for m in 0..LANES { for c in 0..5 { sums[c] += t[c][m]; } }
             e += n;
@@ -624,31 +666,33 @@ unsafe fn correct_plain(chunk: &[u32], l: Lists, nw: &[f32], gx: &[f32], gy: &[f
     }
 }
 
-/// [`correct_plain`] eight neighbours at a time, with the same numbers to the last bit (see [`density_wide`]).
-/// Safety: as [`correct_plain`]; the processor has AVX2; the kept arrays have [`LANES`] entries to spare.
+/// [`correct_plain`] eight neighbours at a time, with the same numbers to the last bit (see
+/// [`density_wide`]). The kernel and its gradient are worked out again, from where the particles
+/// were when the density was taken (`was`: this pass moves them).
+/// Safety: as [`correct_plain`]; the processor has AVX2; `was` has room for a load of four behind its last particle.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn correct_wide(chunk: &[u32], l: Lists, nw: &[f32], gx: &[f32], gy: &[f32], gz: &[f32], lam: &[f32], bodies: &[Body], nb: usize, k: &Kern, q: Shared<f32>) {
+unsafe fn correct_wide(chunk: &[u32], was: &[f32], l: Lists, lam: &[f32], bodies: &[Body], nb: usize, k: &Kern, q: Shared<f32>) {
     use std::arch::x86_64::*;
-    let (np, lp) = (l.nbr.as_ptr(), lam.as_ptr());
+    let (qp, np, lp) = (was.as_ptr(), l.nbr.as_ptr(), lam.as_ptr());
+    let consts = (_mm256_set1_ps(k.h), _mm256_set1_ps(k.h2), _mm256_set1_ps(-k.ks), _mm256_set1_ps(k.kp), _mm256_set1_ps(1e-7));
     let (viwq, vkc, vir0, zero) = (_mm256_set1_ps(k.iwq), _mm256_set1_ps(k.kc), _mm256_set1_ps(k.ir0), _mm256_setzero_ps());
-    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-    for &iu in chunk { let i = iu as usize;
+    for &iu in chunk { let i = iu as usize; let o = i * 3;
+        let at = (_mm256_set1_ps(was[o]), _mm256_set1_ps(was[o + 1]), _mm256_set1_ps(was[o + 2]));
         let vli = _mm256_set1_ps(lam[i]);
         let mut sums = [0.0f32; 3];
         let (mut e, hi) = (l.lo[i] as usize, l.hi[i] as usize);
         while e < hi {
             let n = (hi - e).min(LANES);
-            let at = |m: usize| *lp.add(*np.add(e + m) as usize);
-            let lj = _mm256_setr_ps(at(0), at(1), at(2), at(3), at(4), at(5), at(6), at(7));
-            let w = _mm256_loadu_ps(nw.as_ptr().add(e));
-            let mut there = _mm256_cmp_ps::<_CMP_NEQ_UQ>(w, zero);
-            if n < LANES { there = _mm256_and_ps(there, _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), lanes))); }
+            let (near, w, gx, gy, gz) = kernel_wide!(qp, np, e, n, at, consts);
+            let lj = |m: usize| *lp.add(*np.add(e + m) as usize);
+            let lj = _mm256_setr_ps(lj(0), lj(1), lj(2), lj(3), lj(4), lj(5), lj(6), lj(7));
+            let there = _mm256_and_ps(near, _mm256_cmp_ps::<_CMP_NEQ_UQ>(w, zero));
             let mut qq = _mm256_mul_ps(w, viwq); qq = _mm256_mul_ps(qq, qq); qq = _mm256_mul_ps(qq, qq);
             let f = _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(vli, lj), _mm256_mul_ps(vkc, qq)), vir0);
             let mut t = [[0.0f32; LANES]; 3];
-            for (c, g) in [gx, gy, gz].into_iter().enumerate() { _mm256_storeu_ps(t[c].as_mut_ptr(), _mm256_and_ps(there, _mm256_mul_ps(f, _mm256_loadu_ps(g.as_ptr().add(e))))); }
+            for (c, g) in [gx, gy, gz].into_iter().enumerate() { _mm256_storeu_ps(t[c].as_mut_ptr(), _mm256_and_ps(there, _mm256_mul_ps(f, g))); }
             for m in 0..LANES { for c in 0..3 { sums[c] += t[c][m]; } }
             e += n;
         }
@@ -758,7 +802,7 @@ impl World {
             born: Vec::new(), fly: Vec::new(), land: Vec::new(),
             act: Vec::new(),
             c_start: Vec::new(), c_fill: Vec::new(), sorted: Vec::new(), pkey: Vec::new(), pbkt: Vec::new(), cell: Vec::new(),
-            nbr: Vec::new(), nbr_lo: Vec::new(), nbr_hi: Vec::new(), nw: Vec::new(), ngx: Vec::new(), ngy: Vec::new(), ngz: Vec::new(), sp: Vec::new(), runs: Vec::new(),
+            nbr: Vec::new(), nbr_lo: Vec::new(), nbr_hi: Vec::new(), nw: Vec::new(), ngx: Vec::new(), ngy: Vec::new(), ngz: Vec::new(), was: Vec::new(), sp: Vec::new(), runs: Vec::new(),
             kp, ks, w0, rho0, wq,
             bodies: Vec::new(),
             st: Vec::new(), st_cells: Cells::default(),
@@ -775,6 +819,7 @@ impl World {
         let maxp = self.nb * slots;
         self.p.resize(maxp * 3, 0.0); self.v.resize(maxp * 3, 0.0);
         self.q.resize(maxp * 3 + LANES, 0.0); // (room to load four numbers from the last particle)
+        self.was.resize(maxp * 3 + LANES, 0.0);
         self.alive.resize(maxp, 0); self.scale.resize(maxp, 0.0);
         self.anc_kind.resize(maxp, 0); self.anc_id.resize(maxp, 0); self.anc_pt.resize(maxp * 3, 0.0); self.anc_loc.resize(maxp * 3, 0.0);
         self.anc_stick.resize(maxp, 0.0); self.anc_cool.resize(maxp, 0.0); self.anc_d.resize(maxp * 3, 0.0); self.anc_axis.resize(maxp, 3);
@@ -1547,7 +1592,8 @@ impl World {
         drop(found);
         let n_nbr = total;
         self.last_pairs = n_nbr / 2;
-        self.nw.resize(n_nbr + LANES, 0.0); self.ngx.resize(n_nbr + LANES, 0.0); self.ngy.resize(n_nbr + LANES, 0.0); self.ngz.resize(n_nbr + LANES, 0.0);
+        self.nw.resize(n_nbr + LANES, 0.0);
+        if !self.wide { self.ngx.resize(n_nbr + LANES, 0.0); self.ngy.resize(n_nbr + LANES, 0.0); self.ngz.resize(n_nbr + LANES, 0.0); }
         self.prof[1] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- springs form ----
@@ -1677,19 +1723,24 @@ impl World {
                 // but walking the lists from one end to the other is a good deal quicker than jumping about in them.)
                 self.sorted[..n_act].par_chunks(CHUNK).for_each(|chunk| unsafe {
                     #[cfg(target_arch = "x86_64")]
-                    if wide { return density_wide(chunk, q, lists, &kern, mats, nb, kept, rho, lam); }
+                    if wide { return density_wide(chunk, q, lists, &kern, mats, nb, if last { Some(kept.w) } else { None }, rho, lam); }
                     density_plain(chunk, q, lists, &kern, mats, nb, kept, rho, lam)
                 });
             }
             self.prof[7] += t_sub.elapsed().as_secs_f64(); let t_sub = std::time::Instant::now();
             // position correction
+            if wide {
+                // (it works the kernel out again, from where the particles were a moment ago: it moves them itself)
+                for &b in &awake { let all = b as usize * nb * 3..(b as usize + 1) * nb * 3; self.was[all.clone()].copy_from_slice(&self.q[all]); }
+            }
             {
                 let lists = Lists { nbr: &self.nbr, lo: &self.nbr_lo, hi: &self.nbr_hi };
-                let (nw, ngx, ngy, ngz, lam, bodies) = (&self.nw[..], &self.ngx[..], &self.ngy[..], &self.ngz[..], &self.lam[..], &self.bodies[..]);
+                let (nw, ngx, ngy, ngz, lam, bodies, was) = (&self.nw[..], &self.ngx[..], &self.ngy[..], &self.ngz[..], &self.lam[..], &self.bodies[..], &self.was[..]);
                 let q = Shared::of(&mut self.q);
                 self.sorted[..n_act].par_chunks(CHUNK).for_each(|chunk| unsafe {
                     #[cfg(target_arch = "x86_64")]
-                    if wide { return correct_wide(chunk, lists, nw, ngx, ngy, ngz, lam, bodies, nb, &kern, q); }
+                    if wide { return correct_wide(chunk, was, lists, lam, bodies, nb, &kern, q); }
+                    let _ = was;
                     correct_plain(chunk, lists, nw, ngx, ngy, ngz, lam, bodies, nb, &kern, q)
                 });
             }

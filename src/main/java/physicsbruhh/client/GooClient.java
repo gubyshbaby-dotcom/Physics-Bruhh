@@ -860,6 +860,15 @@ public final class GooClient {
     /** Simulated time per real time over the last second or so (1 = keeping up), and the threads the solver uses. */
     private static volatile float simSpeed = 1.0F;
     private static volatile int simThreads = 1;
+    /** Asked for with {@code /goolook threads}: how many threads the core is to use from now on (0: its own choice), or -1 if nothing is asked. */
+    static volatile int wantThreads = -1;
+    /**
+     * Where a step of the Rust core goes, in milliseconds a step over the last second or so: predict and collide,
+     * neighbours, new springs, the rounds of constraints, anchors and springs afterwards, velocities and viscosity,
+     * sleeping; then of the rounds: density, correction, springs, anchors and colliders. Null: not known.
+     */
+    private static volatile float[] phases;
+    private static final int PHASES = 11;
 
     /** What the simulation is doing, for {@code /goolook info}: backend (null if it is not running), threads, pieces, pieces moving, ms per update, speed. */
     static Object[] info() {
@@ -867,7 +876,7 @@ public final class GooClient {
         float[] info = bodyInfo;
         int bodies = 0, awake = 0;
         for (int b = 0; b + 8 <= info.length; b += 8) { if (info[b] != 0.0F) { bodies++; if (info[b + 1] != 0.0F) awake++; } }
-        return new Object[] { s == null || !running ? null : s.backend(), simThreads, bodies, awake, stepMillis, simSpeed, MAX_BODIES };
+        return new Object[] { s == null || !running ? null : s.backend(), simThreads, bodies, awake, stepMillis, simSpeed, MAX_BODIES, phases };
     }
 
     // ------------------------------------------------------------------ simulation thread
@@ -876,9 +885,10 @@ public final class GooClient {
         ByteBuffer staticBuf = direct(4096 * GooSim.STATIC_FLOATS), kinBuf = direct(MAX_KINEMATIC * GooSim.KINEMATIC_FLOATS);
         ByteBuffer infoBuf = direct(MAX_BODIES * GooSim.BODY_FLOATS);
         ByteBuffer meshBuf = direct(1 << 18), particleBuf = direct(1 << 16), partBuf = direct(1 << 10);
+        int[] phaseAt = new int[PHASES];
         long last = System.nanoTime(), speedFrom = 0L;
         int speedSteps = 0;
-        boolean dirty = true, hadAwake = false, asParticles = false;
+        boolean dirty = true, hadAwake = false, asParticles = false, slow = false;
         try {
             while (running) {
                 GooSim s = sim;
@@ -898,6 +908,10 @@ public final class GooClient {
                 long now = System.nanoTime();
                 float dt = (now - last) / 1.0e9F;
                 last = now;
+                // The core makes up for lost time with up to three steps at once. That is right after a hiccup, and wrong
+                // when a step itself takes longer than a sixtieth of a second: the time can never be made up then, and
+                // three steps between two looks at the goo only make its slow motion jerky. Then: one step, and show it.
+                if (slow) dt = Math.min(dt, 1.0F / 60.0F + 1.0e-6F);
                 int awake = 0;
                 if (LOCKSTEP) { for (int k = 0; k < 3; k++) awake = s.step(1.0F / 60.0F + 1.0e-6F); }
                 else if (!paused) awake = s.step(dt);
@@ -965,12 +979,27 @@ public final class GooClient {
                 }
                 long spent = System.nanoTime() - now;
                 stepMillis += (spent / 1.0e6F - stepMillis) * 0.05F;
+                slow = spent > 16_666_666L;
                 // how much simulated time went by per real time, about once a second
-                if (speedFrom == 0L) { speedFrom = now; speedSteps = s.count(2, 0); simThreads = Math.max(1, s.count(3, 0)); }
-                else if (now - speedFrom > 1_000_000_000L) {
-                    int steps = s.count(2, 0);
-                    simSpeed = Math.min(1.0F, ((steps - speedSteps) & 0x3fffffff) / 60.0F / ((now - speedFrom) / 1.0e9F));
+                int ask = wantThreads;
+                if (ask >= 0) { wantThreads = -1; simThreads = Math.max(1, s.count(5, ask)); }
+                if (speedFrom == 0L) {
+                    speedFrom = now; speedSteps = s.count(2, 0); simThreads = Math.max(1, s.count(3, 0));
+                    for (int k = 0; k < PHASES; k++) phaseAt[k] = s.count(10 + k, 0);
+                } else if (now - speedFrom > 1_000_000_000L) {
+                    int steps = s.count(2, 0), taken = (steps - speedSteps) & 0x3fffffff;
+                    simSpeed = Math.min(1.0F, taken / 60.0F / ((now - speedFrom) / 1.0e9F));
                     speedFrom = now; speedSteps = steps;
+                    // where the steps went (the counters are microseconds and wrap, as the difference of two does)
+                    float[] went = new float[PHASES];
+                    boolean any = false;
+                    for (int k = 0; k < PHASES; k++) {
+                        int micros = s.count(10 + k, 0);
+                        went[k] = taken > 0 ? (micros - phaseAt[k]) / 1000.0F / taken : 0.0F;
+                        any |= micros != 0;
+                        phaseAt[k] = micros;
+                    }
+                    phases = any && taken > 0 ? went : null;
                 }
                 if (LOCKSTEP) { STEP_DONE.release(); continue; }
                 long budget = 16_666_666L - spent;

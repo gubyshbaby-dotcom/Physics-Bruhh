@@ -918,7 +918,7 @@ final class GasClient {
                 release();
                 context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.gas.solver." + by,
                         by.equals("cpu") ? "Fire and smoke are computed by the Rust core on the processor (coarser)"
-                                : by.equals("compute") ? "Fire and smoke are computed on the graphics card by compute shaders where it can run them (not tried on a real graphics card yet: /gaslook info says how long a step takes, /gaslook solver gpu goes back)"
+                                : by.equals("compute") ? "Fire and smoke are computed on the graphics card by compute shaders where it can run them (tried on one real graphics card so far, with Vulkan: /gaslook info says how long a step takes, /gaslook solver gpu goes back)"
                                 : "Fire and smoke are computed on the graphics card where it can do it"), false);
                 if (by.equals("compute") && !GasComputeHost.possible()) {
                     final String why = GasComputeHost.whyNot();
