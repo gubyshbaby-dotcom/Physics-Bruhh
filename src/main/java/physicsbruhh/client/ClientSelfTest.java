@@ -466,6 +466,9 @@ final class ClientSelfTest {
                         PhysicsBruhh.LOGGER.info("CLIENTTEST lava: left to the shader pack");
                         step(74);
                     }
+                } else if (into == 200 && taken) {
+                    // something heavy falls into the lake
+                    commands(server, "summon minecraft:falling_block 66.5 206 3.5 {BlockState:{Name:\"minecraft:anvil\"},Time:1,DropItem:0b}", "summon minecraft:pig 67.5 205 4.5 {NoAI:0b,Silent:1b}");
                 } else if (into == 260 && taken) {
                     // from close by and low down: the front of the flow and the fall
                     commands(server, "tp @a 71.5 201.2 -1.5 -35 12");
@@ -475,8 +478,12 @@ final class ClientSelfTest {
                 } else if (into >= 520 && taken) {
                     PhysicsBruhh.LOGGER.info("CLIENTTEST lava: drawn by the mod in {} sections, {} faces ({} in view), in {} frames; taking up what changed costs {} ms a frame; {} buffers sent to the graphics card; {} bubbles came up in the lake, {} have burst",
                             LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.frames - lavaFramesBefore, LavaClient.prepareMillis, LavaClient.uploads, LavaBubbles.risen, LavaBubbles.popped);
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST lava waves: {} steps over {} columns of lava, pushed {} times, {} calm blocks cut finer for them, {} splashes{}",
+                            LavaWaves.steps, LavaWaves.lavaColumns, LavaWaves.pushed, LavaClient.cutQuads, LavaWaves.splashes, LavaWaves.off ? "; THE WAVES ARE OFF (see the log)" : "");
                     if (LavaClient.quads < 200) { lavaProblem = "the lava's surface is only " + LavaClient.quads + " faces"; step(74); }
                     else if (LavaBubbles.popped == 0) { lavaProblem = "no bubble came up and burst in the lake (" + LavaBubbles.risen + " came up)"; step(74); }
+                    else if (LavaWaves.off || LavaWaves.steps == 0 || LavaWaves.pushed == 0) { lavaProblem = "the waves of the lava's surface were not worked out (" + LavaWaves.steps + " steps, " + LavaWaves.pushed + " pushes, off: " + LavaWaves.off + ")"; step(74); }
+                    else if (LavaClient.cutQuads == 0) { lavaProblem = "no calm block of the lake was cut finer for the waves"; step(74); }
                     else { LavaClient.chosen = false; step(71); }
                 } else if (into > 900 || LavaClient.broken) {
                     lavaProblem = LavaClient.broken ? "the mod's lava failed (see the log)"
@@ -497,7 +504,7 @@ final class ClientSelfTest {
             }
             default -> {
                 LavaBubbles.rate = 1.0F;
-                commands(server, "time set noon", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
+                commands(server, "time set noon", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
                 step(9);
             }
         }

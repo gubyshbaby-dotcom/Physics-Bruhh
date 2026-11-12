@@ -324,31 +324,42 @@ public final class SimCheck {
         java.util.Map<String, Integer> edges = new java.util.HashMap<>();
         java.util.Map<String, float[]> corners = new java.util.HashMap<>();
         java.util.List<float[][]> all = new java.util.ArrayList<>();
-        int faces = 0, tops = 0, sides = 0, unders = 0, bad = 0, torn = 0, calm = 0;
+        int faces = 0, tops = 0, sides = 0, unders = 0, bad = 0, torn = 0, calm = 0, rests = 0;
         float lowest = 9, highest = -9;
         for (int m = 0; m < 2; m++) {
             LavaMesher.Mesh mesh = meshes[m];
             faces += mesh.quads;
             java.util.Map<Integer, Float> heights = new java.util.HashMap<>();
-            for (int q = 0; q < mesh.quads; q++) {
+            calm += mesh.quads - mesh.calmFrom;
+            for (int k = 0; k < 256; k++) if (mesh.rests[k] == mesh.rests[k]) rests++;
+            // (the calm faces, a block each, come last; they are looked at cut into six by six, the way they are drawn where there are waves)
+            for (int q = 0, cut = 0; q < mesh.quads; q += (q >= mesh.calmFrom && cut < 35) ? 0 : 1, cut = q >= mesh.calmFrom ? (cut + 1) % 36 : 0) {
                 int kind = ((int) mesh.data[q * 32 + 3] >> 8) & 3;
-                if (kind == LavaMesher.TOP) tops++; else if (kind == LavaMesher.UNDER) unders++; else sides++;
+                boolean whole = q < mesh.calmFrom || cut == 0;
+                if (whole) { if (kind == LavaMesher.TOP) tops++; else if (kind == LavaMesher.UNDER) unders++; else sides++; }
                 float[][] p = new float[4][];
                 for (int k = 0; k < 4; k++) {
                     int v = q * 4 + k, o = v * 8;
                     for (int i = 0; i < 8; i++) if (Float.isNaN(mesh.data[o + i]) || Float.isInfinite(mesh.data[o + i])) bad++;
                     p[k] = new float[] { m * 16 + mesh.data[o], mesh.data[o + 1], mesh.data[o + 2] };
                     lowest = Math.min(lowest, p[k][1]); highest = Math.max(highest, p[k][1]);
-                    if (mesh.key[v] >= 0) {
+                    if (mesh.key[v] >= 0 && whole) {
                         // one point of the top, one height, whichever face it is a corner of
                         Float was = heights.put(mesh.key[v], p[k][1]);
                         if (was != null && was != p[k][1]) torn++;
                     }
-                    if (kind == LavaMesher.TOP) corners.put(lavaPoint(p[k][0], p[k][1], p[k][2]), p[k]);
                 }
+                if (q >= mesh.calmFrom) {
+                    float[][] c = p;
+                    p = new float[4][];
+                    for (int k = 0; k < 4; k++) {
+                        float u = LavaMesher.LINES[cut % 6 + (k >= 2 ? 1 : 0)], w = LavaMesher.LINES[cut / 6 + (k == 1 || k == 2 ? 1 : 0)];
+                        p[k] = new float[3];
+                        for (int a = 0; a < 3; a++) p[k][a] = c[0][a] * (1 - u) * (1 - w) + c[1][a] * (1 - u) * w + c[2][a] * u * w + c[3][a] * u * (1 - w);
+                    }
+                }
+                if (kind == LavaMesher.TOP) for (int k = 0; k < 4; k++) corners.put(lavaPoint(p[k][0], p[k][1], p[k][2]), p[k]);
                 if (kind != LavaMesher.TOP) continue;
-                // (a block of the lake's middle: one face, a block wide)
-                if (Math.abs(p[2][0] - p[0][0]) == 1.0F && Math.abs(p[2][2] - p[0][2]) == 1.0F) calm++;
                 for (int k = 0; k < 4; k++) {
                     float[] a = p[k], b = p[(k + 1) % 4];
                     String ka = lavaPoint(a[0], a[1], a[2]), kb = lavaPoint(b[0], b[1], b[2]);
@@ -376,7 +387,8 @@ public final class SimCheck {
         check("every number of it is a number", bad == 0, bad + " are not");
         check("the top is one sheet: no corner in the middle of another face's edge, no edge shared by three", gaps == 0 && crowded == 0, gaps + " corners in the middle of an edge, " + crowded + " edges shared by more than two faces");
         check("a point of the top has one height, whichever face it belongs to", torn == 0, torn + " differ");
-        check("the middle of a lake is a face a block", calm >= 60, calm + " blocks of one face");
+        check("the middle of a lake is a face a block, kept apart from the rest", calm >= 60, calm + " blocks of one face");
+        check("every column of lava with a top says where it rests", rests == 19 * 7 + 8 * 3 + 9 + 9, rests + " columns");
         check("lava comes down to the floor where it ends in the open and stays under the top of its block", lowest >= 3.0F && lowest < 3.01F && highest <= 10.0F, "from " + lowest + " to " + highest);
     }
 

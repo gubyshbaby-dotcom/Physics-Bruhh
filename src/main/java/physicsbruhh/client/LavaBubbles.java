@@ -67,10 +67,10 @@ final class LavaBubbles {
                 popped++;
                 level.playLocalSound(x[i], y[i], z[i], SoundEvents.LAVA_POP, SoundSource.BLOCKS, 0.25F + 0.6F * radius[i], 1.2F - 0.7F * radius[i] + 0.1F * RANDOM.nextFloat(), false);
                 for (int k = 0; k < 1 + (int) (radius[i] * 4.0F); k++) level.addParticle(ParticleTypes.LAVA, x[i], y[i] + 0.15, z[i], 0.0, 0.0, 0.0);
-                LavaWaves.push(x[i], z[i], radius[i] * 1.2F, -0.9F * radius[i]);
+                LavaWaves.push(x[i], z[i], radius[i] * 1.2F, -2.2F * radius[i]);
             } else if (!burst[i]) {
                 // while it swells it lifts the surface around it
-                LavaWaves.push(x[i], z[i], radius[i] * 1.6F, 0.035F * radius[i]);
+                LavaWaves.push(x[i], z[i], radius[i] * 1.6F, 0.09F * radius[i]);
             }
             if (now > born[i] + swell[i] + AFTER) {
                 int last = --count;
@@ -129,6 +129,24 @@ final class LavaBubbles {
             burst[i] = false;
             risen++;
         }
+    }
+
+    /** Something has fallen into the lava: what it throws up flies and falls back like the skin of a bubble that has burst. */
+    static void splash(ClientLevel level, double sx, double sy, double sz, float size) {
+        if (count >= MOST) return;
+        // the top of the lava it fell into
+        int bx = (int) Math.floor(sx), by = (int) Math.floor(sy), bz = (int) Math.floor(sz);
+        for (int up = 0; up < 3 && lava(level, bx, by + 1, bz); up++) by++;
+        FluidState fluid = level.getFluidState(POS.set(bx, by, bz));
+        if (!fluid.getType().isSame(Fluids.LAVA)) return;
+        int i = count++;
+        x[i] = sx; y[i] = by + fluid.getOwnHeight(); z[i] = sz;
+        radius[i] = size;
+        born[i] = LavaClient.clock();
+        swell[i] = 0.02F;
+        seed[i] = RANDOM.nextFloat();
+        sky[i] = level.getBrightness(LightLayer.SKY, POS.set(bx, by + 1, bz)) / 15.0F;
+        burst[i] = false;
     }
 
     /** The bubbles as the graphics card is given them: places counted from the section the camera is in. */
