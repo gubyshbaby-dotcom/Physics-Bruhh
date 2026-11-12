@@ -643,7 +643,7 @@ final class GasClient {
     private static void frame(Minecraft mc, RenderLevelStageEvent.AfterLevel event) {
         boolean onCard = useGpu() || useCompute();
         if (gpu == null && compute == null && cpu == null && !alive()) return; // nothing burns here: nothing to set up yet
-        if (onCard && gpu == null && compute == null && box.same(quality.box())) {
+        if (onCard && gpu == null && compute == null && box.same(boxFor(quality, range))) {
             if (cpu != null) { cpu.close(); cpu = null; }
             if (useCompute()) {
                 try {
