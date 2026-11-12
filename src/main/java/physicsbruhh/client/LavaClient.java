@@ -89,27 +89,35 @@ final class LavaClient {
     private static final int PART = 8000;
     /** Seconds a height takes to get where it is going, and the longest lava new to a block takes to get across it. */
     private static final float RISE = 0.4F, ACROSS = 0.45F;
-    private static final int FRAME_BYTES = 96;
+    /** Calm faces in one buffer at most: each is cut into 36 as it is drawn. */
+    private static final int CALM_PART = 2000, CUT = 36;
+    private static final int FRAME_BYTES = 128;
 
-    private static final BindGroupLayout FRAME = BindGroupLayout.builder().withUniform("LavaFrame", UniformType.UNIFORM_BUFFER).build();
+    static final BindGroupLayout FRAME = BindGroupLayout.builder().withUniform("LavaFrame", UniformType.UNIFORM_BUFFER).build();
     private static final BindGroupLayout MESH = BindGroupLayout.builder().withUniform("LavaMesh", UniformType.TEXEL_BUFFER, GpuFormat.RGBA32_FLOAT).build();
     private static final Identifier SHADER = Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "core/lava");
     /** Drawn inside the game's own pass for solid blocks: the same picture and depth, tested and written like a solid block's. */
-    private static final RenderPipeline PIPELINE = RenderPipeline.builder()
-            .withLocation(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "pipeline/lava"))
-            .withVertexShader(SHADER)
-            .withFragmentShader(SHADER)
-            .withBindGroupLayout(BindGroupLayouts.PROJECTION)
-            .withBindGroupLayout(BindGroupLayouts.FOG)
-            .withBindGroupLayout(BindGroupLayouts.GLOBALS)
-            .withBindGroupLayout(BindGroupLayouts.SAMPLER2)
-            .withBindGroupLayout(FRAME)
-            .withBindGroupLayout(MESH)
-            .withPrimitiveTopology(PrimitiveTopology.QUADS)
-            .withCull(false)
-            .withDepthStencilState(DepthStencilState.DEFAULT)
-            .withColorTargetState(ColorTargetState.DEFAULT)
-            .build();
+    private static RenderPipeline.Builder surface(String name) {
+        return RenderPipeline.builder()
+                .withLocation(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "pipeline/" + name))
+                .withVertexShader(SHADER)
+                .withFragmentShader(SHADER)
+                .withBindGroupLayout(BindGroupLayouts.PROJECTION)
+                .withBindGroupLayout(BindGroupLayouts.FOG)
+                .withBindGroupLayout(BindGroupLayouts.GLOBALS)
+                .withBindGroupLayout(BindGroupLayouts.SAMPLER2)
+                .withBindGroupLayout(FRAME)
+                .withBindGroupLayout(MESH)
+                .withBindGroupLayout(LavaWaves.SEEN)
+                .withPrimitiveTopology(PrimitiveTopology.QUADS)
+                .withCull(false)
+                .withDepthStencilState(DepthStencilState.DEFAULT)
+                .withColorTargetState(ColorTargetState.DEFAULT);
+    }
+
+    private static final RenderPipeline PIPELINE = surface("lava").build();
+    /** The tops of calm blocks, a face a block, each cut into six by six by the vertex shader: for the waves to move. */
+    private static final RenderPipeline PIPELINE_CUT = surface("lava_cut").withShaderDefine("LAVA_CUT").build();
 
     /** The same pass and the same pixels for the domes and drops of bubbles; their corners are made by the vertex shader. */
     private static final RenderPipeline BUBBLES = RenderPipeline.builder()
@@ -131,7 +139,9 @@ final class LavaClient {
     static void register(RegisterRenderPipelinesEvent event) {
         // optional: if one does not compile on some driver the game still starts, with its own lava
         event.registerOptionalPipeline(PIPELINE);
+        event.registerOptionalPipeline(PIPELINE_CUT);
         event.registerOptionalPipeline(BUBBLES);
+        LavaWaves.register(event);
     }
 
     private static boolean available() {
@@ -145,8 +155,13 @@ final class LavaClient {
         final int sx, sy, sz;
         GpuBuffer[] parts = new GpuBuffer[0];
         int[] partQuads = new int[0];
+        /** The tops of its calm blocks, a face a block (LavaMesher): drawn as they are far away, cut finer where the waves are. */
+        GpuBuffer[] calmParts = new GpuBuffer[0];
+        int[] calmQuads = new int[0];
         int quads;
         float minY, maxY;
+        /** For each of its columns: the height its topmost lava rests at, from its floor; NaN where there is none. */
+        float[] rests = new float[0];
         /** The points of the top: which (LavaMesher's numbers), and for each where it comes from, where it goes, and when it set off. */
         final Int2IntOpenHashMap index = new Int2IntOpenHashMap();
         float[] from = new float[0], to = new float[0], start = new float[0];
@@ -187,7 +202,9 @@ final class LavaClient {
 
         void close() {
             for (GpuBuffer part : parts) part.close();
+            for (GpuBuffer part : calmParts) part.close();
             parts = new GpuBuffer[0];
+            calmParts = new GpuBuffer[0];
             quads = 0;
         }
     }
@@ -209,7 +226,7 @@ final class LavaClient {
     private static int ticks;
 
     /** For {@code /lavalook info} and the smoke test. */
-    static volatile int sections, quads, drawnSections, drawnQuads, frames, uploads;
+    static volatile int sections, quads, drawnSections, drawnQuads, cutQuads, frames, uploads;
     static volatile float prepareMillis;
 
     /** Seconds since the game started: what heights on the move and bubbles are timed by (the shaders are told the same). */
@@ -248,7 +265,10 @@ final class LavaClient {
         if (level == null || !active) return;
         spread = Math.max(1, Fluids.LAVA.getTickDelay(level)) / 20.0F;
         if (++ticks % 40 == 0) forget(mc, level);
-        if (!SECTIONS.isEmpty() && !mc.isPaused()) LavaBubbles.tick(mc, level, clock());
+        if (!SECTIONS.isEmpty() && !mc.isPaused()) {
+            LavaBubbles.tick(mc, level, clock());
+            LavaWaves.tick(mc, level);
+        }
     }
 
     /** Every section in reach that has lava in it is built afresh by the game: that is when its lava changes hands. */
@@ -334,13 +354,24 @@ final class LavaClient {
                 count();
             }
             if (SECTIONS.isEmpty()) return;
-            int most = 0;
-            for (Section section : SECTIONS.values()) for (int n : section.partQuads) most = Math.max(most, n);
             BlockPos eye = event.getLevelRenderState().cameraRenderState.blockPos;
             LavaBubbles.write(eye.getX() >> 4, eye.getY() >> 4, eye.getZ() >> 4);
             // (asked for here, so that it is not made larger in the middle of the pass)
-            RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(Math.max(most, LavaBubbles.MOST * LavaBubbles.FACES) * 6);
-            writeFrame(event, now);
+            RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(most() * 6);
+            // the waves: where their square is, where the lava in it rests, and a step of them
+            LavaWaves.place(eye);
+            if (LavaWaves.beginMap(eye)) {
+                for (Section section : SECTIONS.values()) {
+                    if (!LavaWaves.covers(section.sx, section.sy, section.sz)) continue;
+                    for (int i = 0; i < section.rests.length; i++) {
+                        float rest = section.rests[i];
+                        if (rest == rest) LavaWaves.rest((section.sx << 4) + (i & 15), (section.sy << 4) + rest, (section.sz << 4) + (i >> 4));
+                    }
+                }
+                LavaWaves.endMap();
+            }
+            writeFrame(event, now, eye);
+            LavaWaves.step(frameBuffer.currentBuffer());
             prepared = true;
             prepareMillis += ((System.nanoTime() - began) / 1.0e6F - prepareMillis) * 0.1F;
         } catch (Throwable t) {
@@ -348,11 +379,21 @@ final class LavaClient {
         }
     }
 
+    /** The most faces any one draw is of (the indices for that many have to be there). */
+    private static int most() {
+        int most = LavaBubbles.MOST * LavaBubbles.FACES;
+        for (Section section : SECTIONS.values()) {
+            for (int n : section.partQuads) most = Math.max(most, n);
+            for (int n : section.calmQuads) most = Math.max(most, n * CUT);
+        }
+        return most;
+    }
+
     /** A section's new surface: its points start from where the old surface had them. */
     private static void take(long key, LavaMesher.Mesh mesh, float now) {
         Section old = SECTIONS.get(key);
         if (mesh.quads == 0) {
-            if (old != null) { old.close(); SECTIONS.remove(key); }
+            if (old != null) { old.close(); SECTIONS.remove(key); LavaWaves.changed(); }
             SEEN_EMPTY.add(key);
             return;
         }
@@ -411,12 +452,31 @@ final class LavaClient {
             data[o + 5] = start[i];
         }
 
-        // to the graphics card: a texel that says which section this is, then two texels a corner
-        int count = (mesh.quads + PART - 1) / PART;
-        section.parts = new GpuBuffer[count];
-        section.partQuads = new int[count];
-        for (int p = 0; p < count; p++) {
-            int first = p * PART, n = Math.min(PART, mesh.quads - first);
+        // to the graphics card: a texel that says which section this is, then two texels a corner; the calm faces apart
+        section.parts = send(section, data, 0, mesh.calmFrom, PART);
+        section.partQuads = sizes(mesh.calmFrom, PART);
+        section.calmParts = send(section, data, mesh.calmFrom, mesh.quads - mesh.calmFrom, CALM_PART);
+        section.calmQuads = sizes(mesh.quads - mesh.calmFrom, CALM_PART);
+        section.rests = mesh.rests;
+        section.quads = mesh.quads;
+        section.minY = mesh.minY;
+        section.maxY = mesh.maxY;
+        if (old != null) old.close();
+        SECTIONS.put(key, section);
+        LavaWaves.changed();
+    }
+
+    private static int[] sizes(int faces, int most) {
+        int[] sizes = new int[(faces + most - 1) / most];
+        for (int p = 0; p < sizes.length; p++) sizes[p] = Math.min(most, faces - p * most);
+        return sizes;
+    }
+
+    private static GpuBuffer[] send(Section section, float[] data, int from, int faces, int most) {
+        final int floats = LavaMesher.VERTEX_FLOATS;
+        GpuBuffer[] parts = new GpuBuffer[(faces + most - 1) / most];
+        for (int p = 0; p < parts.length; p++) {
+            int first = from + p * most, n = Math.min(most, faces - p * most);
             int bytes = (1 + n * 8) * 16;
             if (scratch.capacity() < bytes) scratch = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
             scratch.clear();
@@ -424,19 +484,14 @@ final class LavaClient {
             out.put(section.sx).put(section.sy).put(section.sz).put(0.0F);
             out.put(data, first * 4 * floats, n * 4 * floats);
             scratch.limit(bytes);
-            section.parts[p] = RenderSystem.getDevice().createBuffer(() -> "Lava: the surface in a section", GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER, scratch);
-            section.partQuads[p] = n;
+            parts[p] = RenderSystem.getDevice().createBuffer(() -> "Lava: the surface in a section", GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER, scratch);
             uploads++;
         }
-        section.quads = mesh.quads;
-        section.minY = mesh.minY;
-        section.maxY = mesh.maxY;
-        if (old != null) old.close();
-        SECTIONS.put(key, section);
+        return parts;
     }
 
     /** What the shaders are told about the frame (the {@code LavaFrame} block, see {@code include/lava_frame.glsl}). */
-    private static void writeFrame(PrepareRenderBuffersEvent event, float now) {
+    private static void writeFrame(PrepareRenderBuffersEvent event, float now, BlockPos eye) {
         if (frameBuffer == null) frameBuffer = new MappableRingBuffer(() -> "Lava frame", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, FRAME_BYTES);
         frameBuffer.rotate();
         try (GpuBufferSlice.MappedView view = frameBuffer.currentBuffer().map(false, true)) {
@@ -445,6 +500,7 @@ final class LavaClient {
             FloatBuffer out = data.asFloatBuffer();
             out.put(16, now).put(17, (float) (System.nanoTime() / 1.0e9 % 4096.0)).put(18, RISE).put(19, 1.0F);
             out.put(20, 0.35F).put(21, 1.0F).put(22, 0.0F).put(23, 0.0F);
+            LavaWaves.describe(out, 24, eye);
         }
     }
 
@@ -457,29 +513,49 @@ final class LavaClient {
             CompiledRenderPipeline compiled = RenderSystem.getCompiledPipelineNullable(PIPELINE);
             if (compiled == null || compiled.isClosed()) throw new IllegalStateException("shader pipeline " + PIPELINE.getLocation() + " is not available");
             RenderSystem.AutoStorageIndexBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS);
-            int most = 0;
-            for (Section section : SECTIONS.values()) for (int n : section.partQuads) most = Math.max(most, n);
-            most = Math.max(most, LavaBubbles.MOST * LavaBubbles.FACES);
+            int most = most();
             if (!indices.hasStorage(most * 6)) return;
             GpuBuffer indexBuffer = indices.getBuffer(most * 6);
             Frustum frustum = event.getLevelRenderState().cameraRenderState.cullFrustum;
             RenderPass pass = event.getRenderPass();
-            pass.setPipeline(compiled);
-            pass.setUniform("LavaFrame", frameBuffer.currentBuffer());
-            pass.setUniform("Sampler2", Minecraft.getInstance().gameRenderer.lightmap(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
-            pass.setVertexBuffer(0, null);
-            pass.setIndexBuffer(indexBuffer, indices.type());
-            int shown = 0, faces = 0;
-            for (Section section : SECTIONS.values()) {
-                double x = section.sx << 4, y = section.sy << 4, z = section.sz << 4;
-                if (frustum != null && !frustum.isVisible(new AABB(x - 0.1, y + section.minY - 0.1, z - 0.1, x + 16.1, y + section.maxY + 0.1, z + 16.1))) continue;
-                for (int p = 0; p < section.parts.length; p++) {
-                    pass.setUniform("LavaMesh", section.parts[p]);
-                    pass.drawIndexed(section.partQuads[p] * 6, 1, 0, 0, 0);
+            var lightmap = Minecraft.getInstance().gameRenderer.lightmap();
+            var linear = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
+            var nearest = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST);
+            CompiledRenderPipeline cutting = RenderSystem.getCompiledPipelineNullable(PIPELINE_CUT);
+            boolean cuts = cutting != null && !cutting.isClosed();
+            int shown = 0, faces = 0, cutFaces = 0;
+            // first everything that is drawn as it is; then, where the waves are, the calm blocks cut finer
+            for (int round = 0; round < (cuts ? 2 : 1); round++) {
+                pass.setPipeline(round == 0 ? compiled : cutting);
+                pass.setUniform("LavaFrame", frameBuffer.currentBuffer());
+                pass.setUniform("Sampler2", lightmap, linear);
+                pass.setUniform("LavaWavesNow", LavaWaves.now(), linear);
+                pass.setUniform("LavaWavesMap", LavaWaves.map(), nearest);
+                pass.setVertexBuffer(0, null);
+                pass.setIndexBuffer(indexBuffer, indices.type());
+                for (Section section : SECTIONS.values()) {
+                    boolean moves = cuts && LavaWaves.moves(section.sx, section.sy, section.sz);
+                    if (round == 1 && (!moves || section.calmParts.length == 0)) continue;
+                    double x = section.sx << 4, y = section.sy << 4, z = section.sz << 4;
+                    if (frustum != null && !frustum.isVisible(new AABB(x - 0.1, y + section.minY - 0.7, z - 0.1, x + 16.1, y + section.maxY + 0.7, z + 16.1))) continue;
+                    if (round == 0) {
+                        for (int p = 0; p < section.parts.length; p++) {
+                            pass.setUniform("LavaMesh", section.parts[p]);
+                            pass.drawIndexed(section.partQuads[p] * 6, 1, 0, 0, 0);
+                        }
+                        shown++;
+                        faces += section.quads;
+                    }
+                    if ((round == 1) == moves) {
+                        for (int p = 0; p < section.calmParts.length; p++) {
+                            pass.setUniform("LavaMesh", section.calmParts[p]);
+                            pass.drawIndexed(section.calmQuads[p] * (moves ? CUT : 1) * 6, 1, 0, 0, 0);
+                            if (moves) cutFaces += section.calmQuads[p];
+                        }
+                    }
                 }
-                shown++;
-                faces += section.quads;
             }
+            cutQuads = cutFaces;
             int bubbles = LavaBubbles.written();
             CompiledRenderPipeline bubbly = bubbles > 0 ? RenderSystem.getCompiledPipelineNullable(BUBBLES) : null;
             if (bubbly != null && !bubbly.isClosed()) {

@@ -91,7 +91,15 @@ public final class LavaMesher {
         /** For each corner of the top: how late lava gets there when it is new to its block, 0 (where it comes in) to 1. */
         public float[] delay = new float[4 * 64];
         public int quads;
+        /**
+         * The faces from this one on are each the whole top of a calm block (a block of a lake that neither bends nor
+         * touches one that does): four corners a block apart. Drawn as they are they are flat; close by they are cut finer
+         * as they are drawn (along {@link #LINES}, as the bent blocks around them are), so that waves can run over them.
+         */
+        public int calmFrom;
         public float minY, maxY;
+        /** For each column of the section ({@code z * 16 + x}): the height its topmost lava rests at, in blocks from the section's floor; NaN where there is none. */
+        public final float[] rests = new float[256];
 
         void room(int moreQuads) {
             int need = (quads + moreQuads) * 4;
@@ -107,6 +115,8 @@ public final class LavaMesher {
     // ---- per section
     private Cells cells;
     private Mesh mesh;
+    /** The faces of the blocks whose top is one calm face: put after all the others when the section is done. */
+    private Mesh calm;
     /** Corners of blocks, x and z from {@code 1 - MARGIN} to {@code 15 + MARGIN}: height (NaN: no lava around it), heat, flow, light. */
     private static final int CORNERS = WIDE - 1;
     private final float[] cornerHeight = new float[CORNERS * CORNERS], cornerHeat = new float[CORNERS * CORNERS];
@@ -128,6 +138,10 @@ public final class LavaMesher {
         this.mesh = out;
         out.minY = Float.MAX_VALUE;
         out.maxY = -Float.MAX_VALUE;
+        Arrays.fill(out.rests, Float.NaN);
+        calm = new Mesh();
+        calm.minY = Float.MAX_VALUE;
+        calm.maxY = -Float.MAX_VALUE;
         for (int y = 0; y < 16; y++) {
             boolean any = false, tops = false;
             for (int z = 0; z < 16 && !tops; z++) {
@@ -146,16 +160,29 @@ public final class LavaMesher {
                 for (int x = 0; x < 16; x++) {
                     if (cells.kind[Cells.at(x, y, z)] != LAVA) continue;
                     boolean top = cells.kind[Cells.at(x, y + 1, z)] != LAVA;
-                    if (top) top(x, z);
+                    if (top) {
+                        top(x, z);
+                        out.rests[z * 16 + x] = y + cells.height[Cells.at(x, y, z)];
+                    }
                     sides(x, z, top);
                     byte under = cells.kind[Cells.at(x, y - 1, z)];
                     if (under == OPEN || under == WALL) under(x, z);
                 }
             }
         }
+        // the calm blocks last: each one face
+        out.calmFrom = out.quads;
+        out.room(calm.quads);
+        System.arraycopy(calm.data, 0, out.data, out.quads * 4 * VERTEX_FLOATS, calm.quads * 4 * VERTEX_FLOATS);
+        System.arraycopy(calm.key, 0, out.key, out.quads * 4, calm.quads * 4);
+        System.arraycopy(calm.delay, 0, out.delay, out.quads * 4, calm.quads * 4);
+        out.quads += calm.quads;
+        out.minY = Math.min(out.minY, calm.minY);
+        out.maxY = Math.max(out.maxY, calm.maxY);
         if (out.quads == 0) { out.minY = 0.0F; out.maxY = 0.0F; }
         this.cells = null;
         this.mesh = null;
+        this.calm = null;
         return out;
     }
 
@@ -331,16 +358,18 @@ public final class LavaMesher {
         float fz = cornerFlowZ[c00] * w00 + cornerFlowZ[c10] * w10 + cornerFlowZ[c01] * w01 + cornerFlowZ[c11] * w11;
         float sky = cornerSky[c00] * w00 + cornerSky[c10] * w10 + cornerSky[c01] * w01 + cornerSky[c11] * w11;
         float edge = Math.min(1.0F, away(px, pz));
-        pointA[at] = packLook(sky, TOP, heat, edge);
+        pointA[at] = packLook(sky, TOP, heat, edge, Math.min(1.0F, h));
         pointB[at] = packFlow(fx, fz);
         return at;
     }
 
-    private static float packLook(float sky, int kind, float heat, float edge) {
+    /** {@code thick}: how thick the lava is at a corner that belongs to the top's sheet, 0..1 (waves move it by that much); -1 for a corner that stays put. */
+    private static float packLook(float sky, int kind, float heat, float edge, float thick) {
         int s = Math.min(15, Math.max(0, Math.round(sky)));
         int h = Math.min(63, Math.max(0, Math.round(heat * 63.0F)));
         int e = Math.min(15, Math.max(0, Math.round(edge * 15.0F)));
-        return (float) (s | 15 << 4 | kind << 8 | h << 10 | e << 16);
+        int t = thick < 0.0F ? 0 : 1 << 23 | Math.min(7, Math.round(thick * 7.0F)) << 20;
+        return (float) (s | 15 << 4 | kind << 8 | h << 10 | e << 16 | t);
     }
 
     private static float packFlow(float fx, float fz) {
@@ -391,24 +420,28 @@ public final class LavaMesher {
             }
             return;
         }
-        // a calm block: one square, or, where a neighbour's top bends, a fan around the middle that shares the finer edge
-        boolean north = bent(bx, bz - 1), south = bent(bx, bz + 1), west = bent(bx - 1, bz), east = bent(bx + 1, bz);
-        if (!north && !south && !west && !east) {
-            mesh.room(1);
-            int v = mesh.quads * 4;
+        // a calm block: one square (kept aside and put after all the other faces, see build), or, where a neighbour's top bends, a fan around the
+        // middle whose rim is cut as fine as the bent block's edge all the way round (so that it also fits a calm
+        // neighbour that is cut finer as it is drawn)
+        if (!bent(bx, bz - 1) && !bent(bx, bz + 1) && !bent(bx - 1, bz) && !bent(bx + 1, bz)) {
+            Mesh all = mesh;
+            mesh = calm;
+            calm.room(1);
+            int v = calm.quads * 4;
             put(v, point(bx, bz, 0, 0), runs ? late(0.0F, 0.0F, fx, fz) : 0.0F);
             put(v + 1, point(bx, bz, 0, FINE), runs ? late(0.0F, 1.0F, fx, fz) : 0.0F);
             put(v + 2, point(bx, bz, FINE, FINE), runs ? late(1.0F, 1.0F, fx, fz) : 0.0F);
             put(v + 3, point(bx, bz, FINE, 0), runs ? late(1.0F, 0.0F, fx, fz) : 0.0F);
-            mesh.quads++;
+            calm.quads++;
+            mesh = all;
             return;
         }
         int n = 0;
         // around the block: along the west edge southwards, the south edge eastwards, the east edge northwards, the north edge westwards
-        for (int j = 0; j < FINE; j += west ? 1 : FINE) loop[n++] = j * 16;
-        for (int i = 0; i < FINE; i += south ? 1 : FINE) loop[n++] = FINE * 16 + i;
-        for (int j = FINE; j > 0; j -= east ? 1 : FINE) loop[n++] = j * 16 + FINE;
-        for (int i = FINE; i > 0; i -= north ? 1 : FINE) loop[n++] = i;
+        for (int j = 0; j < FINE; j++) loop[n++] = j * 16;
+        for (int i = 0; i < FINE; i++) loop[n++] = FINE * 16 + i;
+        for (int j = FINE; j > 0; j--) loop[n++] = j * 16 + FINE;
+        for (int i = FINE; i > 0; i--) loop[n++] = i;
         mesh.room(n);
         int middle = point(bx, bz, FINE / 2, FINE / 2);
         float middleLate = runs ? late(0.5F, 0.5F, fx, fz) : 0.0F;
@@ -449,7 +482,8 @@ public final class LavaMesher {
         put(v, at, 0.0F);
         float[] d = mesh.data;
         int o = v * VERTEX_FLOATS;
-        d[o] = x; d[o + 2] = z; d[o + 3] = look; d[o + 6] = flow; d[o + 7] = normal;
+        // (it keeps the top's word on how much the waves move it)
+        d[o] = x; d[o + 2] = z; d[o + 3] = look + (float) ((int) d[o + 3] & 15 << 20); d[o + 6] = flow; d[o + 7] = normal;
     }
 
     private static final int[] SIDE_X = { 0, 0, -1, 1 }, SIDE_Z = { -1, 1, 0, 0 };
@@ -463,7 +497,7 @@ public final class LavaMesher {
             // in the open the top comes down to the floor by itself; only lava under more lava shows a side there
             if (next == OPEN && top) continue;
             boolean falling = (cells.flags[c] & FALLING) != 0;
-            float look = packLook(cells.sky[c], falling ? FALL : SIDE, heat(c), next == OPEN ? 1.0F : 0.0F);
+            float look = packLook(cells.sky[c], falling ? FALL : SIDE, heat(c), next == OPEN ? 1.0F : 0.0F, -1.0F);
             float flow = packFlow(cells.flowX[c], cells.flowZ[c]);
             float normal = packNormal(SIDE_X[side], SIDE_Z[side]);
             // the face, a hair inside the block; a and b: its two ends, seen from outside left to right is not needed (drawn from both sides)
@@ -512,7 +546,7 @@ public final class LavaMesher {
 
     private void under(int bx, int bz) {
         int c = Cells.at(bx, layer, bz);
-        float look = packLook(cells.sky[c], UNDER, heat(c), 0.5F), flow = packFlow(cells.flowX[c], cells.flowZ[c]), normal = packNormal(0.0F, 0.0F);
+        float look = packLook(cells.sky[c], UNDER, heat(c), 0.5F, -1.0F), flow = packFlow(cells.flowX[c], cells.flowZ[c]), normal = packNormal(0.0F, 0.0F);
         float y = layer + 0.001F;
         mesh.room(1);
         int v = mesh.quads * 4;

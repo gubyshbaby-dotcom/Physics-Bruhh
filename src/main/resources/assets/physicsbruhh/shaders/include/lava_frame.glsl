@@ -6,6 +6,8 @@ layout(std140) uniform LavaFrame {
     mat4 LavaView;     // turns world axes into camera axes
     vec4 LavaClock;    // x: seconds, for heights on the move; y: seconds, for what drifts (starts over now and then); z: seconds a height takes to get where it is going; w: 1 for the finer look, 0 for the plainer one
     vec4 LavaSet;      // x: how fast the crust is carried along where lava runs, blocks a second; y: brightness; z: 1 where the sky gives no light at all (the Nether); w: unused
+    vec4 LavaGrid;     // the square of the world the waves are worked out in: xy: its least corner, in blocks from the camera's block; z: one over its width in blocks (0: no waves); w: the height its heights are counted from, in blocks from the camera's block
+    vec4 LavaGridSet;  // x: one over the cells across it; y: cells to the block; z: one over the blocks across it; w: unused
 };
 
 // Kinds of face (the mesh says which; LavaMesher).
