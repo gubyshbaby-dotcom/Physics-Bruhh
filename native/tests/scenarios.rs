@@ -791,3 +791,99 @@ fn goo_lets_go_of_a_creature_that_no_longer_holds_it() {
     all_finite_above_floor(&w);
 }
 
+
+/// Every bit of every position, velocity aside: two runs that agree here are the same run.
+fn bits(w: &World) -> u64 {
+    let mut sum = 0xcbf29ce484222325u64;
+    for i in 0..w.maxp { if w.alive[i] != 0 { for c in 0..3 { sum = (sum ^ w.p[i * 3 + c].to_bits() as u64).wrapping_mul(0x100000001b3); } } }
+    sum
+}
+
+/// Honey that runs together, slime, a stream poured in and a piston: a little of everything the solver does.
+fn a_little_of_everything(w: &mut World) {
+    let mut f = floor(); f.extend_from_slice(&[-2.0, 0.0, 0.0, -1.0, 1.0, 1.0, 1.0]);
+    w.set_static(&f, f.len() / 7);
+    w.add_body(SLIME, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    w.add_body(HONEY, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    w.add_body(HONEY, 2.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    w.add_body(HONEY, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0);
+    let poured = w.add_empty(HONEY, 3.0, 1.0, -1.0);
+    w.emit(poured as usize, [3.5, 2.5, -0.5], [0.0, -1.0, 0.0], 400, false);
+    run(w, 0.8);
+    for k in 0..6 { let face = -1.0 + (k as f32) / 6.0; w.set_kinematic(&plate(1, face, 1.0, 10.0, STICKY), 1); w.step(DT + 1e-6); }
+    for _ in 0..30 { w.set_kinematic(&plate(1, 0.0, 1.0, 0.0, STICKY), 1); w.step(DT + 1e-6); }
+}
+
+#[test]
+fn eight_neighbours_at_a_time_give_the_same_numbers_as_one_at_a_time() {
+    if !wide_registers() { return; } // this machine only has the one way
+    let (mut one, mut eight) = (World::new(12, 8), World::new(12, 8));
+    one.wide = false;
+    assert!(eight.wide);
+    a_little_of_everything(&mut one);
+    a_little_of_everything(&mut eight);
+    assert_eq!(bits(&one), bits(&eight), "the two ways of working through the neighbours must agree to the last bit");
+    all_finite_above_floor(&eight);
+}
+
+#[test]
+fn a_world_makes_room_as_bodies_are_added() {
+    // one with room for all of them from the start, one that begins with room for two
+    let (mut whole, mut grown) = (World::new(12, 40), World::with_room(12, 2, 40));
+    for w in [&mut whole, &mut grown] {
+        let mut f = Vec::new();
+        for x in -2..40 { for z in -2..3 { f.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } }
+        w.set_static(&f, f.len() / 7);
+        for b in 0..30 {
+            let slot = w.add_body(if b % 4 == 3 { SLIME } else { HONEY }, b as f32 * 1.25, 0.0, 0.0, 1.0, 0.0, 0.0);
+            assert_eq!(slot, b, "every body gets a place of its own");
+            if b % 6 == 5 { run(w, 0.1); }
+        }
+        run(w, 0.3);
+        assert_eq!(w.bodies.iter().filter(|b| b.state == 1 && b.count == 1728).count(), 30, "all thirty are there, whole");
+        all_finite_above_floor(w);
+    }
+    assert!(grown.slots >= 30 && grown.slots <= 40, "room was made: {} places", grown.slots);
+    assert_eq!(bits(&whole), bits(&grown), "making room as it goes must not change what the goo does");
+    // and once there are as many as there may be, the oldest makes room, as before
+    for b in 30..41 { assert!(grown.add_body(HONEY, b as f32 * 1.25, 0.0, 0.0, 1.0, 0.0, 0.0) >= 0); }
+    assert_eq!(grown.slots, 40);
+}
+
+#[test]
+fn goo_in_places_far_apart_stands_on_its_own_ground() {
+    // (the blocks around the goo used to be kept in a table 96 blocks wide at most: what lay further out fell through)
+    let mut w = World::new(12, 4);
+    let mut f = Vec::new();
+    for at in [0.0f32, 700.0, -900.0] { for x in -2..3 { for z in -2..3 { f.extend_from_slice(&[at + x as f32, -1.0, at * 0.5 + z as f32, at + x as f32 + 1.0, 0.0, at * 0.5 + z as f32 + 1.0, 1.0]); } } }
+    w.set_static(&f, f.len() / 7);
+    for at in [0.0f32, 700.0, -900.0] { w.add_body(SLIME, at, 0.0, at * 0.5, 1.0, 0.0, 0.0); }
+    run(&mut w, 1.5);
+    all_finite_above_floor(&w);
+    for b in 0..3 { assert_eq!(w.bodies[b].count, 1728, "piece {} is all there", b); assert!(w.bodies[b].bb[4] > 0.6, "piece {} stands: top at {}", b, w.bodies[b].bb[4]); }
+}
+
+#[test]
+fn any_number_of_moving_boxes_and_only_the_near_ones_matter() {
+    // a piston pushing slime, alone and among two hundred creatures that are nowhere near
+    let push = |crowd: bool| {
+        let mut w = World::new(12, 4);
+        let mut f = floor(); f.extend_from_slice(&[-2.0, 0.0, 0.0, -1.0, 1.0, 1.0, 1.0]);
+        w.set_static(&f, f.len() / 7);
+        w.add_body(SLIME, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+        run(&mut w, 0.5);
+        let boxes = |face: f32, vel: f32| {
+            let mut all = Vec::new();
+            if crowd { for k in 0..200 { let x = 40.0 + k as f32; all.extend_from_slice(&[-(k as f32) - 10.0, x, 0.0, 0.2, x + 0.6, 1.8, 0.8, 0.3, 0.0, 0.0, 1.0, 0.0]); } }
+            all.extend_from_slice(&plate(1, face, 1.0, vel, STICKY));
+            all
+        };
+        for k in 0..6 { let all = boxes(-1.0 + (k as f32) / 6.0, 10.0); w.set_kinematic(&all, all.len() / 12); w.step(DT + 1e-6); }
+        for _ in 0..40 { let all = boxes(0.0, 0.0); w.set_kinematic(&all, all.len() / 12); w.step(DT + 1e-6); }
+        assert!(w.anchors_on(1) > 20, "the slime sticks to the piston's head: {} particles", w.anchors_on(1));
+        (bits(&w), centre_x(&w))
+    };
+    let (alone, among) = (push(false), push(true));
+    assert!(alone.1 > -0.2, "the piston pushed the slime: its middle is at {}", alone.1);
+    assert_eq!(alone.0, among.0, "boxes that are nowhere near must make no difference");
+}

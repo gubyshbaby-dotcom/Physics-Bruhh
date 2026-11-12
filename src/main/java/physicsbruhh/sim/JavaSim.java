@@ -114,6 +114,8 @@ public final class JavaSim implements GooSim {
     KBox[] kin = new KBox[0];
     float clock, acc; int seed = 0x9E3779B9;
     private float[] meshOut = new float[1 << 16]; private int meshLen;
+    /** Where the puddles of the last surface built for each material are, see {@link GooSim#meshParts}. */
+    private final float[][] partsOut = { new float[64], new float[64] }; private final int[] partsLen = { 0, 0 };
 
     private static final int[] HX = { 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1 };
     private static final int[] HY = { 0, 0, 1, 1, 1, -1, -1, -1, 0, 0, 0, 1, 1, 1 };
@@ -1051,6 +1053,7 @@ public final class JavaSim implements GooSim {
     @Override
     public int mesh(int material, ByteBuffer out) {
         meshLen = 0;
+        partsLen[material & 1] = 0;
         int[] ids = new int[slots]; int nIds = 0;
         for (int b = 0; b < slots; b++) if (bodies[b].state != 0 && bodies[b].mat == material && bodies[b].count > 0) ids[nIds++] = b;
         int[] group = new int[nIds];
@@ -1068,12 +1071,34 @@ public final class JavaSim implements GooSim {
             done[root] = true;
             int[] members = new int[nIds]; int nm = 0;
             for (int b = 0; b < nIds; b++) if (find(group, b) == root) members[nm++] = ids[b];
+            int from = meshLen;
             meshCluster(members, nm);
+            if (meshLen > from) {
+                // where this puddle is: its bodies' bounds, and room for the surface around them and for strands to droop
+                float[] box = { Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE };
+                for (int m = 0; m < nm; m++) { float[] bb = bodies[members[m]].bb; for (int k = 0; k < 3; k++) { box[k] = Math.min(box[k], bb[k]); box[k + 3] = Math.max(box[k + 3], bb[k + 3]); } }
+                int part = material & 1, at = partsLen[part];
+                if (at + PART_FLOATS > partsOut[part].length) partsOut[part] = Arrays.copyOf(partsOut[part], partsOut[part].length * 2);
+                float[] to = partsOut[part];
+                to[at] = from / FLOATS_PER_QUAD; to[at + 1] = (meshLen - from) / FLOATS_PER_QUAD;
+                to[at + 2] = box[0] - pad; to[at + 3] = box[1] - pad - STRAND_DROOP; to[at + 4] = box[2] - pad;
+                to[at + 5] = box[3] + pad; to[at + 6] = box[4] + pad; to[at + 7] = box[5] + pad;
+                partsLen[part] = at + PART_FLOATS;
+            }
         }
         FloatBuffer fb = out.asFloatBuffer();
         if (meshLen > fb.capacity()) return -meshLen;
         fb.put(0, meshOut, 0, meshLen);
         return meshLen / FLOATS_PER_QUAD;
+    }
+
+    @Override
+    public int meshParts(int material, ByteBuffer out) {
+        FloatBuffer fb = out.asFloatBuffer();
+        int len = partsLen[material & 1];
+        if (len > fb.capacity()) return -len;
+        fb.put(0, partsOut[material & 1], 0, len);
+        return len / PART_FLOATS;
     }
 
     private static int find(int[] g, int a) { while (g[a] != a) { g[a] = g[g[a]]; a = g[a]; } return a; }
@@ -1307,6 +1332,6 @@ public final class JavaSim implements GooSim {
             fb.put(b * 8, bd.state); fb.put(b * 8 + 1, bd.awake ? 1f : 0f);
             for (int k = 0; k < 6; k++) fb.put(b * 8 + 2 + k, bd.bb[k]);
         }
-        return cnt;
+        return slots;
     }
 }

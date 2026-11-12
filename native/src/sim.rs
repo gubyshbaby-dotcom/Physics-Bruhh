@@ -161,7 +161,9 @@ pub struct KBox {
 pub const KIN_FLOATS: usize = 12;
 
 pub struct World {
-    pub n: usize, pub nb: usize, pub slots: usize, pub maxp: usize,
+    pub n: usize, pub nb: usize,
+    /// Places for bodies there are right now, and the particles they hold; both grow as bodies are added, up to `most` bodies.
+    pub slots: usize, pub maxp: usize, pub most: usize,
     pub s: f32, pub h: f32, pub side: f32, pub rc: f32,
     pub mats: [Material; 2],
     /// The material of each body: the plain one, thickened or thinned as that piece is.
@@ -180,17 +182,23 @@ pub struct World {
     /// body); scratch for "landed this step".
     born: Vec<f32>, fly: Vec<u8>, land: Vec<u8>,
     act: Vec<u32>,
-    mask: u32, c_start: Vec<u32>, c_fill: Vec<u32>, sorted: Vec<u32>, pkey: Vec<u32>, pbkt: Vec<u32>, cell: Vec<i32>,
-    /// Neighbour lists: particle `i` owns entries `nbr_lo[i]..nbr_hi[i]` of `nbr` (the neighbour), `nw` (kernel value) and `ng` (kernel gradient).
-    nbr: Vec<u32>, nbr_lo: Vec<u32>, nbr_hi: Vec<u32>, nw: Vec<f32>, ng: Vec<f32>,
+    c_start: Vec<u32>, c_fill: Vec<u32>, sorted: Vec<u32>, pkey: Vec<u32>, pbkt: Vec<u32>, cell: Vec<i32>,
+    /// Neighbour lists: particle `i` owns entries `nbr_lo[i]..nbr_hi[i]` of `nbr` (the neighbour), `nw` (kernel value) and `ngx`, `ngy`, `ngz` (kernel gradient).
+    nbr: Vec<u32>, nbr_lo: Vec<u32>, nbr_hi: Vec<u32>, nw: Vec<f32>, ngx: Vec<f32>, ngy: Vec<f32>, ngz: Vec<f32>,
     /// Scratch for the neighbour search: positions in cell order, and where each cell's particles start in that order.
     sp: Vec<f32>, runs: Vec<u32>,
     kp: f32, ks: f32, w0: f32, rho0: f32, wq: f32,
     pub bodies: Vec<Body>,
-    st: Vec<SBox>, st_org: [i32; 3], st_dim: [i32; 3], st_start: Vec<u32>, st_items: Vec<u32>,
+    st: Vec<SBox>,
+    /// Which blocks lie in which cell of the world: see [`Cells`].
+    st_cells: Cells,
     pub kin: Vec<KBox>,
-    /// Per body: which of the first 64 moving boxes can reach it during the current step (bit per box).
-    kin_near: Vec<u64>,
+    /// Per body: which moving boxes can reach it during the current step (body `b` has the entries `kin_from[b]..kin_from[b + 1]` of `kin_near`).
+    kin_from: Vec<u32>, kin_near: Vec<u32>,
+    /// The moving boxes by their id: (id, which box), in the order of the ids.
+    kin_ids: Vec<(i32, u32)>,
+    /// Per body: the bodies it has ever had springs with (so that freeing a body need not look through all the others).
+    partners: Vec<Vec<u32>>,
     pub clock: f32, acc: f32, seed: u32, steps: u32,
     /// Fixed steps taken since the world was made, whether or not anything was awake.
     pub ticks: u32,
@@ -199,6 +207,8 @@ pub struct World {
     rev: u32,
     /// Seconds spent in each phase of the step since the world was made (diagnostics).
     pub prof: [f64; 12],
+    /// Whether the particle loops use the processor's wide registers (see [`wide_registers`]). The numbers are the same either way.
+    pub wide: bool,
 }
 
 #[inline] fn smooth(t: f32) -> f32 { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
@@ -290,6 +300,8 @@ fn resolve_box(q: &mut [f32; 3], p: &[f32; 3], bmin: &[f32; 3], bmax: &[f32; 3],
 
 /// Particles (or pairs) handed to one thread at a time. Fixed, so the split never depends on the machine.
 const CHUNK: usize = 256;
+/// Entries of a neighbour list that the wide registers work out side by side.
+const LANES: usize = 8;
 /// Steps a body has to stay at rest before it is put to sleep.
 const CALM_STEPS: u32 = 60;
 /// Seconds a removed body takes to shrink away.
@@ -323,13 +335,14 @@ const STREAM_BULGE: usize = 12;
 /// Filler points [`World::particles`] may add along stretched springs.
 pub const PARTICLE_FILLERS: usize = 16_000;
 
-/// The core's own worker threads: half the machine's cores (the game needs the rest), six at most.
-/// `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
+/// The core's own worker threads: two thirds of the machine's processors (the game needs the rest),
+/// twelve at most; on a machine with four or fewer, half of them. They only work while goo is
+/// moving. `PHYSICSBRUHH_THREADS` overrides the number. `None` if the pool could not be made.
 fn pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     POOL.get_or_init(|| {
         let n = std::env::var("PHYSICSBRUHH_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or_else(|| (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 6));
+            .unwrap_or_else(|| { let all = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2); if all <= 4 { (all / 2).max(1) } else { (all * 2 / 3).min(12) } });
         rayon::ThreadPoolBuilder::new().num_threads(n.clamp(1, 32)).thread_name(|i| format!("PhysicsBruhh-core-{}", i)).build().ok()
     }).as_ref()
 }
@@ -354,7 +367,7 @@ impl<T> Shared<T> {
 }
 
 /// Everything a particle can bump into.
-struct Walls<'a> { st: &'a [SBox], st_org: [i32; 3], st_dim: [i32; 3], st_start: &'a [u32], st_items: &'a [u32], kin: &'a [KBox], kin_near: &'a [u64], nb: usize, rc: f32, rho_max: f32 }
+struct Walls<'a> { st: &'a [SBox], cells: &'a Cells, kin: &'a [KBox], kin_from: &'a [u32], kin_near: &'a [u32], nb: usize, rc: f32, rho_max: f32 }
 
 #[derive(Clone, Copy)]
 struct Anchors { kind: Shared<u8>, id: Shared<i32>, pt: Shared<f32>, loc: Shared<f32>, stick: Shared<f32>, axis: Shared<u8>, fly: Shared<u8> }
@@ -363,14 +376,66 @@ impl Walls<'_> {
     /// Whether the point lies inside a block. A box is listed in every cell it lies in, so the point's own cell is enough.
     #[inline]
     fn solid(&self, pt: &[f32; 3]) -> bool {
-        let mut c = [0i32; 3];
-        for a in 0..3 { c[a] = pt[a].floor() as i32 - self.st_org[a]; if c[a] < 0 || c[a] >= self.st_dim[a] { return false; } }
-        let ci = (c[0] + self.st_dim[0] * (c[1] + self.st_dim[1] * c[2])) as usize;
-        for k in self.st_start[ci]..self.st_start[ci + 1] {
-            let b = &self.st[self.st_items[k as usize] as usize];
-            if (0..3).all(|a| pt[a] > b.min[a] && pt[a] < b.max[a]) { return true; }
+        self.cells.at(pt[0].floor() as i32, pt[1].floor() as i32, pt[2].floor() as i32).iter().any(|&k| {
+            let b = &self.st[k as usize];
+            (0..3).all(|a| pt[a] > b.min[a] && pt[a] < b.max[a])
+        })
+    }
+}
+
+/// Which blocks lie in which cell of the world (a cell is one block), as a table hashed by the
+/// cell: it is as large as the number of cells that have anything in them, however far apart they are.
+#[derive(Default)]
+struct Cells { keys: Vec<u64>, from: Vec<u32>, to: Vec<u32>, items: Vec<u32>, mask: usize }
+
+impl Cells {
+    const NONE: u64 = u64::MAX;
+    #[inline] fn key(x: i32, y: i32, z: i32) -> u64 { (x as u32 as u64 & 0x1f_ffff) | (y as u32 as u64 & 0x1f_ffff) << 21 | (z as u32 as u64 & 0x1f_ffff) << 42 }
+    #[inline] fn place(key: u64, mask: usize) -> usize { (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & mask }
+
+    /// The boxes listed for the cell (x, y, z).
+    #[inline]
+    fn at(&self, x: i32, y: i32, z: i32) -> &[u32] {
+        if self.keys.is_empty() { return &[]; }
+        let key = Cells::key(x, y, z);
+        let mut at = Cells::place(key, self.mask);
+        loop {
+            let k = self.keys[at];
+            if k == key { return &self.items[self.from[at] as usize..self.to[at] as usize]; }
+            if k == Cells::NONE { return &[]; }
+            at = (at + 1) & self.mask;
         }
-        false
+    }
+
+    /// Lists every box in every cell it lies in.
+    fn fill(&mut self, boxes: &[SBox]) {
+        let mut listed: Vec<(u64, u32)> = Vec::with_capacity(boxes.len() * 2);
+        for (bi, b) in boxes.iter().enumerate() {
+            // only the cells the box itself lies in: a particle looks in every cell its own reach touches,
+            // so a box next door is found exactly when the particle is close enough to matter
+            let mut r = [[0i32; 2]; 3];
+            for a in 0..3 { r[a][0] = b.min[a].floor() as i32; r[a][1] = (b.max[a].ceil() as i32 - 1).max(r[a][0]).min(r[a][0] + 64); }
+            for z in r[2][0]..=r[2][1] { for y in r[1][0]..=r[1][1] { for x in r[0][0]..=r[0][1] { listed.push((Cells::key(x, y, z), bi as u32)); } } }
+        }
+        listed.sort_unstable(); // by cell, and within a cell in the order of the boxes
+        let mut cells = 0;
+        for k in 0..listed.len() { if k == 0 || listed[k].0 != listed[k - 1].0 { cells += 1; } }
+        let mut size = 16usize; while size < cells * 2 { size <<= 1; }
+        self.mask = size - 1;
+        self.keys.clear(); self.keys.resize(size, Cells::NONE);
+        self.from.clear(); self.from.resize(size, 0);
+        self.to.clear(); self.to.resize(size, 0);
+        self.items.clear();
+        if boxes.is_empty() { self.keys.clear(); return; }
+        let mut k = 0;
+        while k < listed.len() {
+            let key = listed[k].0;
+            let mut at = Cells::place(key, self.mask);
+            while self.keys[at] != Cells::NONE { at = (at + 1) & self.mask; }
+            self.keys[at] = key; self.from[at] = self.items.len() as u32;
+            while k < listed.len() && listed[k].0 == key { self.items.push(listed[k].1); k += 1; }
+            self.to[at] = self.items.len() as u32;
+        }
     }
 }
 
@@ -385,26 +450,20 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
     let mut hit: u8 = 0; let mut hit_id = 0i32; let mut hit_stick = 0.0f32; let mut hit_min = [0.0f32; 3]; let mut hit_axis = 3u8;
     let mut leaving = false; // inside a block and on its way out: it has touched something, but that is no place to stick
     if !w.st.is_empty() {
-        let mut r = [[0i32; 2]; 3]; let mut inside = true;
-        for a in 0..3 {
-            r[a][0] = (q[a] - rc).floor() as i32 - w.st_org[a]; r[a][1] = (q[a] + rc).floor() as i32 - w.st_org[a];
-            if r[a][1] < 0 || r[a][0] >= w.st_dim[a] { inside = false; }
-            r[a][0] = r[a][0].max(0); r[a][1] = r[a][1].min(w.st_dim[a] - 1);
-        }
-        if inside {
-            for z in r[2][0]..=r[2][1] { for y in r[1][0]..=r[1][1] { for x in r[0][0]..=r[0][1] {
-                let ci = (x + w.st_dim[0] * (y + w.st_dim[1] * z)) as usize;
-                for k in w.st_start[ci]..w.st_start[ci + 1] {
-                    let b = &w.st[w.st_items[k as usize] as usize];
-                    let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, BLOCK, |pt| w.solid(pt));
-                    if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; } else if ax == LEAVING { leaving = true; }
-                }
-            } } }
-        }
+        let mut r = [[0i32; 2]; 3];
+        for a in 0..3 { r[a][0] = (q[a] - rc).floor() as i32; r[a][1] = (q[a] + rc).floor() as i32; }
+        for z in r[2][0]..=r[2][1] { for y in r[1][0]..=r[1][1] { for x in r[0][0]..=r[0][1] {
+            for &k in w.cells.at(x, y, z) {
+                let b = &w.st[k as usize];
+                let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.min, &b.max, rc, 0, BLOCK, |pt| w.solid(pt));
+                if ax < 3 { hit = 1; hit_stick = b.stick; hit_axis = ax; } else if ax == LEAVING { leaving = true; }
+            }
+        } } }
     }
-    let near = w.kin_near[i / w.nb];
-    for (k, b) in w.kin.iter().enumerate() {
-        if k < 64 && near >> k & 1 == 0 { continue; } // nowhere near this particle's body during this step
+    // (only the moving boxes that can reach this particle's body during this step)
+    let body = i / w.nb;
+    for &k in &w.kin_near[w.kin_from[body] as usize..w.kin_from[body + 1] as usize] {
+        let b = &w.kin[k as usize];
         let ax = resolve_box(&mut q, &p, &b.min, &b.max, &b.pmin, &b.pmax, rc, b.front, if b.id > 0 { PISTON } else { CREATURE }, |_| false);
         if ax < 3 { hit = 2; hit_id = b.id; hit_stick = b.stick; hit_min = b.min; hit_axis = ax; }
     }
@@ -416,19 +475,262 @@ unsafe fn collide(w: &Walls, an: Anchors, qs: Shared<f32>, p: &[f32], rho: f32, 
     }
 }
 
+/// Whether this processor has the wide registers (AVX2) that the particle loops can use: eight
+/// neighbours at a time instead of one. `PHYSICSBRUHH_PLAIN` in the environment switches them off.
+/// The results are the same to the last bit either way, so this is only a matter of speed.
+pub fn wide_registers() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static WIDE: OnceLock<bool> = OnceLock::new();
+        *WIDE.get_or_init(|| std::env::var_os("PHYSICSBRUHH_PLAIN").is_none() && std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("popcnt"))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { false }
+}
+
+/// The numbers the density constraint is worked out with.
+#[derive(Clone, Copy)]
+struct Kern { h: f32, h2: f32, ks: f32, kp: f32, w0: f32, ir0: f32, eps: f32, iwq: f32, kc: f32, max_d: f32 }
+
+/// The neighbour lists: particle `i` has the entries `lo[i]..hi[i]` of `nbr`. `nbr` has [`LANES`]
+/// entries to spare behind the last list (each of them a particle that exists), so that eight
+/// entries can be read from anywhere in a list.
+#[derive(Clone, Copy)]
+struct Lists<'a> { nbr: &'a [u32], lo: &'a [u32], hi: &'a [u32] }
+
+/// What is kept for every entry of the neighbour lists between the two halves of a round: the kernel and its gradient.
+#[derive(Clone, Copy)]
+struct Kept { w: Shared<f32>, gx: Shared<f32>, gy: Shared<f32>, gz: Shared<f32> }
+
+/// Density and multiplier of one particle from its sums over the neighbours (kernel, gradient squared, gradient x, y, z).
+/// Safety: particle `i` is this thread's alone.
+#[inline(always)]
+unsafe fn finish_density(i: usize, sums: [f32; 5], k: &Kern, mats: &[Material], nb: usize, rho: Shared<f32>, lam: Shared<f32>) {
+    let [r, s2, sx, sy, sz] = sums;
+    let m = &mats[i / nb];
+    let mut c = r * k.ir0 - 1.0;
+    if c < 0.0 { c = c.max(-m.coh_lim) * m.coh_k; }
+    let den = (s2 + sx * sx + sy * sy + sz * sz) * k.ir0 * k.ir0 + k.eps;
+    *rho.at(i) = r; *lam.at(i) = -c / den;
+}
+
+/// Density and its multiplier for the particles of `chunk`; the kernel value and gradient towards
+/// every neighbour are kept for the correction.
+/// Safety: the particles of `chunk` and the entries of their lists are this thread's alone.
+#[allow(clippy::too_many_arguments)]
+unsafe fn density_plain(chunk: &[u32], q: &[f32], l: Lists, k: &Kern, mats: &[Material], nb: usize, kept: Kept, rho: Shared<f32>, lam: Shared<f32>) {
+    let (h, h2, ks, kp) = (k.h, k.h2, k.ks, k.kp);
+    for &iu in chunk { let i = iu as usize; let o = i * 3;
+        let (x, y, z) = (q[o], q[o + 1], q[o + 2]);
+        let (mut r, mut s2, mut sx, mut sy, mut sz) = (k.w0, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for e in l.lo[i] as usize..l.hi[i] as usize {
+            let oj = l.nbr[e] as usize * 3;
+            let (ex, ey, ez) = (x - q[oj], y - q[oj + 1], z - q[oj + 2]);
+            let r2 = ex * ex + ey * ey + ez * ez;
+            if r2 >= h2 { *kept.w.at(e) = 0.0; continue; }
+            let d = r2.sqrt() + 1e-7; let t = h2 - r2; let u = h - d; let gm = -ks * u * u / d;
+            let w = kp * t * t * t; let (gx, gy, gz) = (gm * ex, gm * ey, gm * ez);
+            *kept.w.at(e) = w; *kept.gx.at(e) = gx; *kept.gy.at(e) = gy; *kept.gz.at(e) = gz;
+            r += w; s2 += gx * gx + gy * gy + gz * gz;
+            sx += gx; sy += gy; sz += gz;
+        }
+        finish_density(i, [r, s2, sx, sy, sz], k, mats, nb, rho, lam);
+    }
+}
+
+/// [`density_plain`] eight neighbours at a time: the kernel of all eight is worked out side by side,
+/// every operation the same one as for a single neighbour; the sums then take the eight results one
+/// after the other, in the order of the list. So the numbers are those of [`density_plain`] to the
+/// last bit (an entry out of reach adds a zero here and nothing there, which is the same).
+/// Safety: as [`density_plain`]; the processor has AVX2; `q` has room for a load of four behind its last particle.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn density_wide(chunk: &[u32], q: &[f32], l: Lists, k: &Kern, mats: &[Material], nb: usize, kept: Kept, rho: Shared<f32>, lam: Shared<f32>) {
+    use std::arch::x86_64::*;
+    let (qp, np) = (q.as_ptr(), l.nbr.as_ptr());
+    let (vh, vh2, vks, vkp, tiny) = (_mm256_set1_ps(k.h), _mm256_set1_ps(k.h2), _mm256_set1_ps(-k.ks), _mm256_set1_ps(k.kp), _mm256_set1_ps(1e-7));
+    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    for &iu in chunk { let i = iu as usize; let o = i * 3;
+        let (vx, vy, vz) = (_mm256_set1_ps(q[o]), _mm256_set1_ps(q[o + 1]), _mm256_set1_ps(q[o + 2]));
+        let mut sums = [k.w0, 0.0f32, 0.0f32, 0.0f32, 0.0f32];
+        let (mut e, hi) = (l.lo[i] as usize, l.hi[i] as usize);
+        while e < hi {
+            let n = (hi - e).min(LANES);
+            // where the eight neighbours are: x, y, z (and one number more) of each, then turned into eight x, eight y, eight z
+            let at = |m: usize| qp.add(*np.add(e + m) as usize * 3);
+            let v0 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(0))), _mm_loadu_ps(at(4)));
+            let v1 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(1))), _mm_loadu_ps(at(5)));
+            let v2 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(2))), _mm_loadu_ps(at(6)));
+            let v3 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(_mm_loadu_ps(at(3))), _mm_loadu_ps(at(7)));
+            let (t0, t1, t2, t3) = (_mm256_unpacklo_ps(v0, v1), _mm256_unpackhi_ps(v0, v1), _mm256_unpacklo_ps(v2, v3), _mm256_unpackhi_ps(v2, v3));
+            let ex = _mm256_sub_ps(vx, _mm256_shuffle_ps::<0x44>(t0, t2));
+            let ey = _mm256_sub_ps(vy, _mm256_shuffle_ps::<0xEE>(t0, t2));
+            let ez = _mm256_sub_ps(vz, _mm256_shuffle_ps::<0x44>(t1, t3));
+            let r2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ex, ex), _mm256_mul_ps(ey, ey)), _mm256_mul_ps(ez, ez));
+            // within reach (and an entry of this list at all: behind its end are other particles' entries)
+            let mut near = _mm256_cmp_ps::<_CMP_NGE_UQ>(r2, vh2);
+            if n < LANES { near = _mm256_and_ps(near, _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), lanes))); }
+            let d = _mm256_add_ps(_mm256_sqrt_ps(r2), tiny);
+            let t = _mm256_sub_ps(vh2, r2); let u = _mm256_sub_ps(vh, d);
+            let gm = _mm256_div_ps(_mm256_mul_ps(_mm256_mul_ps(vks, u), u), d);
+            let w = _mm256_and_ps(near, _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(vkp, t), t), t));
+            let (gx, gy, gz) = (_mm256_mul_ps(gm, ex), _mm256_mul_ps(gm, ey), _mm256_mul_ps(gm, ez));
+            let g2 = _mm256_and_ps(near, _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(gx, gx), _mm256_mul_ps(gy, gy)), _mm256_mul_ps(gz, gz)));
+            let (gx, gy, gz) = (_mm256_and_ps(near, gx), _mm256_and_ps(near, gy), _mm256_and_ps(near, gz));
+            let mut t = [[0.0f32; LANES]; 5];
+            _mm256_storeu_ps(t[0].as_mut_ptr(), w); _mm256_storeu_ps(t[1].as_mut_ptr(), g2); _mm256_storeu_ps(t[2].as_mut_ptr(), gx); _mm256_storeu_ps(t[3].as_mut_ptr(), gy); _mm256_storeu_ps(t[4].as_mut_ptr(), gz);
+            if n == LANES {
+                _mm256_storeu_ps(kept.w.0.add(e), w); _mm256_storeu_ps(kept.gx.0.add(e), gx); _mm256_storeu_ps(kept.gy.0.add(e), gy); _mm256_storeu_ps(kept.gz.0.add(e), gz);
+            } else {
+                // the end of the list: only its own entries are written
+                for m in 0..n { *kept.w.at(e + m) = t[0][m]; *kept.gx.at(e + m) = t[2][m]; *kept.gy.at(e + m) = t[3][m]; *kept.gz.at(e + m) = t[4][m]; }
+            }
+            for m in 0..LANES { for c in 0..5 { sums[c] += t[c][m]; } }
+            e += n;
+        }
+        finish_density(i, sums, k, mats, nb, rho, lam);
+    }
+}
+
+/// Moves particle `i` by what its neighbours ask for, held back for goo that has just had a block dropped into it.
+/// Safety: particle `i` is this thread's alone.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn push(i: usize, mut x: f32, mut y: f32, mut z: f32, k: &Kern, bodies: &[Body], nb: usize, q: Shared<f32>) {
+    // goo that has just had a block dropped into it is only allowed small corrections, growing back to normal
+    let limit = k.max_d * (1.0 - 0.87 * (bodies[i / nb].soft * (1.0 / SOFT_TIME)).min(1.0));
+    let l2 = x * x + y * y + z * z;
+    if l2 > limit * limit { let sc = limit / l2.sqrt(); x *= sc; y *= sc; z *= sc; }
+    let o = i * 3;
+    *q.at(o) += x; *q.at(o + 1) += y; *q.at(o + 2) += z;
+}
+
+/// The position correction of the density constraint for the particles of `chunk`.
+/// Safety: the particles of `chunk` are this thread's alone.
+#[allow(clippy::too_many_arguments)]
+unsafe fn correct_plain(chunk: &[u32], l: Lists, nw: &[f32], gx: &[f32], gy: &[f32], gz: &[f32], lam: &[f32], bodies: &[Body], nb: usize, k: &Kern, q: Shared<f32>) {
+    let (iwq, kc, ir0) = (k.iwq, k.kc, k.ir0);
+    for &iu in chunk { let i = iu as usize;
+        let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
+        let li = lam[i];
+        for e in l.lo[i] as usize..l.hi[i] as usize {
+            let w = nw[e]; if w == 0.0 { continue; }
+            let mut qq = w * iwq; qq *= qq; qq *= qq;
+            let f = (li + lam[l.nbr[e] as usize] - kc * qq) * ir0;
+            x += f * gx[e]; y += f * gy[e]; z += f * gz[e];
+        }
+        push(i, x, y, z, k, bodies, nb, q);
+    }
+}
+
+/// [`correct_plain`] eight neighbours at a time, with the same numbers to the last bit (see [`density_wide`]).
+/// Safety: as [`correct_plain`]; the processor has AVX2; the kept arrays have [`LANES`] entries to spare.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn correct_wide(chunk: &[u32], l: Lists, nw: &[f32], gx: &[f32], gy: &[f32], gz: &[f32], lam: &[f32], bodies: &[Body], nb: usize, k: &Kern, q: Shared<f32>) {
+    use std::arch::x86_64::*;
+    let (np, lp) = (l.nbr.as_ptr(), lam.as_ptr());
+    let (viwq, vkc, vir0, zero) = (_mm256_set1_ps(k.iwq), _mm256_set1_ps(k.kc), _mm256_set1_ps(k.ir0), _mm256_setzero_ps());
+    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    for &iu in chunk { let i = iu as usize;
+        let vli = _mm256_set1_ps(lam[i]);
+        let mut sums = [0.0f32; 3];
+        let (mut e, hi) = (l.lo[i] as usize, l.hi[i] as usize);
+        while e < hi {
+            let n = (hi - e).min(LANES);
+            let at = |m: usize| *lp.add(*np.add(e + m) as usize);
+            let lj = _mm256_setr_ps(at(0), at(1), at(2), at(3), at(4), at(5), at(6), at(7));
+            let w = _mm256_loadu_ps(nw.as_ptr().add(e));
+            let mut there = _mm256_cmp_ps::<_CMP_NEQ_UQ>(w, zero);
+            if n < LANES { there = _mm256_and_ps(there, _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), lanes))); }
+            let mut qq = _mm256_mul_ps(w, viwq); qq = _mm256_mul_ps(qq, qq); qq = _mm256_mul_ps(qq, qq);
+            let f = _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(vli, lj), _mm256_mul_ps(vkc, qq)), vir0);
+            let mut t = [[0.0f32; LANES]; 3];
+            for (c, g) in [gx, gy, gz].into_iter().enumerate() { _mm256_storeu_ps(t[c].as_mut_ptr(), _mm256_and_ps(there, _mm256_mul_ps(f, _mm256_loadu_ps(g.as_ptr().add(e))))); }
+            for m in 0..LANES { for c in 0..3 { sums[c] += t[c][m]; } }
+            e += n;
+        }
+        push(i, sums[0], sums[1], sums[2], k, bodies, nb, q);
+    }
+}
+
+/// For each pattern of eight yes/no answers: the places of the yeses, in order (see [`near_wide`]).
+#[cfg(target_arch = "x86_64")]
+static PACK: [[u32; 8]; 256] = {
+    let mut t = [[0u32; 8]; 256];
+    let mut m = 0;
+    while m < 256 {
+        let (mut n, mut b) = (0, 0);
+        while b < 8 { if m >> b & 1 != 0 { t[m][n] = b as u32; n += 1; } b += 1; }
+        m += 1;
+    }
+    t
+};
+
+/// The neighbours of the particle at place `k` of the cell order among the candidates in `around`
+/// (ranges of that order), eight candidates at a time: written to `out` from entry `n` on, in the
+/// order of the candidates. Returns the new `n`.
+/// Safety: the processor has AVX2; `sx`, `sy`, `sz` and `sorted` can be read eight entries past any
+/// candidate; `out` has room for all the candidates and eight entries more.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,popcnt")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn near_wide(x: f32, y: f32, z: f32, k: usize, h2: f32, around: &[(u32, u32)], sx: *const f32, sy: *const f32, sz: *const f32, sorted: *const u32, out: *mut u32, mut n: usize) -> usize {
+    use std::arch::x86_64::*;
+    let (vx, vy, vz, vh2) = (_mm256_set1_ps(x), _mm256_set1_ps(y), _mm256_set1_ps(z), _mm256_set1_ps(h2));
+    for &(a, b) in around {
+        let (mut m, b) = (a as usize, b as usize);
+        while m < b {
+            let (ex, ey, ez) = (_mm256_sub_ps(vx, _mm256_loadu_ps(sx.add(m))), _mm256_sub_ps(vy, _mm256_loadu_ps(sy.add(m))), _mm256_sub_ps(vz, _mm256_loadu_ps(sz.add(m))));
+            let r2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ex, ex), _mm256_mul_ps(ey, ey)), _mm256_mul_ps(ez, ez));
+            let mut bits = _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(r2, vh2)) as u32;
+            if b - m < LANES { bits &= (1u32 << (b - m)) - 1; }      // behind the end of the range
+            if k >= m && k < m + LANES { bits &= !(1u32 << (k - m)); } // the particle itself
+            // those within reach are moved to the front and all eight written; the next lot overwrites the rest
+            let packed = _mm256_permutevar8x32_epi32(_mm256_loadu_si256(sorted.add(m) as *const __m256i), _mm256_loadu_si256(PACK[bits as usize].as_ptr() as *const __m256i));
+            _mm256_storeu_si256(out.add(n) as *mut __m256i, packed);
+            n += bits.count_ones() as usize;
+            m += LANES;
+        }
+    }
+    n
+}
+
+/// Two awake bodies with springs between them: `a` is the lower slot; `runs` are the springs from
+/// `a` into `b` and from `b` into `a`, each as (which list, from, to) into the step's lists of springs across bodies.
+struct Pair { a: u32, b: u32, runs: [(u32, u32, u32); 2] }
+
+/// One spring pulls its two ends towards its rest length `l`: half each, or all of it on particle
+/// `i` if the far end `j` is `fixed` (then that end is taken where it was before the step).
+/// Safety: no other thread touches particle `i`, nor `j` unless it is fixed.
+#[inline(always)]
+unsafe fn relax(q: Shared<f32>, p: &[f32], i: usize, j: usize, l: f32, ksp: f32, fixed: bool) {
+    let (oi, oj) = (i * 3, j * 3);
+    let (jx, jy, jz) = if fixed { (p[oj], p[oj + 1], p[oj + 2]) } else { (*q.at(oj), *q.at(oj + 1), *q.at(oj + 2)) };
+    let (ex, ey, ez) = (*q.at(oi) - jx, *q.at(oi + 1) - jy, *q.at(oi + 2) - jz);
+    let r = (ex * ex + ey * ey + ez * ez).sqrt() + 1e-7;
+    let c = ksp * (r - l) / r * if fixed { 1.0 } else { 0.5 };
+    *q.at(oi) -= ex * c; *q.at(oi + 1) -= ey * c; *q.at(oi + 2) -= ez * c;
+    if !fixed { *q.at(oj) += ex * c; *q.at(oj + 1) += ey * c; *q.at(oj + 2) += ez * c; }
+}
+
 fn spring_exists(spr_n: &[u8], spr_j: &[u32], a: usize, b: usize) -> bool {
     let (na, nb) = (spr_n[a] as usize, spr_n[b] as usize);
     spr_j[a * MAX_SPR..a * MAX_SPR + na].iter().any(|&j| j as usize == b) || spr_j[b * MAX_SPR..b * MAX_SPR + nb].iter().any(|&j| j as usize == a)
 }
 
 impl World {
-    pub fn new(n: usize, max_bodies: usize) -> World {
+    /// A world for at most `max_bodies` bodies of `n`^3 particles each.
+    pub fn new(n: usize, max_bodies: usize) -> World { World::with_room(n, max_bodies, max_bodies) }
+
+    /// A world with room for `first` bodies to begin with, which grows as bodies are added, up to `most`.
+    pub fn with_room(n: usize, first: usize, most: usize) -> World {
         let n = n.clamp(6, 16);
         let side = 0.97f32;
         let s = side / n as f32;
         let nb = n * n * n;
-        let slots = max_bodies.max(1);
-        let maxp = nb * slots;
         let h = 2.05 * s;
         let h2 = h * h;
         let kp = 315.0 / (64.0 * std::f32::consts::PI * h.powi(9));
@@ -442,28 +744,51 @@ impl World {
         } } }
         rho0 *= 0.97;
         let wq = { let r = 0.25 * h; let t = h2 - r * r; kp * t * t * t };
-        let mut table = 1usize; while table < maxp * 2 { table <<= 1; }
-        World {
-            n, nb, slots, maxp, s, h, side, rc: s * 0.5,
+        let mut w = World {
+            n, nb, slots: 0, maxp: 0, most: most.max(first).max(1), s, h, side, rc: s * 0.5,
             mats: [Material::honey(), Material::slime()],
-            bmats: vec![Material::honey(); max_bodies],
+            bmats: Vec::new(),
             gravity: 9.8, iters: 3, visc_iters: 1, eps: 60.0, k_corr: 2.0e-4, kill_y: -64.0,
-            p: vec![0.0; maxp * 3], q: vec![0.0; maxp * 3], v: vec![0.0; maxp * 3], alive: vec![0; maxp], scale: vec![0.0; maxp],
-            anc_kind: vec![0; maxp], anc_id: vec![0; maxp], anc_pt: vec![0.0; maxp * 3], anc_loc: vec![0.0; maxp * 3], anc_stick: vec![0.0; maxp], anc_cool: vec![0.0; maxp], anc_d: vec![0.0; maxp * 3], anc_axis: vec![3; maxp],
-            spr_n: vec![0; maxp], spr_j: vec![0; maxp * MAX_SPR], spr_l: vec![0.0; maxp * MAX_SPR],
-            rho: vec![0.0; maxp], lam: vec![0.0; maxp],
-            dpx: vec![0.0; maxp], dpy: vec![0.0; maxp], dpz: vec![0.0; maxp], damp: vec![0.0; maxp],
-            sup: vec![0.0; maxp], sup_n: vec![0.0; maxp],
-            born: vec![0.0; maxp], fly: vec![0; maxp], land: vec![0; maxp],
-            act: Vec::with_capacity(maxp),
-            mask: (table - 1) as u32, c_start: vec![0; table + 1], c_fill: vec![0; table], sorted: vec![0; maxp], pkey: vec![0; maxp], pbkt: vec![0; maxp], cell: vec![0; maxp * 3],
-            nbr: Vec::new(), nbr_lo: vec![0; maxp], nbr_hi: vec![0; maxp], nw: Vec::new(), ng: Vec::new(), sp: Vec::new(), runs: Vec::new(),
+            p: Vec::new(), q: Vec::new(), v: Vec::new(), alive: Vec::new(), scale: Vec::new(),
+            anc_kind: Vec::new(), anc_id: Vec::new(), anc_pt: Vec::new(), anc_loc: Vec::new(), anc_stick: Vec::new(), anc_cool: Vec::new(), anc_d: Vec::new(), anc_axis: Vec::new(),
+            spr_n: Vec::new(), spr_j: Vec::new(), spr_l: Vec::new(),
+            rho: Vec::new(), lam: Vec::new(),
+            dpx: Vec::new(), dpy: Vec::new(), dpz: Vec::new(), damp: Vec::new(),
+            sup: Vec::new(), sup_n: Vec::new(),
+            born: Vec::new(), fly: Vec::new(), land: Vec::new(),
+            act: Vec::new(),
+            c_start: Vec::new(), c_fill: Vec::new(), sorted: Vec::new(), pkey: Vec::new(), pbkt: Vec::new(), cell: Vec::new(),
+            nbr: Vec::new(), nbr_lo: Vec::new(), nbr_hi: Vec::new(), nw: Vec::new(), ngx: Vec::new(), ngy: Vec::new(), ngz: Vec::new(), sp: Vec::new(), runs: Vec::new(),
             kp, ks, w0, rho0, wq,
-            bodies: vec![Body::default(); slots],
-            st: Vec::new(), st_org: [0; 3], st_dim: [0; 3], st_start: vec![0], st_items: Vec::new(),
-            kin: Vec::new(), kin_near: vec![0; slots],
-            clock: 0.0, acc: 0.0, seed: 0x9E3779B9, steps: 0, ticks: 0, last_pairs: 0, prof: [0.0; 12], mesh_cache: Default::default(), rev: 1,
-        }
+            bodies: Vec::new(),
+            st: Vec::new(), st_cells: Cells::default(),
+            kin: Vec::new(), kin_from: Vec::new(), kin_near: Vec::new(), kin_ids: Vec::new(), partners: Vec::new(),
+            clock: 0.0, acc: 0.0, seed: 0x9E3779B9, steps: 0, ticks: 0, last_pairs: 0, prof: [0.0; 12], mesh_cache: Default::default(), rev: 1, wide: wide_registers(),
+        };
+        w.grow(first.max(1));
+        w
+    }
+
+    /// Makes room for `slots` bodies (never fewer than there are).
+    fn grow(&mut self, slots: usize) {
+        if slots <= self.slots { return; }
+        let maxp = self.nb * slots;
+        self.p.resize(maxp * 3, 0.0); self.v.resize(maxp * 3, 0.0);
+        self.q.resize(maxp * 3 + LANES, 0.0); // (room to load four numbers from the last particle)
+        self.alive.resize(maxp, 0); self.scale.resize(maxp, 0.0);
+        self.anc_kind.resize(maxp, 0); self.anc_id.resize(maxp, 0); self.anc_pt.resize(maxp * 3, 0.0); self.anc_loc.resize(maxp * 3, 0.0);
+        self.anc_stick.resize(maxp, 0.0); self.anc_cool.resize(maxp, 0.0); self.anc_d.resize(maxp * 3, 0.0); self.anc_axis.resize(maxp, 3);
+        self.spr_n.resize(maxp, 0); self.spr_j.resize(maxp * MAX_SPR, 0); self.spr_l.resize(maxp * MAX_SPR, 0.0);
+        self.rho.resize(maxp, 0.0); self.lam.resize(maxp, 0.0);
+        self.dpx.resize(maxp, 0.0); self.dpy.resize(maxp, 0.0); self.dpz.resize(maxp, 0.0); self.damp.resize(maxp, 0.0);
+        self.sup.resize(maxp, 0.0); self.sup_n.resize(maxp, 0.0);
+        self.born.resize(maxp, 0.0); self.fly.resize(maxp, 0); self.land.resize(maxp, 0);
+        self.sorted.resize(maxp + LANES, 0); // (room to read eight candidates from anywhere)
+        self.pkey.resize(maxp, 0); self.pbkt.resize(maxp, 0); self.cell.resize(maxp * 3, 0);
+        self.nbr_lo.resize(maxp, 0); self.nbr_hi.resize(maxp, 0);
+        self.bodies.resize(slots, Body::default()); self.bmats.resize(slots, Material::honey());
+        self.partners.resize(slots, Vec::new());
+        self.slots = slots; self.maxp = maxp;
     }
 
     fn rnd(&mut self) -> f32 { self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223); ((self.seed >> 8) & 0xffff) as f32 / 65536.0 }
@@ -472,22 +797,32 @@ impl World {
         self.bodies[b] = Body::default();
         let (lo, hi) = (b * self.nb, (b + 1) * self.nb);
         for i in lo..hi { self.alive[i] = 0; self.scale[i] = 0.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; }
-        // drop springs other bodies still hold to these particles (the slot may be reused)
-        for i in 0..self.maxp {
-            let mut k = 0usize;
-            while k < self.spr_n[i] as usize {
-                let j = self.spr_j[i * MAX_SPR + k] as usize;
-                if j >= lo && j < hi {
-                    let last = i * MAX_SPR + self.spr_n[i] as usize - 1;
-                    self.spr_j[i * MAX_SPR + k] = self.spr_j[last]; self.spr_l[i * MAX_SPR + k] = self.spr_l[last]; self.spr_n[i] -= 1;
-                } else { k += 1; }
+        // drop springs other bodies still hold to these particles (the slot may be reused); only a body that
+        // has had springs with this one can hold any
+        for c in std::mem::take(&mut self.partners[b]) {
+            let c = c as usize;
+            if c == b { continue; }
+            for i in c * self.nb..(c + 1) * self.nb {
+                let mut k = 0usize;
+                while k < self.spr_n[i] as usize {
+                    let j = self.spr_j[i * MAX_SPR + k] as usize;
+                    if j >= lo && j < hi {
+                        let last = i * MAX_SPR + self.spr_n[i] as usize - 1;
+                        self.spr_j[i * MAX_SPR + k] = self.spr_j[last]; self.spr_l[i * MAX_SPR + k] = self.spr_l[last]; self.spr_n[i] -= 1;
+                    } else { k += 1; }
+                }
             }
         }
     }
 
-    /// A free body slot; if there is none, the oldest sleeping body (else the oldest one) makes room.
+    /// A free body slot. If there is none, room is made for more; and once there are as many as there may be,
+    /// the oldest sleeping body (else the oldest one) makes room.
     fn take_slot(&mut self) -> Option<usize> {
         let mut slot = self.bodies.iter().position(|b| b.state == 0);
+        if slot.is_none() && self.slots < self.most {
+            slot = Some(self.slots);
+            self.grow((self.slots + (self.slots / 2).max(8)).min(self.most));
+        }
         if slot.is_none() {
             let mut best: Option<usize> = None; let mut bt = f32::MAX;
             for (i, b) in self.bodies.iter().enumerate() { if !b.awake && b.born < bt { bt = b.born; best = Some(i); } }
@@ -636,7 +971,10 @@ impl World {
         let mut gone = vec![false; self.nb];
         for &(_, i) in &near { self.alive[i] = 0; self.scale[i] = 0.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; self.fly[i] = 0; gone[i - lo] = true; }
         // springs to what was taken go at once: the places may be filled again before the solver would notice
-        for i in 0..self.maxp {
+        // (they are held by the body itself and by bodies it has had springs with)
+        let mut holders: Vec<usize> = self.partners[b].iter().map(|&c| c as usize).filter(|&c| c != b).collect();
+        holders.push(b);
+        for i in holders.into_iter().flat_map(|c| c * self.nb..(c + 1) * self.nb) {
             let mut k = 0usize;
             while k < self.spr_n[i] as usize {
                 let j = self.spr_j[i * MAX_SPR + k] as usize;
@@ -825,59 +1163,30 @@ impl World {
     pub fn set_static(&mut self, data: &[f32], count: usize) {
         self.st.clear();
         let count = count.min(data.len() / 7);
-        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
         for k in 0..count {
             let d = &data[k * 7..k * 7 + 7];
-            let b = SBox { min: [d[0], d[1], d[2]], max: [d[3], d[4], d[5]], stick: d[6] };
-            for a in 0..3 { lo[a] = lo[a].min(b.min[a].floor() as i32 - 1); hi[a] = hi[a].max(b.max[a].ceil() as i32 + 1); }
-            self.st.push(b);
+            self.st.push(SBox { min: [d[0], d[1], d[2]], max: [d[3], d[4], d[5]], stick: d[6] });
         }
-        if self.st.is_empty() { self.st_dim = [0; 3]; self.st_start.clear(); self.st_start.push(0); self.st_items.clear(); }
-        else {
-            self.st_org = lo;
-            for a in 0..3 { self.st_dim[a] = (hi[a] - lo[a]).clamp(1, 96); }
-            let cells = (self.st_dim[0] * self.st_dim[1] * self.st_dim[2]) as usize;
-            let mut cnt = vec![0u32; cells + 1];
-            for pass in 0..2 {
-                if pass == 1 {
-                    let mut run = 0u32; for c in 0..=cells { let t = cnt[c]; cnt[c] = run; run += t; }
-                    self.st_start = cnt.clone(); self.st_items = vec![0; run as usize];
-                }
-                for (bi, b) in self.st.iter().enumerate() {
-                    let mut r = [[0i32; 2]; 3];
-                    for a in 0..3 {
-                        // only the cells the box itself lies in: a particle looks in every cell its own reach touches,
-                        // so a box next door is found exactly when the particle is close enough to matter
-                        r[a][0] = (b.min[a].floor() as i32 - self.st_org[a]).clamp(0, self.st_dim[a] - 1);
-                        r[a][1] = ((b.max[a].ceil() as i32 - 1).max(b.min[a].floor() as i32) - self.st_org[a]).clamp(0, self.st_dim[a] - 1);
-                    }
-                    for z in r[2][0]..=r[2][1] { for y in r[1][0]..=r[1][1] { for x in r[0][0]..=r[0][1] {
-                        let c = (x + self.st_dim[0] * (y + self.st_dim[1] * z)) as usize;
-                        if pass == 0 { cnt[c] += 1; } else { self.st_items[cnt[c] as usize] = bi as u32; cnt[c] += 1; }
-                    } } }
-                }
-            }
-        }
+        self.st_cells.fill(&self.st);
         // anchors of awake goo whose surface is gone let go (sleeping goo is outside the scanned region),
         // and so do anchors that ended up inside a block: goo dragged in there by a piston must come out again
-        for i in 0..self.maxp {
-            if self.alive[i] != 0 && self.anc_kind[i] == 1 && self.bodies[i / self.nb].awake {
-                let o = i * 3; let pt = [self.anc_pt[o], self.anc_pt[o + 1], self.anc_pt[o + 2]];
-                if !self.near_static(&pt, self.rc + 0.06) || self.near_static(&pt, -0.5 * self.rc) { self.anc_kind[i] = 0; }
+        for b in 0..self.slots {
+            if self.bodies[b].state == 0 || !self.bodies[b].awake { continue; }
+            for i in b * self.nb..(b + 1) * self.nb {
+                if self.alive[i] != 0 && self.anc_kind[i] == 1 {
+                    let o = i * 3; let pt = [self.anc_pt[o], self.anc_pt[o + 1], self.anc_pt[o + 2]];
+                    if !self.near_static(&pt, self.rc + 0.06) || self.near_static(&pt, -0.5 * self.rc) { self.anc_kind[i] = 0; }
+                }
             }
         }
     }
 
     fn near_static(&self, pt: &[f32; 3], tol: f32) -> bool {
         if self.st.is_empty() { return false; }
-        let mut c = [0i32; 3];
-        for a in 0..3 { c[a] = pt[a].floor() as i32 - self.st_org[a]; }
+        let c = [pt[0].floor() as i32, pt[1].floor() as i32, pt[2].floor() as i32];
         for dz in -1..=1 { for dy in -1..=1 { for dx in -1..=1 {
-            let (x, y, z) = (c[0] + dx, c[1] + dy, c[2] + dz);
-            if x < 0 || y < 0 || z < 0 || x >= self.st_dim[0] || y >= self.st_dim[1] || z >= self.st_dim[2] { continue; }
-            let ci = (x + self.st_dim[0] * (y + self.st_dim[1] * z)) as usize;
-            for k in self.st_start[ci]..self.st_start[ci + 1] {
-                let b = &self.st[self.st_items[k as usize] as usize];
+            for &k in self.st_cells.at(c[0] + dx, c[1] + dy, c[2] + dz) {
+                let b = &self.st[k as usize];
                 if (0..3).all(|a| pt[a] > b.min[a] - tol && pt[a] < b.max[a] + tol) { return true; }
             }
         } } }
@@ -906,7 +1215,7 @@ impl World {
             }
             next.push(KBox { id, min, max, pmin, pmax, vel: [d[7], d[8], d[9]], stick: d[10], t: 0.0, front: (d[11] as i32).clamp(0, 6) as u8 });
         }
-        for i in 0..self.maxp {
+        for i in (0..self.slots).filter(|&b| self.bodies[b].state != 0).flat_map(|b| b * self.nb..(b + 1) * self.nb) {
             if self.alive[i] == 0 || self.anc_kind[i] != 2 { continue; }
             match next.iter().find(|b| b.id == self.anc_id[i]) {
                 None => self.anc_kind[i] = 1, // becomes a plain world anchor at its last position
@@ -1067,14 +1376,19 @@ impl World {
 
         // which moving boxes can reach which body in this step: a particle moves 0.3 blocks at most, a box from where it was to where it is
         let reach = 0.3 + self.rc + 0.05;
+        self.kin_from.clear(); self.kin_near.clear();
         for b in 0..slots {
+            self.kin_from.push(self.kin_near.len() as u32);
+            if self.bodies[b].state == 0 || !self.bodies[b].awake { continue; }
             let bb = self.bodies[b].bb;
-            let mut near = 0u64;
-            for (k, kb) in self.kin.iter().enumerate().take(64) {
-                if (0..3).all(|a| kb.max[a].max(kb.pmax[a]) > bb[a] - reach && kb.min[a].min(kb.pmin[a]) < bb[a + 3] + reach) { near |= 1 << k; }
+            for (k, kb) in self.kin.iter().enumerate() {
+                if (0..3).all(|a| kb.max[a].max(kb.pmax[a]) > bb[a] - reach && kb.min[a].min(kb.pmin[a]) < bb[a + 3] + reach) { self.kin_near.push(k as u32); }
             }
-            self.kin_near[b] = near;
         }
+        self.kin_from.push(self.kin_near.len() as u32);
+        self.kin_ids.clear();
+        self.kin_ids.extend(self.kin.iter().enumerate().map(|(k, b)| (b.id, k as u32)));
+        self.kin_ids.sort_unstable();
 
         match pool() { Some(pool) => pool.install(|| self.solve(dt)), None => self.solve(dt) }
 
@@ -1092,7 +1406,7 @@ impl World {
         // ---- predict, then collide ----
         let g = self.gravity;
         {
-            let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
+            let walls = Walls { st: &self.st, cells: &self.st_cells, kin: &self.kin, kin_from: &self.kin_from, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
             let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
             let (v, q, cool) = (Shared::of(&mut self.v), Shared::of(&mut self.q), Shared::of(&mut self.anc_cool));
             let (p, damp, rho) = (&self.p[..], &self.damp[..], &self.rho[..]);
@@ -1115,9 +1429,13 @@ impl World {
         // positions (bit for bit, with opposite gradients), so momentum is still conserved exactly.
         // Each particle only ever reads its own list, in the order it was built: the result cannot
         // depend on the number of threads, and everything a loop touches is small and in order.
-        let (h, h2, mask) = (self.h, self.h * self.h, self.mask);
+        let (h, h2) = (self.h, self.h * self.h);
         let ih = 1.0 / h;
-        for c in self.c_start.iter_mut() { *c = 0; }
+        // (the table is as large as the number of particles that are moving asks for, not as the number there could be)
+        let mut table = 1024usize; while table < n_act * 2 { table <<= 1; }
+        let mask = (table - 1) as u32;
+        self.c_start.clear(); self.c_start.resize(table + 1, 0);
+        self.c_fill.resize(table, 0);
         for a in 0..n_act {
             let i = self.act[a] as usize; let o = i * 3;
             let (ix, iy, iz) = ((self.q[o] * ih).floor() as i32 + 512, (self.q[o + 1] * ih).floor() as i32 + 512, (self.q[o + 2] * ih).floor() as i32 + 512);
@@ -1125,7 +1443,6 @@ impl World {
             self.pkey[i] = key3(ix, iy, iz);
             let bk = hash3(ix, iy, iz, mask); self.pbkt[i] = bk; self.c_start[bk as usize + 1] += 1;
         }
-        let table = mask as usize + 1;
         for c in 0..table { self.c_start[c + 1] += self.c_start[c]; self.c_fill[c] = self.c_start[c]; }
         for a in 0..n_act { let i = self.act[a]; let b = self.pbkt[i as usize] as usize; self.sorted[self.c_fill[b] as usize] = i; self.c_fill[b] += 1; }
         // within a bucket, keep each cell's particles together (two cells rarely share a bucket; when they do, order them by cell)
@@ -1137,7 +1454,7 @@ impl World {
             self.sorted[m] = i;
         }
         // positions in that order, and where each cell's run of particles starts and ends
-        self.sp.resize(n_act * 3, 0.0);
+        self.sp.resize(n_act * 3 + LANES, 0.0); // (room to read eight candidates from anywhere)
         self.runs.clear();
         for k in 0..n_act {
             let i = self.sorted[k] as usize;
@@ -1148,7 +1465,9 @@ impl World {
         // one cell at a time: the particles of the 27 cells around it are looked up once and then tried against each of its own
         const RUNS: usize = 48;
         let found: Vec<(Vec<u32>, Vec<u32>)> = {
-            let (sx, sy, sz) = (&self.sp[..n_act], &self.sp[n_act..2 * n_act], &self.sp[2 * n_act..]);
+            let (sx, sy, sz) = (&self.sp[..n_act], &self.sp[n_act..2 * n_act], &self.sp[2 * n_act..3 * n_act]);
+            let sp = &self.sp[..];
+            let wide = self.wide;
             let (cell, pkey, c_start, sorted, runs) = (&self.cell[..], &self.pkey[..], &self.c_start[..], &self.sorted[..], &self.runs[..]);
             let n_runs = runs.len() - 1;
             (0..n_runs.div_ceil(RUNS)).into_par_iter().map(|c| {
@@ -1173,17 +1492,27 @@ impl World {
                     for k in lo..hi {
                         let (x, y, z) = (sx[k], sy[k], sz[k]);
                         // every candidate is written, and kept only if it is within reach: no branch for the processor to guess
-                        list.reserve(candidates);
+                        list.reserve(candidates + LANES);
                         let mut n = list.len();
                         let out = list.as_mut_ptr();
-                        for &(a, b) in &around[..n_around] {
-                            let (a, b) = (a as usize, b as usize);
-                            let (cx, cy, cz, cj) = (&sx[a..b], &sy[a..b], &sz[a..b], &sorted[a..b]);
-                            for m in 0..b - a {
-                                let (ex, ey, ez) = (x - cx[m], y - cy[m], z - cz[m]);
-                                // Safety: at most `candidates` writes past the old length, and that much room was reserved
-                                unsafe { *out.add(n) = cj[m]; }
-                                n += ((ex * ex + ey * ey + ez * ez < h2) & (a + m != k)) as usize;
+                        #[cfg(target_arch = "x86_64")]
+                        let done = wide && {
+                            // Safety: sp and sorted have eight entries to spare, and that much room was reserved in the list
+                            n = unsafe { near_wide(x, y, z, k, h2, &around[..n_around], sp.as_ptr(), sp.as_ptr().add(n_act), sp.as_ptr().add(2 * n_act), sorted.as_ptr(), out, n) };
+                            true
+                        };
+                        #[cfg(not(target_arch = "x86_64"))]
+                        let done = { let _ = (wide, sp); false };
+                        if !done {
+                            for &(a, b) in &around[..n_around] {
+                                let (a, b) = (a as usize, b as usize);
+                                let (cx, cy, cz, cj) = (&sx[a..b], &sy[a..b], &sz[a..b], &sorted[a..b]);
+                                for m in 0..b - a {
+                                    let (ex, ey, ez) = (x - cx[m], y - cy[m], z - cz[m]);
+                                    // Safety: at most `candidates` writes past the old length, and that much room was reserved
+                                    unsafe { *out.add(n) = cj[m]; }
+                                    n += ((ex * ex + ey * ey + ez * ez < h2) & (a + m != k)) as usize;
+                                }
                             }
                         }
                         unsafe { list.set_len(n); }
@@ -1193,21 +1522,32 @@ impl World {
                 (list, ends)
             }).collect()
         };
+        // the lists one behind the other, in the order of the cells; every lot of cells copies its own stretch
+        let mut starts: Vec<usize> = Vec::with_capacity(found.len() + 1);
+        let mut total = 0usize;
+        for (list, _) in &found { starts.push(total); total += list.len(); }
         self.nbr.clear();
-        for (c, (list, ends)) in found.iter().enumerate() {
-            let base = self.nbr.len() as u32;
-            let mut from = base;
-            let first = self.runs[c * RUNS] as usize;
-            for (k, &end) in ends.iter().enumerate() {
-                let i = self.sorted[first + k] as usize;
-                self.nbr_lo[i] = from; self.nbr_hi[i] = base + end; from = base + end;
-            }
-            self.nbr.extend_from_slice(list);
+        self.nbr.resize(total + LANES, 0); // (a few entries to spare: the lists are read eight entries at a time, and that may be from the last entry of the last list)
+        {
+            let (nbr, lo, hi) = (Shared::of(&mut self.nbr), Shared::of(&mut self.nbr_lo), Shared::of(&mut self.nbr_hi));
+            let (sorted, runs) = (&self.sorted[..], &self.runs[..]);
+            found.par_iter().zip(starts.par_iter()).enumerate().for_each(|(c, ((list, ends), &base))| {
+                let first = runs[c * RUNS] as usize;
+                let mut from = base as u32;
+                // Safety: this lot's stretch of the lists and its own particles are written by nobody else
+                unsafe {
+                    std::ptr::copy_nonoverlapping(list.as_ptr(), nbr.at(base) as *mut u32, list.len());
+                    for (k, &end) in ends.iter().enumerate() {
+                        let i = sorted[first + k] as usize;
+                        *lo.at(i) = from; *hi.at(i) = base as u32 + end; from = base as u32 + end;
+                    }
+                }
+            });
         }
         drop(found);
-        let n_nbr = self.nbr.len();
+        let n_nbr = total;
         self.last_pairs = n_nbr / 2;
-        self.nw.resize(n_nbr, 0.0); self.ng.resize(n_nbr * 3, 0.0);
+        self.nw.resize(n_nbr + LANES, 0.0); self.ngx.resize(n_nbr + LANES, 0.0); self.ngy.resize(n_nbr + LANES, 0.0); self.ngz.resize(n_nbr + LANES, 0.0);
         self.prof[1] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- springs form ----
@@ -1252,125 +1592,150 @@ impl World {
             let na = self.spr_n[a] as usize;
             if na >= MAX_SPR { continue; }
             self.spr_j[a * MAX_SPR + na] = b as u32; self.spr_l[a * MAX_SPR + na] = r2.sqrt().max(0.7 * self.s); self.spr_n[a] += 1;
+            let (ba, bb) = ((a / nb) as u32, (b / nb) as u32);
+            if ba != bb {
+                if !self.partners[ba as usize].contains(&bb) { self.partners[ba as usize].push(bb); }
+                if !self.partners[bb as usize].contains(&ba) { self.partners[bb as usize].push(ba); }
+            }
         }
         drop(wanted);
         if look { for b in 0..slots { self.bodies[b].fresh = false; } }
-        // bodies joined by springs have to be relaxed together and in order; the others can go side by side
+        // Which springs can be relaxed side by side. A spring with both ends in one body is that body's own
+        // business, and so is one whose far end is in goo that is asleep or on its way out (that end does not give
+        // way): the bodies relax theirs side by side. A spring between two bodies that are both awake belongs to the
+        // pair, and the pairs take turns, in rounds in which no body is in two pairs. Who goes when depends on the
+        // bodies and their springs alone, never on the number of threads.
         let live: Vec<bool> = (0..slots).map(|b| self.bodies[b].state == 1 && self.bodies[b].awake).collect();
-        let islands: Vec<Vec<u32>> = {
-            let mut root: Vec<usize> = (0..slots).collect();
-            fn find(r: &mut Vec<usize>, mut a: usize) -> usize { while r[a] != a { r[a] = r[r[a]]; a = r[a]; } a }
-            if slots <= 64 {
-                let (spr_n, spr_j, alive, mats, live) = (&self.spr_n[..], &self.spr_j[..], &self.alive[..], &self.bmats[..], &live[..]);
-                let joined: Vec<u64> = (0..slots).into_par_iter().map(|b| {
-                    let mut m = 0u64;
-                    if !live[b] || !mats[b].dynamic_springs { return m; }
-                    for i in b * nb..(b + 1) * nb { if alive[i] == 0 { continue; }
-                        for k in 0..spr_n[i] as usize { let bj = spr_j[i * MAX_SPR + k] as usize / nb; if bj != b && live[bj] { m |= 1 << bj; } } }
-                    m
-                }).collect();
-                for b in 0..slots { for c in 0..slots { if joined[b] >> c & 1 != 0 { let (x, y) = (find(&mut root, b), find(&mut root, c)); if x != y { root[x.max(y)] = x.min(y); } } } }
-            } else {
-                for b in 1..slots { root[b] = 0; }
-            }
-            let mut groups: Vec<Vec<u32>> = vec![Vec::new(); slots];
-            for b in 0..slots { if live[b] && self.bodies[b].count > 0 { let r = find(&mut root, b); groups[r].push(b as u32); } }
-            groups.into_iter().filter(|g| !g.is_empty()).collect()
+        let awake: Vec<u32> = (0..slots).filter(|&b| live[b] && self.bodies[b].count > 0).map(|b| b as u32).collect();
+        // per awake body: its springs into other awake bodies as (the other body, the particle, which of its springs), by the other body
+        let across: Vec<Vec<(u32, u32, u32)>> = {
+            let (spr_n, spr_j, alive, live) = (&self.spr_n[..], &self.spr_j[..], &self.alive[..], &live[..]);
+            awake.par_iter().map(|&bu| {
+                let b = bu as usize;
+                let mut out = Vec::new();
+                for i in b * nb..(b + 1) * nb {
+                    if alive[i] == 0 { continue; }
+                    for k in 0..spr_n[i] as usize { let bj = spr_j[i * MAX_SPR + k] as usize / nb; if bj != b && live[bj] { out.push((bj as u32, i as u32, k as u32)); } }
+                }
+                out.sort_by_key(|e| e.0); // (keeps the order of the particles within a pair)
+                out
+            }).collect()
         };
+        let pairs: Vec<Pair> = {
+            // every run of springs from one body into another, under the pair of the two
+            let mut runs: Vec<(u32, u32, bool, u32, u32, u32)> = Vec::new();
+            for (at, list) in across.iter().enumerate() {
+                let own = awake[at];
+                let mut from = 0;
+                while from < list.len() {
+                    let other = list[from].0;
+                    let mut to = from + 1;
+                    while to < list.len() && list[to].0 == other { to += 1; }
+                    runs.push((own.min(other), own.max(other), own > other, at as u32, from as u32, to as u32));
+                    from = to;
+                }
+            }
+            runs.sort_unstable();
+            let mut pairs: Vec<Pair> = Vec::new();
+            for (a, b, second, at, from, to) in runs {
+                if pairs.last().map_or(true, |p| p.a != a || p.b != b) { pairs.push(Pair { a, b, runs: [(0, 0, 0); 2] }); }
+                pairs.last_mut().unwrap().runs[second as usize] = (at, from, to);
+            }
+            pairs
+        };
+        // rounds: every pair goes into the first round in which neither of its bodies is taken yet
+        let mut rounds: Vec<Vec<u32>> = Vec::new();
+        let mut leftover: Vec<u32> = Vec::new();
+        if !pairs.is_empty() {
+            let mut taken = vec![0u128; slots];
+            for (at, pair) in pairs.iter().enumerate() {
+                let free = !(taken[pair.a as usize] | taken[pair.b as usize]);
+                if free == 0 { leftover.push(at as u32); continue; } // (more than 128 neighbours: after the rounds, one by one)
+                let round = free.trailing_zeros() as usize;
+                taken[pair.a as usize] |= 1 << round; taken[pair.b as usize] |= 1 << round;
+                if rounds.len() <= round { rounds.resize(round + 1, Vec::new()); }
+                rounds[round].push(at as u32);
+            }
+        }
         self.prof[2] += t_prof.elapsed().as_secs_f64(); t_prof = std::time::Instant::now();
 
         // ---- constraint iterations ----
-        let (ir0, eps, kc, iwq, kp, ks, w0) = (1.0 / self.rho0, self.eps, self.k_corr, 1.0 / self.wq, self.kp, self.ks, self.w0);
-        let max_d = 0.9 * self.s;
+        let kern = Kern { h, h2, ks: self.ks, kp: self.kp, w0: self.w0, ir0: 1.0 / self.rho0, eps: self.eps, iwq: 1.0 / self.wq, kc: self.k_corr, max_d: 0.9 * self.s };
+        let wide = self.wide;
         for it in 0..self.iters {
             let last = it + 1 == self.iters;
             // density and its multiplier; the kernel value and gradient towards every neighbour are kept for the correction
             let t_sub = std::time::Instant::now();
             {
-                let (q, nbr, nbr_lo, nbr_hi, mats) = (&self.q[..], &self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.bmats[..]);
-                let (rho, lam, nw, ng) = (Shared::of(&mut self.rho), Shared::of(&mut self.lam), Shared::of(&mut self.nw), Shared::of(&mut self.ng));
-                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3;
-                    let (x, y, z) = (q[o], q[o + 1], q[o + 2]);
-                    let (mut r, mut sx, mut sy, mut sz, mut s2) = (w0, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
-                    for e in nbr_lo[i] as usize..nbr_hi[i] as usize {
-                        let oj = nbr[e] as usize * 3;
-                        let (ex, ey, ez) = (x - q[oj], y - q[oj + 1], z - q[oj + 2]);
-                        let r2 = ex * ex + ey * ey + ez * ez;
-                        // Safety: the entries of particle i's list belong to this thread alone
-                        if r2 >= h2 { unsafe { *nw.at(e) = 0.0; } continue; }
-                        let d = r2.sqrt() + 1e-7; let t = h2 - r2; let u = h - d; let gm = -ks * u * u / d;
-                        let w = kp * t * t * t; let (gx, gy, gz) = (gm * ex, gm * ey, gm * ez);
-                        unsafe { *nw.at(e) = w; *ng.at(e * 3) = gx; *ng.at(e * 3 + 1) = gy; *ng.at(e * 3 + 2) = gz; }
-                        r += w; s2 += gx * gx + gy * gy + gz * gz;
-                        sx += gx; sy += gy; sz += gz;
-                    }
-                    let m = &mats[i / nb];
-                    let mut c = r * ir0 - 1.0;
-                    if c < 0.0 { c = c.max(-m.coh_lim) * m.coh_k; }
-                    let den = (s2 + sx * sx + sy * sy + sz * sz) * ir0 * ir0 + eps;
-                    unsafe { *rho.at(i) = r; *lam.at(i) = -c / den; }
-                } });
+                let lists = Lists { nbr: &self.nbr, lo: &self.nbr_lo, hi: &self.nbr_hi };
+                let (q, mats) = (&self.q[..], &self.bmats[..]);
+                let kept = Kept { w: Shared::of(&mut self.nw), gx: Shared::of(&mut self.ngx), gy: Shared::of(&mut self.ngy), gz: Shared::of(&mut self.ngz) };
+                let (rho, lam) = (Shared::of(&mut self.rho), Shared::of(&mut self.lam));
+                // Safety: a chunk's particles and the entries of their lists belong to the thread that has the chunk.
+                // (The particles are taken in the order of their cells, which is the order their lists lie in:
+                // every particle is worked out on its own here, so the order makes no difference to the numbers,
+                // but walking the lists from one end to the other is a good deal quicker than jumping about in them.)
+                self.sorted[..n_act].par_chunks(CHUNK).for_each(|chunk| unsafe {
+                    #[cfg(target_arch = "x86_64")]
+                    if wide { return density_wide(chunk, q, lists, &kern, mats, nb, kept, rho, lam); }
+                    density_plain(chunk, q, lists, &kern, mats, nb, kept, rho, lam)
+                });
             }
             self.prof[7] += t_sub.elapsed().as_secs_f64(); let t_sub = std::time::Instant::now();
             // position correction
             {
-                let (nbr, nbr_lo, nbr_hi, nw, ng, lam, bodies) = (&self.nbr[..], &self.nbr_lo[..], &self.nbr_hi[..], &self.nw[..], &self.ng[..], &self.lam[..], &self.bodies[..]);
+                let lists = Lists { nbr: &self.nbr, lo: &self.nbr_lo, hi: &self.nbr_hi };
+                let (nw, ngx, ngy, ngz, lam, bodies) = (&self.nw[..], &self.ngx[..], &self.ngy[..], &self.ngz[..], &self.lam[..], &self.bodies[..]);
                 let q = Shared::of(&mut self.q);
-                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3;
-                    let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
-                    let li = lam[i];
-                    for e in nbr_lo[i] as usize..nbr_hi[i] as usize {
-                        let w = nw[e]; if w == 0.0 { continue; }
-                        let mut qq = w * iwq; qq *= qq; qq *= qq;
-                        let f = (li + lam[nbr[e] as usize] - kc * qq) * ir0;
-                        x += f * ng[e * 3]; y += f * ng[e * 3 + 1]; z += f * ng[e * 3 + 2];
-                    }
-                    // goo that has just had a block dropped into it is only allowed small corrections, growing back to normal
-                    let limit = max_d * (1.0 - 0.87 * (bodies[i / nb].soft * (1.0 / SOFT_TIME)).min(1.0));
-                    let l2 = x * x + y * y + z * z;
-                    if l2 > limit * limit { let sc = limit / l2.sqrt(); x *= sc; y *= sc; z *= sc; }
-                    unsafe { *q.at(o) += x; *q.at(o + 1) += y; *q.at(o + 2) += z; }
-                } });
+                self.sorted[..n_act].par_chunks(CHUNK).for_each(|chunk| unsafe {
+                    #[cfg(target_arch = "x86_64")]
+                    if wide { return correct_wide(chunk, lists, nw, ngx, ngy, ngz, lam, bodies, nb, &kern, q); }
+                    correct_plain(chunk, lists, nw, ngx, ngy, ngz, lam, bodies, nb, &kern, q)
+                });
             }
             self.prof[8] += t_sub.elapsed().as_secs_f64(); let t_sub = std::time::Instant::now();
-            // springs: one island at a time on each thread, in particle order within it
+            // springs: first every body its own, side by side; then the pairs of bodies, round by round
             {
                 let (p, alive, spr_n, spr_j, spr_l, bodies, live) = (&self.p[..], &self.alive[..], &self.spr_n[..], &self.spr_j[..], &self.spr_l[..], &self.bodies[..], &live[..]);
                 let q = Shared::of(&mut self.q);
-                islands.par_iter().for_each(|island| { for &bu in island { let b = bu as usize;
+                // Safety: a thread writes the particles of its own body only (the far end of a spring into goo that is not awake is read, as it was before the step)
+                awake.par_iter().for_each(|&bu| { let b = bu as usize;
                     let ksp = bodies[b].k_spring;
                     for i in b * nb..(b + 1) * nb {
                         if alive[i] == 0 { continue; }
-                        let oi = i * 3;
                         for sidx in 0..spr_n[i] as usize {
-                            let j = spr_j[i * MAX_SPR + sidx] as usize; let oj = j * 3;
-                            let l = spr_l[i * MAX_SPR + sidx];
+                            let j = spr_j[i * MAX_SPR + sidx] as usize;
                             let fixed = !live[j / nb]; // asleep or on its way out: it does not give way
-                            unsafe {
-                                let (jx, jy, jz) = if fixed { (p[oj], p[oj + 1], p[oj + 2]) } else { (*q.at(oj), *q.at(oj + 1), *q.at(oj + 2)) };
-                                let (ex, ey, ez) = (*q.at(oi) - jx, *q.at(oi + 1) - jy, *q.at(oi + 2) - jz);
-                                let r = (ex * ex + ey * ey + ez * ez).sqrt() + 1e-7;
-                                let c = ksp * (r - l) / r * if fixed { 1.0 } else { 0.5 };
-                                *q.at(oi) -= ex * c; *q.at(oi + 1) -= ey * c; *q.at(oi + 2) -= ez * c;
-                                if !fixed { *q.at(oj) += ex * c; *q.at(oj + 1) += ey * c; *q.at(oj + 2) += ez * c; }
-                            }
+                            if !fixed && j / nb != b { continue; } // into another body that is awake: the pair's turn comes below
+                            unsafe { relax(q, p, i, j, spr_l[i * MAX_SPR + sidx], ksp, fixed); }
                         }
                     }
-                } });
+                });
+                // Safety: the pairs of one round have no body in common, and a pair writes the particles of its two bodies only
+                let turn = |at: u32| { for &(list, from, to) in &pairs[at as usize].runs {
+                    for &(_, iu, k) in &across[list as usize][from as usize..to as usize] {
+                        let i = iu as usize; let si = i * MAX_SPR + k as usize;
+                        unsafe { relax(q, p, i, spr_j[si] as usize, spr_l[si], bodies[i / nb].k_spring, false); }
+                    }
+                } };
+                for round in &rounds { round.par_iter().for_each(|&at| turn(at)); }
+                for &at in &leftover { turn(at); }
             }
             self.prof[9] += t_sub.elapsed().as_secs_f64(); let t_sub = std::time::Instant::now();
             // anchors pull, then colliders push
             {
-                let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
+                let walls = Walls { st: &self.st, cells: &self.st_cells, kin: &self.kin, kin_from: &self.kin_from, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
                 let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
                 let (q, anc_d) = (Shared::of(&mut self.q), Shared::of(&mut self.anc_d));
-                let (p, rho, cool, mats, kin) = (&self.p[..], &self.rho[..], &self.anc_cool[..], &self.bmats[..], &self.kin[..]);
+                let (p, rho, cool, mats, kin, kin_ids) = (&self.p[..], &self.rho[..], &self.anc_cool[..], &self.bmats[..], &self.kin[..], &self.kin_ids[..]);
                 self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
                     let kind = *an.kind.at(i);
                     if kind != 0 {
                         if kind == 2 {
                             let id = *an.id.at(i);
-                            if let Some(b) = kin.iter().find(|b| b.id == id) { for c in 0..3 { *an.pt.at(o + c) = b.min[c] + *an.loc.at(o + c); } }
+                            // (the first box with that id, as they come in the list)
+                            let at = kin_ids.partition_point(|e| e.0 < id);
+                            if at < kin_ids.len() && kin_ids[at].0 == id { let b = &kin[kin_ids[at].1 as usize]; for c in 0..3 { *an.pt.at(o + c) = b.min[c] + *an.loc.at(o + c); } }
                         }
                         let ak = mats[i / nb].adh_k;
                         for c in 0..3 {
@@ -1431,7 +1796,7 @@ impl World {
         let idt = 1.0 / dt;
         let max_move = 0.3f32; // blocks per step; stops a crushed particle from being shot across the map
         {
-            let walls = Walls { st: &self.st, st_org: self.st_org, st_dim: self.st_dim, st_start: &self.st_start, st_items: &self.st_items, kin: &self.kin, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
+            let walls = Walls { st: &self.st, cells: &self.st_cells, kin: &self.kin, kin_from: &self.kin_from, kin_near: &self.kin_near, nb: self.nb, rc: self.rc, rho_max: 1.25 * self.rho0 };
             let an = Anchors { kind: Shared::of(&mut self.anc_kind), id: Shared::of(&mut self.anc_id), pt: Shared::of(&mut self.anc_pt), loc: Shared::of(&mut self.anc_loc), stick: Shared::of(&mut self.anc_stick), axis: Shared::of(&mut self.anc_axis), fly: Shared::of(&mut self.fly) };
             let (p, rho, cool) = (&self.p[..], &self.rho[..], &self.anc_cool[..]);
             let (q, v) = (Shared::of(&mut self.q), Shared::of(&mut self.v));
@@ -1460,7 +1825,7 @@ impl World {
                 let fly = &self.fly[..];
                 let (sup, anc_kind, anc_id) = (&self.sup[..], &self.anc_kind[..], &self.anc_id[..]);
                 let sup_n = Shared::of(&mut self.sup_n);
-                self.act.par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let oi = i * 3;
+                self.sorted[..n_act].par_chunks(CHUNK).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let oi = i * 3;
                     let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
                     let k = mats[i / nb].xsph / rho[i];
                     let mut landed = false;

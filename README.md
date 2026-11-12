@@ -86,7 +86,8 @@ being drawn as flat pictures and puffs. See [Smoke and fire](#smoke-and-fire).
   the mod's own.
 - `/goolook info` says what the simulation is doing on this client: Rust or Java core, how many
   threads, how many pieces of goo and how many of them are moving, how long an update takes, and
-  whether it keeps up with real time.
+  whether it keeps up with real time; and, for goo drawn as a surface, how many of its quads are
+  in view and how long handing them to the game takes each frame.
 
 ### Shader packs and Sodium
 
@@ -214,8 +215,29 @@ The mod jar carries the native library for Windows x64, Linux x64 and macOS (Int
 silicon). On anything else, or if loading fails, it falls back to the Java simulation and says so in
 the log.
 
-The core uses half of the machine's cores, six at most. `PHYSICSBRUHH_THREADS=<n>` in the
+The core uses two thirds of the machine's processors, twelve at most (half of them on a machine
+with four or fewer); they only work while goo is moving. `PHYSICSBRUHH_THREADS=<n>` in the
 environment overrides that.
+
+What keeps the core quick when there is a lot of goo:
+
+- Where the processor has them (AVX2: about every desktop processor since 2015), the loops over a
+  particle's neighbours work on eight neighbours at a time instead of one. The numbers are the same
+  to the last bit either way, and a test holds the two against each other; `PHYSICSBRUHH_PLAIN=1`
+  in the environment switches the wide way off. On Apple silicon the core works one at a time.
+- The neighbour lists are walked in the order they lie in memory.
+- Springs are relaxed on all threads: every piece its own, side by side, then the springs between
+  two pieces, pair by pair, in rounds in which no piece is in two pairs. A lake of honey, where
+  every piece is joined to its neighbours, used to do all of this on one thread.
+- Nothing is sized by how much goo there could be: room for pieces is made as they come, the table
+  particles are looked up in is as large as the number of particles that are moving, and the blocks
+  around the goo are kept in a table that does not care how far apart they are.
+
+On the machine this was measured on (two cores of a 2.1 GHz server processor), a step with 24
+pieces moving (41 thousand particles) took 92 ms on one thread before and takes 70 ms now, and
+51 ms against 42 ms on two; a lake of 24 pieces takes 76 ms on one thread and 45 ms on two. See
+`cargo run --release --example bench -- 24 3 [lake]` in `native/`. How it goes on a real
+desktop processor with eight or twelve threads has not been measured.
 
 An error inside the mod's client code does not take the game down: the goo is dropped, the reason
 is written to the log, and after three errors in one world the mod stays quiet until the world is
@@ -298,9 +320,19 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
 - The shape of the goo is simulated separately on every client, so two players see slightly
   different puddles. The server only knows roughly where each piece is (a marker that follows
   pistons), which is what mobs, items and fall damage go by.
-- At most 24 pieces of goo are simulated around a player at once. Poured and thrown goo joins a
-  piece of its kind lying within a block and a half of where it comes down; further away it
-  starts a piece of its own.
+- There is no fixed number of pieces of goo any more: room is made as they arrive. What stops it
+  is memory, about half a megabyte a piece, so there is a ceiling of 1024 pieces
+  (`-Dphysicsbruhh.goo.most=<n>` moves it, up to 8192); past it the oldest piece that lies still
+  makes room for a new one. Blocks around the goo: 65 thousand boxes at most; pistons parts and
+  creatures in it: 512. The Java simulation (used only where the Rust core cannot be loaded) holds
+  64 pieces and only knows the blocks within 96 blocks of each other.
+- Poured and thrown goo joins a piece of its kind lying within a block and a half of where it
+  comes down; further away it starts a piece of its own.
+- Goo drawn as a surface (the block textures, or `/goolook shader`) is handed to the game anew
+  every frame and sorted by it, so a frame costs more the more goo is in view, whether it moves or
+  lies still. Puddles out of view are left out, but a great deal of goo in front of the camera
+  still costs frames. Clear goo drawn as a liquid does not have this cost: its particles go to the
+  graphics card once, when they change.
 - The server does not simulate goo, so where a stream or a thrown lump ends up is its estimate
   (a throw followed until it meets a block). Mobs and falls go by that estimate; what you see and
   wade through is the real thing on your client.
@@ -317,8 +349,8 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
   left sags into a strand or a puddle between the pistons.
 - A piece of goo is 1728 particles, and only pieces that are moving cost anything: slime comes to
   rest about three seconds after it was last disturbed, honey about seven. A moving piece takes
-  roughly 3 to 4 ms of one core per step, 60 steps a second, so a big puddle that is still
-  spreading needs several cores. A machine that cannot keep up shows the goo in slow motion
+  roughly 3 ms of one core per step (measured on a slow server core, see above), 60 steps a
+  second, so a big puddle that is still spreading needs several cores. A machine that cannot keep up shows the goo in slow motion
   rather than skipping steps (`/goolook info` shows the percentage).
 
 ## License

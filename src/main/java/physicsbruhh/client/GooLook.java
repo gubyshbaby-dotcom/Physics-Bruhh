@@ -77,6 +77,13 @@ final class GooLook {
                         context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info",
                                 "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
                                 info[0], info[1], info[2], info[3], ms, speed), false);
+                        if (GooRenderer.quadsInAll > 0) {
+                            String handover = String.format(java.util.Locale.ROOT, "%.2f", GooRenderer.handoverMillis);
+                            int inView = GooRenderer.quadsInView, inAll = GooRenderer.quadsInAll;
+                            context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info.draw",
+                                    "Drawing: %s of %s quads of the surface are in view; handing them to the game takes %s ms a frame (sorting and drawing them is the game's and comes on top)",
+                                    inView, inAll, handover), false);
+                        }
                     }
                     if (Packs.active) {
                         context.getSource().sendSuccess(() -> GooFluid.inUse()

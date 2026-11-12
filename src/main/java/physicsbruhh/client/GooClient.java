@@ -45,8 +45,17 @@ import physicsbruhh.sim.NativeSim;
  */
 public final class GooClient {
     private static final int PARTICLES_PER_EDGE = 12;
-    private static final int MAX_BODIES = 24;
-    private static final int MAX_STATIC = 4096, MAX_KINEMATIC = 64;
+    /**
+     * The most pieces of goo simulated at once ({@code -Dphysicsbruhh.goo.most=<n>}). It is there so that a
+     * world full of honey cannot eat all the memory (a piece takes about half a megabyte), not because
+     * the simulation needs a number: room is made as pieces arrive. Past it, the oldest piece that lies
+     * still makes room for a new one.
+     */
+    private static final int MAX_BODIES = Math.max(24, Math.min(8192, Integer.getInteger("physicsbruhh.goo.most", 1024)));
+    /** The Java simulation keeps room for all its pieces from the start, and is far too slow for many anyway. */
+    private static final int MAX_BODIES_JAVA = Math.min(MAX_BODIES, 64);
+    /** Block boxes and moving boxes (piston parts, creatures) around the goo that is awake, at most. */
+    private static final int MAX_STATIC = 1 << 16, MAX_KINEMATIC = 512;
     /**
      * How strongly goo clings to a sticky piston's head (1 = an ordinary block). High enough that slime
      * stretched to three blocks between two of them never peels off; at 3 it did so about every other time.
@@ -60,6 +69,9 @@ public final class GooClient {
     static final Object MESH_LOCK = new Object();
     static float[][] meshData = { new float[0], new float[0] };
     static int[] meshQuads = { 0, 0 };
+    /** Where the puddles of that surface are ({@link GooSim#PART_FLOATS} floats each), and how many there are. */
+    static float[][] meshParts = { new float[0], new float[0] };
+    static int[] meshPartCount = { 0, 0 };
     static int meshVersion;
     static volatile BlockPos origin = BlockPos.ZERO;
     /**
@@ -146,7 +158,7 @@ public final class GooClient {
         bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); TOLD.clear(); clearLook = false; NEW_CELLS.clear(); BORN.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         PART_IDS.clear(); HEADS.clear();
-        synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
+        synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshPartCount[0] = 0; meshPartCount[1] = 0; meshVersion++; }
         synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
     }
 
@@ -157,7 +169,7 @@ public final class GooClient {
         }
         if (s == null) {
             PhysicsBruhh.LOGGER.info("Using the Java simulation ({})", NativeSim.loadMessage());
-            s = new JavaSim(PARTICLES_PER_EDGE, MAX_BODIES);
+            s = new JavaSim(PARTICLES_PER_EDGE, MAX_BODIES_JAVA);
         } else {
             PhysicsBruhh.LOGGER.info("Using the Rust simulation ({})", NativeSim.loadMessage());
         }
@@ -855,15 +867,15 @@ public final class GooClient {
         float[] info = bodyInfo;
         int bodies = 0, awake = 0;
         for (int b = 0; b + 8 <= info.length; b += 8) { if (info[b] != 0.0F) { bodies++; if (info[b + 1] != 0.0F) awake++; } }
-        return new Object[] { s == null || !running ? null : s.backend(), simThreads, bodies, awake, stepMillis, simSpeed };
+        return new Object[] { s == null || !running ? null : s.backend(), simThreads, bodies, awake, stepMillis, simSpeed, MAX_BODIES };
     }
 
     // ------------------------------------------------------------------ simulation thread
 
     private static void simLoop() {
-        ByteBuffer staticBuf = direct(MAX_STATIC * GooSim.STATIC_FLOATS), kinBuf = direct(MAX_KINEMATIC * GooSim.KINEMATIC_FLOATS);
+        ByteBuffer staticBuf = direct(4096 * GooSim.STATIC_FLOATS), kinBuf = direct(MAX_KINEMATIC * GooSim.KINEMATIC_FLOATS);
         ByteBuffer infoBuf = direct(MAX_BODIES * GooSim.BODY_FLOATS);
-        ByteBuffer meshBuf = direct(1 << 18), particleBuf = direct(1 << 16);
+        ByteBuffer meshBuf = direct(1 << 18), particleBuf = direct(1 << 16), partBuf = direct(1 << 10);
         long last = System.nanoTime(), speedFrom = 0L;
         int speedSteps = 0;
         boolean dirty = true, hadAwake = false, asParticles = false;
@@ -876,8 +888,10 @@ public final class GooClient {
                 while ((cmd = COMMANDS.poll()) != null) { cmd.run(); dirty = true; }
                 Colliders c = COLLIDERS.getAndSet(null);
                 if (c != null) {
-                    staticBuf.asFloatBuffer().put(0, c.statics(), 0, Math.min(c.staticCount(), MAX_STATIC) * GooSim.STATIC_FLOATS);
-                    s.setStatic(staticBuf, Math.min(c.staticCount(), MAX_STATIC));
+                    int boxes = Math.min(c.staticCount(), MAX_STATIC);
+                    if (staticBuf.capacity() < boxes * GooSim.STATIC_FLOATS * 4) staticBuf = direct(boxes * 2 * GooSim.STATIC_FLOATS);
+                    staticBuf.asFloatBuffer().put(0, c.statics(), 0, boxes * GooSim.STATIC_FLOATS);
+                    s.setStatic(staticBuf, boxes);
                     kinBuf.asFloatBuffer().put(0, c.kinematics(), 0, c.kinematicCount() * GooSim.KINEMATIC_FLOATS);
                     s.setKinematic(kinBuf, c.kinematicCount());
                 }
@@ -888,7 +902,7 @@ public final class GooClient {
                 if (LOCKSTEP) { for (int k = 0; k < 3; k++) awake = s.step(1.0F / 60.0F + 1.0e-6F); }
                 else if (!paused) awake = s.step(dt);
                 if (s instanceof NativeSim n && n.broken()) throw new IllegalStateException("the Rust core reported an internal error");
-                int slots = s.bodies(infoBuf);
+                int slots = Math.min(s.bodies(infoBuf), MAX_BODIES);
                 float[] info = new float[Math.max(0, slots) * GooSim.BODY_FLOATS];
                 infoBuf.asFloatBuffer().get(0, info, 0, info.length);
                 bodyInfo = info;
@@ -898,8 +912,8 @@ public final class GooClient {
                     int[] ids = traceIds, counts = new int[ids.length];
                     for (int i = 0; i < ids.length; i++) counts[i] = ids[i] > 0 ? s.count(0, ids[i]) : 0;
                     traceCounts = counts;
-                    int[] stuck = new int[MAX_BODIES];
-                    for (int b = 0; b < MAX_BODIES; b++) stuck[b] = s.count(1, b);
+                    int[] stuck = new int[Math.max(0, slots)];
+                    for (int b = 0; b < stuck.length; b++) stuck[b] = s.count(1, b);
                     traceStuck = stuck;
                 }
                 // once more after the last moving body has stopped or gone, or its final state would never be shown
@@ -907,13 +921,13 @@ public final class GooClient {
                 boolean changed = awake > 0 || dirty || hadAwake || particles != asParticles;
                 if (particles != asParticles) {
                     // the other look's data is not kept up from here on: nothing stale must be left to draw
-                    if (particles) synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshVersion++; }
+                    if (particles) synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshPartCount[0] = 0; meshPartCount[1] = 0; meshVersion++; }
                     else synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
                 }
                 asParticles = particles;
                 if (watchAmounts) {
-                    int[] amounts = new int[MAX_BODIES];
-                    for (int b = 0; b < MAX_BODIES; b++) amounts[b] = info.length >= (b + 1) * GooSim.BODY_FLOATS && info[b * GooSim.BODY_FLOATS] != 0.0F ? s.count(4, b) : 0;
+                    int[] amounts = new int[Math.max(0, slots)];
+                    for (int b = 0; b < amounts.length; b++) amounts[b] = info.length >= (b + 1) * GooSim.BODY_FLOATS && info[b * GooSim.BODY_FLOATS] != 0.0F ? s.count(4, b) : 0;
                     bodyAmounts = amounts;
                 }
                 hadAwake = awake > 0;
@@ -934,10 +948,16 @@ public final class GooClient {
                         if (quads < 0 && quads > -(1 << 26)) { meshBuf = direct(-quads + (1 << 16)); quads = s.mesh(mat, meshBuf); }
                         if (quads < 0) quads = 0;
                         int floats = quads * GooSim.FLOATS_PER_QUAD;
+                        int parts = s.meshParts(mat, partBuf);
+                        if (parts < 0 && parts > -(1 << 26)) { partBuf = direct(-parts * 2); parts = s.meshParts(mat, partBuf); }
+                        if (parts < 0) parts = 0;
                         synchronized (MESH_LOCK) {
                             if (meshData[mat].length < floats) meshData[mat] = new float[floats + floats / 2];
                             meshBuf.asFloatBuffer().get(0, meshData[mat], 0, floats);
                             meshQuads[mat] = quads;
+                            if (meshParts[mat].length < parts * GooSim.PART_FLOATS) meshParts[mat] = new float[parts * GooSim.PART_FLOATS * 2];
+                            partBuf.asFloatBuffer().get(0, meshParts[mat], 0, parts * GooSim.PART_FLOATS);
+                            meshPartCount[mat] = parts;
                             meshVersion++;
                         }
                     }

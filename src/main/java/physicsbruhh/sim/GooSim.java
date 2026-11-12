@@ -17,6 +17,7 @@ public interface GooSim extends AutoCloseable {
     /** Particles in a whole block of goo, in a bottle of honey (four to the block) and in a slime ball (nine to the block). */
     int BLOCK = 1728, BOTTLE = 432, BALL = 192;
     int BODY_FLOATS = 8;        // state, awake, bounds min xyz, bounds max xyz
+    int PART_FLOATS = 8;        // first quad, number of quads, then the box the puddle lies in: least xyz, greatest xyz
 
     /**
      * How thick a piece of goo may be, as a factor on the usual (1). Thick honey melts later, flows
@@ -67,13 +68,20 @@ public interface GooSim extends AutoCloseable {
     int mesh(int material, ByteBuffer out);
 
     /**
+     * Where the puddles of the surface last built by {@link #mesh} for a material are: {@link #PART_FLOATS}
+     * floats each, so that whoever draws the quads can leave out the puddles that are not in view.
+     * Returns the number of puddles, or minus the floats needed if {@code out} is too small.
+     */
+    int meshParts(int material, ByteBuffer out);
+
+    /**
      * Writes every particle as four floats: position, then its size (0..1, shrinking while its piece
      * fades away) plus 2 for slime. Returns the number of particles, or minus the floats needed if
      * {@code out} is too small.
      */
     int particles(ByteBuffer out);
 
-    /** Fills {@link #BODY_FLOATS} floats per slot; returns the slot count. */
+    /** Fills {@link #BODY_FLOATS} floats per slot, for as many slots as {@code out} has room for; returns the number of slots there are. */
     int bodies(ByteBuffer out);
 
     /**

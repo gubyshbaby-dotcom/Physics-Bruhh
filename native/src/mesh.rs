@@ -31,9 +31,20 @@ const BRIDGE_BUDGET: usize = 12_000;
 
 struct Grid { org: [f32; 3] }
 
+/// Floats per puddle in the list [`build_parts`] fills: first quad, number of quads, then the box all of it lies in (least x, y, z, greatest x, y, z).
+pub const PART_FLOATS: usize = 8;
+
 /// Appends quads for every live body of `mat` to `out`. Returns the number of quads added.
 pub fn build(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
-    crate::sim::on_pool(|| build_on_pool(w, mat, out))
+    build_parts(w, mat, out, &mut Vec::new())
+}
+
+/// [`build`], which also says where in `out` each puddle is and what box it lies in ([`PART_FLOATS`]
+/// numbers a puddle, the quads counted from the first one this call added): whoever draws the
+/// quads can leave out the puddles that are not in view.
+pub fn build_parts(w: &World, mat: u8, out: &mut Vec<f32>, parts: &mut Vec<f32>) -> usize {
+    parts.clear();
+    crate::sim::on_pool(|| build_on_pool(w, mat, out, parts))
 }
 
 /// Meshes kept from the last call: a puddle nobody touched since then is not meshed again.
@@ -41,37 +52,54 @@ pub fn build(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
 pub struct Cache { entries: Vec<Entry> }
 struct Entry { mat: u8, key: Vec<(u32, u32)>, quads: Vec<f32> }
 
-fn build_on_pool(w: &World, mat: u8, out: &mut Vec<f32>) -> usize {
+fn build_on_pool(w: &World, mat: u8, out: &mut Vec<f32>, parts: &mut Vec<f32>) -> usize {
     let start = out.len();
     let slots = w.slots;
     // group bodies whose bounds touch, so merged puddles become one seamless surface
-    let ids: Vec<usize> = (0..slots).filter(|&b| w.bodies[b].state != 0 && w.bodies[b].mat == mat && w.bodies[b].count > 0).collect();
+    let mut ids: Vec<usize> = (0..slots).filter(|&b| w.bodies[b].state != 0 && w.bodies[b].mat == mat && w.bodies[b].count > 0).collect();
     let mut group: Vec<usize> = (0..ids.len()).collect();
     fn find(g: &mut Vec<usize>, mut a: usize) -> usize { while g[a] != a { g[a] = g[g[a]]; a = g[a]; } a }
     let pad = 3.0 * w.s;
-    for a in 0..ids.len() { for b in a + 1..ids.len() {
-        let (x, y) = (&w.bodies[ids[a]].bb, &w.bodies[ids[b]].bb);
-        if (0..3).all(|k| x[k] < y[k + 3] + pad && x[k + 3] > y[k] - pad) { let (ra, rb) = (find(&mut group, a), find(&mut group, b)); group[ra] = rb; }
-    } }
-    let mut done = vec![false; ids.len()];
-    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    // (from west to east: a body is only tried against those that begin before it ends, so a thousand
+    // puddles far apart are not each tried against all the others)
+    ids.sort_by(|&a, &b| w.bodies[a].bb[0].total_cmp(&w.bodies[b].bb[0]).then(a.cmp(&b)));
     for a in 0..ids.len() {
+        let x = &w.bodies[ids[a]].bb;
+        for b in a + 1..ids.len() {
+            let y = &w.bodies[ids[b]].bb;
+            if y[0] >= x[3] + pad { break; }
+            if (0..3).all(|k| x[k] < y[k + 3] + pad && x[k + 3] > y[k] - pad) { let (ra, rb) = (find(&mut group, a), find(&mut group, b)); group[ra] = rb; }
+        }
+    }
+    // the puddles, each with its bodies in the order of their slots, and the puddles in the order of their first body
+    let mut of_root: Vec<u32> = vec![u32::MAX; ids.len()];
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut order: Vec<usize> = (0..ids.len()).collect();
+    order.sort_by_key(|&a| ids[a]);
+    for a in order {
         let root = find(&mut group, a);
-        if done[root] { continue; }
-        done[root] = true;
-        clusters.push((0..ids.len()).filter(|&b| find(&mut group, b) == root).map(|b| ids[b]).collect());
+        if of_root[root] == u32::MAX { of_root[root] = clusters.len() as u32; clusters.push(Vec::new()); }
+        clusters[of_root[root] as usize].push(ids[a]);
     }
     // a puddle is described by its bodies and how often each has changed; unchanged ones come from the cache
     let keys: Vec<Vec<(u32, u32)>> = clusters.iter().map(|c| c.iter().map(|&b| (b as u32, w.bodies[b].rev)).collect()).collect();
     let mut cache = w.mesh_cache.lock().unwrap_or_else(|e| e.into_inner());
-    let mut parts: Vec<Option<Vec<f32>>> = keys.iter().map(|k| cache.entries.iter().position(|e| e.mat == mat && &e.key == k).map(|i| std::mem::take(&mut cache.entries[i].quads))).collect();
+    let kept: std::collections::HashMap<(u32, u32), usize> = cache.entries.iter().enumerate().filter(|(_, e)| e.mat == mat && !e.key.is_empty()).map(|(i, e)| (e.key[0], i)).collect();
+    let mut found: Vec<Option<Vec<f32>>> = keys.iter().map(|k| kept.get(&k[0]).filter(|&&i| &cache.entries[i].key == k).map(|&i| std::mem::take(&mut cache.entries[i].quads))).collect();
     // the others are meshed side by side
-    let todo: Vec<usize> = (0..clusters.len()).filter(|&c| parts[c].is_none()).collect();
+    let todo: Vec<usize> = (0..clusters.len()).filter(|&c| found[c].is_none()).collect();
     let fresh: Vec<Vec<f32>> = todo.par_iter().map(|&c| { let mut part = Vec::new(); mesh_cluster(w, &clusters[c], &mut part); part }).collect();
-    for (c, part) in todo.into_iter().zip(fresh) { parts[c] = Some(part); }
+    for (c, part) in todo.into_iter().zip(fresh) { found[c] = Some(part); }
     cache.entries.retain(|e| e.mat != mat);
-    for (key, part) in keys.into_iter().zip(parts) {
+    for ((key, part), bodies) in keys.into_iter().zip(found).zip(&clusters) {
         let quads = part.unwrap_or_default();
+        if !quads.is_empty() {
+            // where the puddle is: its bodies' bounds, and room for the surface around the outermost particles and for strands to droop
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for &b in bodies { let bb = &w.bodies[b].bb; for k in 0..3 { lo[k] = lo[k].min(bb[k]); hi[k] = hi[k].max(bb[k + 3]); } }
+            parts.extend_from_slice(&[((out.len() - start) / FLOATS_PER_QUAD) as f32, (quads.len() / FLOATS_PER_QUAD) as f32,
+                lo[0] - pad, lo[1] - pad - STRAND_DROOP, lo[2] - pad, hi[0] + pad, hi[1] + pad, hi[2] + pad]);
+        }
         out.extend_from_slice(&quads);
         cache.entries.push(Entry { mat, key, quads });
     }

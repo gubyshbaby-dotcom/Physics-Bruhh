@@ -9,10 +9,10 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub const ABI_VERSION: jint = 6;
+pub const ABI_VERSION: jint = 7;
 const ERR: jint = -9999;
 
-struct Handle { world: World, mesh: Vec<f32> }
+struct Handle { world: World, mesh: Vec<f32>, parts: [Vec<f32>; 2] }
 
 unsafe fn handle<'a>(h: jlong) -> Option<&'a mut Handle> { (h as *mut Handle).as_mut() }
 
@@ -30,7 +30,8 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nVersion(_env: JNIEnv, _c
 
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCreate(_env: JNIEnv, _c: JClass, n: jint, max_bodies: jint) -> jlong {
-    catch_unwind(|| Box::into_raw(Box::new(Handle { world: World::new(n.max(1) as usize, max_bodies.max(1) as usize), mesh: Vec::new() })) as jlong).unwrap_or(0)
+    // room for a few bodies to begin with; more is made as they are added, up to `max_bodies`
+    catch_unwind(|| Box::into_raw(Box::new(Handle { world: World::with_room(n.max(1) as usize, (max_bodies.max(1) as usize).min(8), max_bodies.max(1) as usize), mesh: Vec::new(), parts: [Vec::new(), Vec::new()] })) as jlong).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -135,10 +136,24 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nMesh(env: JNIEnv, _c: JC
     guard(|| unsafe {
         let (hd, out) = match (handle(h), floats(&env, &buf)) { (Some(a), Some(b)) => (a, b), _ => return ERR };
         hd.mesh.clear();
-        let quads = mesh::build(&hd.world, mat as u8, &mut hd.mesh);
+        let quads = mesh::build_parts(&hd.world, mat as u8, &mut hd.mesh, &mut hd.parts[mat as usize & 1]);
         if hd.mesh.len() > out.len() { return -(hd.mesh.len() as jint); }
         out[..hd.mesh.len()].copy_from_slice(&hd.mesh);
         quads as jint
+    })
+}
+
+/// Where the puddles of the last surface built for a material are: for each, its first quad, its number
+/// of quads and the box it lies in (8 floats). Returns the number of puddles, or minus the number
+/// of floats needed when the buffer is too small.
+#[no_mangle]
+pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nMeshParts(env: JNIEnv, _c: JClass, h: jlong, mat: jint, buf: JByteBuffer) -> jint {
+    guard(|| unsafe {
+        let (hd, out) = match (handle(h), floats(&env, &buf)) { (Some(a), Some(b)) => (a, b), _ => return ERR };
+        let parts = &hd.parts[mat as usize & 1];
+        if parts.len() > out.len() { return -(parts.len() as jint); }
+        out[..parts.len()].copy_from_slice(parts);
+        (parts.len() / mesh::PART_FLOATS) as jint
     })
 }
 
@@ -152,13 +167,14 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nParticles(env: JNIEnv, _
     })
 }
 
-/// Fills 8 floats per body slot: state, awake, then the bounding box. Returns the slot count.
+/// Fills 8 floats per body slot: state, awake, then the bounding box, for as many slots as the buffer
+/// has room for. Returns the number of slots there are (more than fit: ask again with a larger buffer).
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nBodies(env: JNIEnv, _c: JClass, h: jlong, buf: JByteBuffer) -> jint {
     guard(|| unsafe {
         let (hd, out) = match (handle(h), floats(&env, &buf)) { (Some(a), Some(b)) => (a, b), _ => return ERR };
-        let n = hd.world.slots.min(out.len() / 8);
-        for b in 0..n {
+        let n = hd.world.slots;
+        for b in 0..n.min(out.len() / 8) {
             let bd = &hd.world.bodies[b];
             out[b * 8] = bd.state as f32; out[b * 8 + 1] = if bd.awake { 1.0 } else { 0.0 };
             out[b * 8 + 2..b * 8 + 8].copy_from_slice(&bd.bb);

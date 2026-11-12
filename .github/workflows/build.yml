@@ -38,7 +38,7 @@ jobs:
         run: |
           cargo test --release
           PHYSICSBRUHH_THREADS=4 cargo test --release
-      - name: Threads change the speed, not the result
+      - name: Threads and wide registers change the speed, not the result
         if: matrix.platform == 'linux-x86_64'
         working-directory: native
         run: |
@@ -48,6 +48,16 @@ jobs:
           tail -1 bench-1.txt
           test "$(tail -1 bench-1.txt)" = "$(tail -1 bench-2.txt)"
           test "$(tail -1 bench-1.txt)" = "$(tail -1 bench-4.txt)"
+          # a lake of honey: every piece joined to its neighbours by springs, which take turns in rounds
+          for t in 1 2 4; do PHYSICSBRUHH_THREADS=$t ./target/release/examples/bench 12 2 lake > lake-$t.txt; head -2 lake-$t.txt; done
+          # ... and the same one neighbour at a time instead of eight
+          PHYSICSBRUHH_PLAIN=1 PHYSICSBRUHH_THREADS=4 ./target/release/examples/bench 12 2 lake > lake-plain.txt; head -2 lake-plain.txt
+          tail -1 lake-1.txt
+          test "$(tail -1 lake-1.txt)" = "$(tail -1 lake-2.txt)"
+          test "$(tail -1 lake-1.txt)" = "$(tail -1 lake-4.txt)"
+          test "$(tail -1 lake-1.txt)" = "$(tail -1 lake-plain.txt)"
+          # how it goes with a lot of goo on this machine
+          PHYSICSBRUHH_THREADS=4 ./target/release/examples/bench 60 2 lake | head -14
       - name: Build
         working-directory: native
         run: cargo build --release --target ${{ matrix.target }}

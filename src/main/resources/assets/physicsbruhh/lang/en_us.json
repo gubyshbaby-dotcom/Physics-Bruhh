@@ -16,6 +16,7 @@
   "commands.physicsbruhh.look.shader": "Goo is drawn as a glossy surface",
   "commands.physicsbruhh.look.plain": "Goo is drawn the plain way, without its own shader",
   "commands.physicsbruhh.look.info": "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
+  "commands.physicsbruhh.look.info.draw": "Drawing: %s of %s quads of the surface are in view; handing them to the game takes %s ms a frame (sorting and drawing them is the game's and comes on top)",
   "commands.physicsbruhh.look.info.off": "No goo is being simulated right now",
   "commands.physicsbruhh.look.info.pack": "A shader pack is on: goo is handed to it as ordinary translucent geometry, and the pack lights it",
   "commands.physicsbruhh.look.info.pack.liquid": "A shader pack is on: clear goo is drawn as a liquid over the pack's picture; goo with the block textures is handed to the pack (/goolook shader hands over both)",

@@ -189,6 +189,51 @@ public final class SimCheck {
     }
 
     /** The gas solver of the Rust core, through the same calls the game makes. */
+    /** More pieces than the core starts with room for, through the same calls the game makes. */
+    private static void many() {
+        System.out.println("Rust simulation, many pieces:");
+        final int pieces = 40;
+        try (NativeSim s = new NativeSim(12, 500)) {
+            ByteBuffer ground = buf((pieces * 2 + 8) * 5 * 7);
+            FloatBuffer g = ground.asFloatBuffer();
+            int boxes = 0;
+            for (int x = -4; x < pieces * 2 + 4; x++) for (int z = -2; z < 3; z++) { g.put(new float[] { x, -1, z, x + 1, 0, z + 1, 1 }); boxes++; }
+            s.setStatic(ground, boxes);
+            boolean own = true;
+            for (int b = 0; b < pieces; b++) own &= s.addBody(b % 3 == 2 ? GooSim.SLIME : GooSim.HONEY, b * 2, 0, 0, 1, 0, 0) == b;
+            check("every piece gets a place of its own", own, pieces + " pieces");
+            run(s, 0.5f);
+            ByteBuffer few = buf(8 * GooSim.BODY_FLOATS);
+            int slots = s.bodies(few);
+            check("the core says how many places there are, however small the buffer", slots >= pieces && slots <= 500, slots + " places");
+            ByteBuffer all = buf(slots * GooSim.BODY_FLOATS);
+            s.bodies(all);
+            int there = 0, standing = 0;
+            for (int b = 0; b < slots; b++) { if (all.asFloatBuffer().get(b * 8) == 1f) { there++; if (all.asFloatBuffer().get(b * 8 + 3) > -0.05f) standing++; } }
+            check("all the pieces are there, on the ground", there == pieces && standing == pieces, there + " there, " + standing + " on the ground");
+            for (int mat = 0; mat < 2; mat++) {
+                ByteBuffer mesh = buf(1 << 22), parts = buf(4);
+                int quads = s.mesh(mat, mesh);
+                int n = s.meshParts(mat, parts);
+                boolean asked = n < 0;
+                if (n < 0) { parts = buf(-n); n = s.meshParts(mat, parts); }
+                int sum = 0; boolean inOrder = true, boxed = true;
+                FloatBuffer pf = parts.asFloatBuffer(), mf = mesh.asFloatBuffer();
+                for (int k = 0; k < n; k++) {
+                    int first = (int) pf.get(k * 8), count = (int) pf.get(k * 8 + 1);
+                    inOrder &= first == sum; sum += count;
+                    // every corner of the puddle's quads lies in the box it is said to lie in
+                    for (int q = first; q < first + count && q < quads; q++) for (int v = 0; v < 4; v++) for (int a = 0; a < 3; a++) {
+                        float at = mf.get(q * GooSim.FLOATS_PER_QUAD + v * 6 + a);
+                        boxed &= at >= pf.get(k * 8 + 2 + a) && at <= pf.get(k * 8 + 5 + a);
+                    }
+                }
+                check((mat == 0 ? "honey" : "slime") + ": the surface comes with where its puddles are", quads > 0 && asked && n > 1 && sum == quads && inOrder && boxed,
+                        quads + " quads in " + n + " puddles (" + sum + " accounted for, in order " + inOrder + ", inside their boxes " + boxed + ")");
+            }
+        }
+    }
+
     private static void gas() {
         System.out.println("Rust gas solver:");
         float[] core = NativeGas.defaults(), game = GasParams.values();
@@ -242,6 +287,7 @@ public final class SimCheck {
             check("thin and thick honey agree", Math.abs(j[10] - r[10]) < 0.1f && Math.abs(j[11] - r[11]) < 0.15f, "thin " + j[10] + " vs " + r[10] + ", thick " + j[11] + " vs " + r[11]);
             check("honey squeezed out of a block agrees", Math.abs(j[14] - r[14]) < 0.4f && Math.abs(j[15] - r[15]) < 0.2f, "width " + j[14] + " vs " + r[14] + ", top " + j[15] + " vs " + r[15]);
             check("thin and thick slime agree", Math.abs(j[12] - r[12]) < 0.08f && Math.abs(j[13] - r[13]) < 0.08f, "thin " + j[12] + " vs " + r[12] + ", thick " + j[13] + " vs " + r[13]);
+            many();
             gas();
         } else {
             System.out.println("Rust simulation skipped: " + NativeSim.loadMessage());

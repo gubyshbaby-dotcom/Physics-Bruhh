@@ -9,7 +9,7 @@ import java.util.Locale;
 
 /** Rust core through JNI. Use {@link #available()} before constructing. */
 public final class NativeSim implements GooSim {
-    public static final int ABI_VERSION = 6;
+    public static final int ABI_VERSION = 7;
     private static final int ERR = -9999;
     private static Boolean loaded;
     private static String loadMessage = "not tried";
@@ -72,6 +72,7 @@ public final class NativeSim implements GooSim {
     @Override public void setKinematic(ByteBuffer boxes, int count) { check(nSetKinematic(handle, boxes, count)); }
     @Override public int step(float dt) { return check(nStep(handle, dt)); }
     @Override public int mesh(int material, ByteBuffer out) { return check(nMesh(handle, material, out)); }
+    @Override public int meshParts(int material, ByteBuffer out) { return check(nMeshParts(handle, material, out)); }
     @Override public int bodies(ByteBuffer out) { return check(nBodies(handle, out)); }
     @Override public int particles(ByteBuffer out) { return check(nParticles(handle, out)); }
     @Override public int probe(float x0, float y0, float z0, float x1, float y1, float z1) { return check(nProbe(handle, x0, y0, z0, x1, y1, z1)); }
@@ -94,6 +95,7 @@ public final class NativeSim implements GooSim {
     private static native int nSetKinematic(long h, ByteBuffer buf, int count);
     private static native int nStep(long h, float dt);
     private static native int nMesh(long h, int mat, ByteBuffer buf);
+    private static native int nMeshParts(long h, int mat, ByteBuffer buf);
     private static native int nBodies(long h, ByteBuffer buf);
     private static native int nParticles(long h, ByteBuffer buf);
     private static native int nProbe(long h, float x0, float y0, float z0, float x1, float y1, float z1);
