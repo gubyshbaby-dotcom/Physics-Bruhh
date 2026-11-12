@@ -3,7 +3,7 @@
 # (The game cannot be compiled against outside CI, so this is how its exact signatures are looked up.)
 # Lines of probe.txt:  src <class path ending in .java> | srcdir <regex over class paths> | grepsrc <path> <regex>
 #                      list <regex> | asset <path> | assetdir <regex> | alist <regex> | javap <class>
-#                      njavap <class> | nlist <regex>   (the same two, in NeoForge's own jar)
+#                      njavap <class> | nlist <regex> | nsrc <class path>   (the same, in NeoForge's own jar)
 # Sources are decompiled on the spot from the classes asked for; nothing is kept.
 set -u
 JAR=$(ls build/moddev/artifacts/*.jar 2>/dev/null | grep -v sources | grep -i patched | head -1)
@@ -29,10 +29,26 @@ if [ -s wanted.txt ]; then
   java -jar vineflower.jar -e="$JAR" --log-level=warn probe-in probe-out > vineflower.log 2>&1 || tail -20 vineflower.log
   echo "decompiled files: $(find probe-out -name '*.java' | wc -l)"
 fi
+# 1b. the same for classes of NeoForge's own jar (nsrc <class path ending in .java>)
+: > nwanted.txt
+while read -r kind a b; do
+  case "$kind" in
+    nsrc) base="${a%.java}"; grep -E "^${base//\$/\\\$}(\\\$[^/]*)?\.class$" neo-entries.txt >> nwanted.txt ;;
+  esac
+done < tools/probe.txt
+sort -u nwanted.txt -o nwanted.txt
+if [ -s nwanted.txt ] && [ -n "$NEO" ]; then
+  rm -rf probe-in-neo probe-out-neo && mkdir -p probe-in-neo probe-out-neo
+  xargs -a nwanted.txt unzip -q -o "$NEO" -d probe-in-neo
+  [ -f vineflower.jar ] || curl -sSL -o vineflower.jar https://repo1.maven.org/maven2/org/vineflower/vineflower/1.11.1/vineflower-1.11.1.jar
+  java -jar vineflower.jar -e="$JAR" -e="$NEO" --log-level=warn probe-in-neo probe-out-neo > vineflower-neo.log 2>&1 || tail -20 vineflower-neo.log
+  echo "decompiled files of NeoForge: $(find probe-out-neo -name '*.java' | wc -l)"
+fi
 # 2. print what was asked for, in order
 while read -r kind a b; do
   case "$kind" in
     src)     echo "API-BEGIN src $a"; cat "probe-out/$a" 2>/dev/null || echo "(missing)"; echo "API-END" ;;
+    nsrc)    echo "API-BEGIN src $a"; cat "probe-out-neo/$a" 2>/dev/null || echo "(missing)"; echo "API-END" ;;
     srcdir)  for f in $(cd probe-out && find . -name '*.java' | sed 's|^\./||' | grep -E "${a%\\.class*}" | sort); do echo "API-BEGIN src $f"; cat "probe-out/$f"; echo "API-END"; done ;;
     grepsrc) echo "API-BEGIN grepsrc $a"; grep -n -E "$b" "probe-out/$a" 2>/dev/null || echo "(nothing)"; echo "API-END" ;;
     list)    echo "API-BEGIN list $a"; grep -E "$a" entries.txt | grep -v '\$' || echo "(nothing)"; echo "API-END" ;;
