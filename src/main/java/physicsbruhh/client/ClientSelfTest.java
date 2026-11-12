@@ -425,6 +425,75 @@ final class ClientSelfTest {
             }
             default -> {
                 commands(server, "time set noon", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "fill 40 199 -3 54 212 12 minecraft:air");
+                step(70);
+            }
+        }
+    }
+
+    // ---- lava
+    private static String lavaProblem = "the lava part never ran";
+    private static int lavaFramesBefore;
+
+    /**
+     * Lava as the mod draws it: a lake in a basin, a spring on flat ground, a spring on a ledge that falls off it, and lava
+     * behind glass. The mod has to take the lava over from the game (unless a shader pack is on: then it has to leave it
+     * alone), draw it, follow it as it spreads, give it back when switched off and take it again when switched on.
+     */
+    private static void lava(Minecraft mc, MinecraftServer server) {
+        int into = tick - stepTick;
+        switch (step) {
+            case 70 -> {
+                if (into == 1) {
+                    stage("lava: a lake, a spring on flat ground, a lava-fall, lava behind glass");
+                    lavaFramesBefore = LavaClient.frames;
+                    commands(server, "goo clear", "gamemode creative @a", "time set noon",
+                            "fill 60 198 -8 86 199 20 minecraft:stone", "fill 60 200 -8 86 212 20 minecraft:air",
+                            "fill 64 199 1 69 199 6 minecraft:lava",
+                            "setblock 75 200 3 minecraft:lava",
+                            "fill 76 200 9 78 203 11 minecraft:stone", "setblock 77 204 10 minecraft:lava",
+                            "fill 64 200 9 68 201 13 minecraft:glass", "fill 65 200 10 67 201 12 minecraft:lava",
+                            // (a post to look down from)
+                            "fill 71 200 -8 71 205 -8 minecraft:stone", "tp @a 71.5 206 -7.5 0 42");
+                }
+                boolean taken = LavaClient.active && LavaClient.sections > 0 && LavaClient.drawnQuads > 0;
+                if (into % 100 == 0) PhysicsBruhh.LOGGER.info("CLIENTTEST lava t={} active={} sections={} faces={} drawn={} of {} frames={} broken={}", tick, LavaClient.active, LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.drawnSections, LavaClient.frames - lavaFramesBefore, LavaClient.broken);
+                if (Packs.active) {
+                    // a pack draws the lava its own way: the mod must keep its hands off
+                    if (into > 100) {
+                        lavaProblem = LavaClient.active || LavaClient.sections != 0 ? "with a shader pack on, the mod still drew the lava" : null;
+                        PhysicsBruhh.LOGGER.info("CLIENTTEST lava: left to the shader pack");
+                        step(74);
+                    }
+                } else if (into == 260 && taken) {
+                    // from close by and low down: the front of the flow and the fall
+                    commands(server, "tp @a 71.5 201.2 -1.5 -35 12");
+                } else if (into == 420 && taken) {
+                    // by night it is its own light
+                    commands(server, "time set midnight", "tp @a 71.5 206 -7.5 0 42");
+                } else if (into >= 520 && taken) {
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST lava: drawn by the mod in {} sections, {} faces ({} in view), in {} frames; taking up what changed costs {} ms a frame; {} buffers sent to the graphics card",
+                            LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.frames - lavaFramesBefore, LavaClient.prepareMillis, LavaClient.uploads);
+                    if (LavaClient.quads < 200) { lavaProblem = "the lava's surface is only " + LavaClient.quads + " faces"; step(74); }
+                    else { LavaClient.chosen = false; step(71); }
+                } else if (into > 900 || LavaClient.broken) {
+                    lavaProblem = LavaClient.broken ? "the mod's lava failed (see the log)"
+                            : !LavaHide.hooked ? "the game's lava models could not be made to ask the mod"
+                            : !LavaClient.active ? "the mod's lava never came on"
+                            : LavaClient.sections == 0 ? "no section with lava ever reached the mod" : "the lava was never drawn";
+                    step(74);
+                }
+            }
+            case 71 -> { // switched off: the game has its lava back
+                if (into == 1) stage("lava: switched off, and on again");
+                if (!LavaClient.active && LavaClient.sections == 0 && into > 40) { LavaClient.chosen = true; step(72); }
+                else if (into > 300) { lavaProblem = "switched off, the mod still held on to the lava"; LavaClient.chosen = true; step(74); }
+            }
+            case 72 -> { // and on again
+                if (LavaClient.active && LavaClient.sections > 0 && LavaClient.drawnQuads > 0 && into > 40) { lavaProblem = LavaClient.broken ? "the mod's lava failed (see the log)" : null; step(74); }
+                else if (into > 400) { lavaProblem = "switched on again, the mod did not take the lava back"; step(74); }
+            }
+            default -> {
+                commands(server, "time set noon", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 198 -8 86 199 20 minecraft:air");
                 step(9);
             }
         }
@@ -610,6 +679,8 @@ final class ClientSelfTest {
                 step(1);
             } else if (step > 0 && step < 9) {
                 hands(mc, server);
+            } else if (step >= 70) {
+                lava(mc, server);
             } else if (step >= 60) {
                 gas(mc, server);
             } else if (step >= 40) {
@@ -650,6 +721,7 @@ final class ClientSelfTest {
                 else if (!thrown) problem = "a slime ball was not thrown";
                 else if (handProblem != null) problem = handProblem;
                 else if (gasProblem != null) problem = gasProblem;
+                else if (lavaProblem != null) problem = lavaProblem;
                 else if (bornLingering < 0) problem = "the blocks put down by hand were never looked at";
                 else if (!wheelTurned) problem = "sneaking and turning the wheel did not change the thickness of the block in hand";
                 else if (!placedThick) problem = "the thick block placed by hand did not become thick goo";

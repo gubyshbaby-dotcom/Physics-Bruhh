@@ -49,5 +49,11 @@
   "commands.physicsbruhh.gas.info.idle": "Огонь и дым: сейчас считать нечего (%s)",
   "commands.physicsbruhh.gas.on.gpu": "видеокарта",
   "commands.physicsbruhh.gas.on.compute": "видеокарта (compute-шейдеры)",
-  "commands.physicsbruhh.gas.on.cpu": "процессор"
+  "commands.physicsbruhh.gas.on.cpu": "процессор",
+  "commands.physicsbruhh.lava.on": "Лаву рисует мод: одна гладкая поверхность, которая светится по своей температуре, с коркой, которую несёт и рвёт течением",
+  "commands.physicsbruhh.lava.off": "Лава на этом клиенте остаётся такой, какой её рисует игра",
+  "commands.physicsbruhh.lava.info": "Лава: мод рисует её в %s секциях мира (%s граней), из них в кадре %s (%s граней); приём изменений стоит %s мс на кадр",
+  "commands.physicsbruhh.lava.broken": "Лава мода на этой машине не заработала (см. лог); рисуется лава самой игры",
+  "commands.physicsbruhh.lava.unhooked": "В этой версии игры лава мода не смогла занять место игровой (см. лог); рисуется лава самой игры",
+  "commands.physicsbruhh.lava.pack": "Включён шейдер-пак: он рисует лаву по-своему, лава мода ждёт, пока его выключат"
 }

@@ -49,5 +49,11 @@
   "commands.physicsbruhh.gas.info.idle": "Fire and smoke: nothing is being computed right now (%s)",
   "commands.physicsbruhh.gas.on.gpu": "graphics card",
   "commands.physicsbruhh.gas.on.compute": "graphics card (compute shaders)",
-  "commands.physicsbruhh.gas.on.cpu": "processor"
+  "commands.physicsbruhh.gas.on.cpu": "processor",
+  "commands.physicsbruhh.lava.on": "Lava is drawn by the mod: one smooth surface that glows by how hot it is, with a crust that is carried along and torn where it runs",
+  "commands.physicsbruhh.lava.off": "Lava is left as the game draws it on this client",
+  "commands.physicsbruhh.lava.info": "Lava: drawn by the mod in %s sections of the world (%s faces), %s of them in view (%s faces); taking up what changed costs %s ms a frame",
+  "commands.physicsbruhh.lava.broken": "The mod's lava did not work on this machine (see the log); the game's own lava is drawn",
+  "commands.physicsbruhh.lava.unhooked": "The mod's lava could not take the place of the game's in this version of the game (see the log); the game's own lava is drawn",
+  "commands.physicsbruhh.lava.pack": "A shader pack is on: it draws the lava its own way, the mod's lava waits until it is off"
 }
