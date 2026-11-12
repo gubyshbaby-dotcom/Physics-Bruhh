@@ -317,9 +317,10 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
   blocks wide unless `/gaslook range` says otherwise, 96 at most (an explosion is then gas up to
   48 blocks away; the server tells clients of explosions within 96). What stops it going further
   is the graphics card's memory: 96 blocks wide at 4 cells to the block is 38 million cells, about
-  0.9 GB. Nothing wider than 24 blocks has been run on a real graphics card, nor in the game at
-  all: the passes are the same ones and the tests of the game run them on the small box. Up to 32
-  burning creatures and explosions feed the gas at once. The gas is
+  0.9 GB. The game's tests run a box 48 blocks wide on a software renderer (one fire in it: a
+  tenth to a fifth of the box is computed); nothing wider than 24 blocks has been run on a real
+  graphics card, and 64 and 96 not at all. Up to 32 burning creatures and explosions feed the gas
+  at once. The gas is
   computed separately on every client and is only something to look at: it does not burn, choke
   or push anything, and two players see different curls of the same smoke.
 - The gas solver's passes have been run on the software renderers of the build machines (Vulkan
