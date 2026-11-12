@@ -3,9 +3,11 @@
 //! Units are blocks and seconds. All coordinates are local to an origin the caller picks, so
 //! single precision stays accurate far from the world centre.
 //!
-//! Every body is `n^3` particles. Two materials share one world:
+//! Every body is `n^3` particles. Three materials share one world:
 //!  * honey — starts as a soft jelly cube, its springs turn plastic as it "melts", ends as a puddle;
-//!  * slime — keeps its spring lattice forever, so it stays an elastic blob.
+//!  * slime — keeps its spring lattice forever, so it stays an elastic blob;
+//!  * lava — a block of it is liquid from the start: thick, heavy, slow; it oozes out of where it
+//!    stood as a tongue with a rounded front, pours as a rope and lies down as a thick lobe.
 //! Colliders are axis-aligned boxes: static ones (blocks) and kinematic ones (moving piston parts).
 //! Particles that touch a collider get anchored to it; anchors creep (honey slides slowly) and
 //! snap when overstretched, which is what makes goo cling to pistons and pull into strands.
@@ -16,6 +18,9 @@ use std::sync::OnceLock;
 pub const MAX_SPR: usize = 16;
 pub const HONEY: u8 = 0;
 pub const SLIME: u8 = 1;
+pub const LAVA: u8 = 2;
+/// Which material a number names: anything that is not slime or lava is honey.
+#[inline] pub fn material(mat: u8) -> u8 { if mat == SLIME || mat == LAVA { mat } else { HONEY } }
 pub const DT: f32 = 1.0 / 60.0;
 /// How much thinner or thicker than usual a piece of goo may be.
 pub const THICK_MIN: f32 = 0.25;
@@ -95,6 +100,21 @@ impl Material {
             set_after: 5.0, set_rate: 0.5, tip: 2.05, sleep_v: 0.03,
         }
     }
+    /// Lava: liquid from the moment its block lets go, but thick and heavy. It creeps rather than
+    /// runs, keeps a rounded front a good part of a block high, pours as a rope and lies down as a lobe.
+    /// It has no strength of its own (no strain it holds for good), so it creeps on for as long as it
+    /// is thick enough to push itself along; a layer of it stays behind wherever it has been.
+    pub fn lava() -> Material {
+        Material {
+            melt_time: 1.0, damp_fresh: 3.0, damp_melted: 12.0,
+            spring_k0: 0.3, spring_k1: 0.12, plast0: 6.0, plast1: 3.0, yield_: 0.0,
+            dynamic_springs: true, break_strain: 4.0, spring_max_l: 0.21, shock_k: 0.42, shock_plast: 0.6, shock_decay: 1.1, shock_break: 16.0, shock_max_l: 1.7, thread_sag: 0.16,
+            coh_k: 0.45, coh_lim: 0.35, xsph: 0.45,
+            // it does not cling: what holds lava back is its own thickness, not the wall
+            adh_k: 0.0, adh_creep: 30.0, adh_break: 0.01,
+            set_after: 25.0, set_rate: 0.1, tip: 0.0, sleep_v: 0.01,
+        }
+    }
     pub fn slime() -> Material {
         Material {
             melt_time: 0.0, damp_fresh: 2.2, damp_melted: 2.2,
@@ -165,7 +185,7 @@ pub struct World {
     /// Places for bodies there are right now, and the particles they hold; both grow as bodies are added, up to `most` bodies.
     pub slots: usize, pub maxp: usize, pub most: usize,
     pub s: f32, pub h: f32, pub side: f32, pub rc: f32,
-    pub mats: [Material; 2],
+    pub mats: [Material; 3],
     /// The material of each body: the plain one, thickened or thinned as that piece is.
     pub bmats: Vec<Material>,
     pub gravity: f32, pub iters: usize, pub visc_iters: usize, pub eps: f32, pub k_corr: f32,
@@ -762,6 +782,44 @@ unsafe fn relax(q: Shared<f32>, p: &[f32], i: usize, j: usize, l: f32, ksp: f32,
     if !fixed { *q.at(oj) += ex * c; *q.at(oj + 1) += ey * c; *q.at(oj + 2) += ez * c; }
 }
 
+/// How far lava of this age (seconds since it left its block) has cooled, 0 (as it came out) to 1
+/// (crusted over): a skin forms within ten seconds, the rest takes a minute and more.
+#[inline] pub fn lava_cold(age: f32) -> f32 { 0.35 * smooth((age - 1.0) * 0.1) + 0.65 * smooth((age - 10.0) * (1.0 / 70.0)) }
+
+#[inline] fn lava_hash(x: u32, y: u32, z: u32, s: u32) -> f32 {
+    let mut h = x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77) ^ z.wrapping_mul(0xC2B2_AE3D) ^ s.wrapping_mul(0x27D4_EB2F);
+    h ^= h >> 15; h = h.wrapping_mul(0x2C1B_3C6D); h ^= h >> 12;
+    (h & 0xff) as f32 * (1.0 / 255.0)
+}
+
+/// What a particle of lava says about itself besides where it is, added to its size: 8 (lava),
+/// 16 times a pattern (0..63) and 1024 times its heat (0..63).
+/// The pattern is a blotchy noise over the block the lava came from, so it belongs to the lava and
+/// travels, stretches and tears with it; whoever draws the lava makes the crust out of it. The heat
+/// is what is left of it after cooling, more where the lava is on the move.
+#[inline] pub fn lava_bits(body: usize, k: usize, n: usize, cold: f32, speed: f32) -> f32 {
+    let (a, b, c) = ((k / (n * n)) as f32, ((k / n) % n) as f32, (k % n) as f32);
+    // blotches a third of a block wide
+    let (fx, fy, fz) = (a * 0.25, b * 0.25, c * 0.25);
+    let (ix, iy, iz) = (fx as u32, fy as u32, fz as u32);
+    let (tx, ty, tz) = (smooth(fx - ix as f32), smooth(fy - iy as f32), smooth(fz - iz as f32));
+    let s = body as u32;
+    let at = |dx: u32, dy: u32, dz: u32| lava_hash(ix + dx, iy + dy, iz + dz, s);
+    let x00 = at(0, 0, 0) + (at(1, 0, 0) - at(0, 0, 0)) * tx;
+    let x10 = at(0, 1, 0) + (at(1, 1, 0) - at(0, 1, 0)) * tx;
+    let x01 = at(0, 0, 1) + (at(1, 0, 1) - at(0, 0, 1)) * tx;
+    let x11 = at(0, 1, 1) + (at(1, 1, 1) - at(0, 1, 1)) * tx;
+    let y0 = x00 + (x10 - x00) * ty;
+    let y1 = x01 + (x11 - x01) * ty;
+    let blotch = y0 + (y1 - y0) * tz;
+    // and a grain of its own on top
+    let grain = lava_hash(k as u32, 7, 13, s);
+    let pattern = ((blotch * 0.8 + grain * 0.2).clamp(0.0, 1.0) * 63.0 + 0.5) as u32;
+    let warm = (1.0 - cold) + cold * 0.5 * (speed * (1.0 / 0.8)).min(1.0);
+    let heat = (warm.clamp(0.0, 1.0) * 63.0 + 0.5) as u32;
+    (8 + 16 * pattern + 1024 * heat) as f32
+}
+
 fn spring_exists(spr_n: &[u8], spr_j: &[u32], a: usize, b: usize) -> bool {
     let (na, nb) = (spr_n[a] as usize, spr_n[b] as usize);
     spr_j[a * MAX_SPR..a * MAX_SPR + na].iter().any(|&j| j as usize == b) || spr_j[b * MAX_SPR..b * MAX_SPR + nb].iter().any(|&j| j as usize == a)
@@ -792,7 +850,7 @@ impl World {
         let wq = { let r = 0.25 * h; let t = h2 - r * r; kp * t * t * t };
         let mut w = World {
             n, nb, slots: 0, maxp: 0, most: most.max(first).max(1), s, h, side, rc: s * 0.5,
-            mats: [Material::honey(), Material::slime()],
+            mats: [Material::honey(), Material::slime(), Material::lava()],
             bmats: Vec::new(),
             gravity: 9.8, iters: 3, visc_iters: 1, eps: 60.0, k_corr: 2.0e-4, kill_y: -64.0,
             p: Vec::new(), q: Vec::new(), v: Vec::new(), alive: Vec::new(), scale: Vec::new(),
@@ -896,7 +954,7 @@ impl World {
 
     /// [`World::add_empty`] for goo thicker or thinner than usual, see [`Material::thick`].
     pub fn add_empty_thick(&mut self, mat: u8, x: f32, y: f32, z: f32, thick: f32) -> i32 {
-        let mat = if mat == SLIME { SLIME } else { HONEY };
+        let mat = material(mat);
         let slot = match self.take_slot() { Some(s) => s, None => return -1 };
         self.rev = self.rev.wrapping_add(1);
         self.bmats[slot] = self.mats[mat as usize].thick(thick);
@@ -913,7 +971,7 @@ impl World {
 
     /// [`World::add_resting`] for goo thicker or thinner than usual, see [`Material::thick`].
     pub fn add_resting_thick(&mut self, mat: u8, x: f32, y: f32, z: f32, count: u32, thick: f32) -> i32 {
-        let mat = if mat == SLIME { SLIME } else { HONEY };
+        let mat = material(mat);
         let count = (count as usize).min(self.nb);
         let slot = match self.take_slot() { Some(s) => s, None => return -1 };
         let (n, s, side, nb) = (self.n, self.s, self.side, self.nb);
@@ -1042,13 +1100,13 @@ impl World {
 
     /// [`World::add_body`] for goo thicker or thinner than usual, see [`Material::thick`].
     pub fn add_body_thick(&mut self, mat: u8, x: f32, y: f32, z: f32, dirx: f32, dirz: f32, age: f32, thick: f32) -> i32 {
-        let mat = if mat == SLIME { SLIME } else { HONEY };
+        let mat = material(mat);
         let slot = match self.take_slot() { Some(s) => s, None => return -1 };
         self.bmats[slot] = self.mats[mat as usize].thick(thick);
         let m = self.bmats[slot];
         let (n, s, side, nb) = (self.n, self.s, self.side, self.nb);
         let base = slot * nb;
-        let puddle = mat == HONEY && age > 6.0;
+        let puddle = mat != SLIME && age > 6.0;
         let (cx, cz) = (x + 0.5, z + 0.5);
         let dl = (dirx * dirx + dirz * dirz).sqrt();
         let (dx, dz) = if dl > 1e-4 { (dirx / dl, dirz / dl) } else { (1.0, 0.0) };
@@ -1135,7 +1193,8 @@ impl World {
     }
 
     /// Writes every particle that exists as four floats: position, then its size (0..1, shrinking
-    /// while its piece fades away), plus 2 for slime, plus 4 for a filler. Fillers are extra points
+    /// while its piece fades away), plus 2 for slime, plus 4 for a filler, plus what [`lava_bits`]
+    /// says for lava. Fillers are extra points
     /// along springs that have been pulled long: the band of slime between two pistons and the
     /// strands of honey would otherwise be drawn as rows of separate beads. Returns the number of
     /// points, or how many floats are needed, negated, if `out` is too small.
@@ -1152,11 +1211,18 @@ impl World {
             if bd.state == 0 { continue; }
             let m = &self.bmats[b];
             let jelly = !m.dynamic_springs;
-            let slime = if bd.mat == SLIME { 2.0 } else { 0.0 };
+            let lava = bd.mat == LAVA;
+            let cold = if lava { lava_cold(bd.age) } else { 0.0 };
+            let mut slime = if bd.mat == SLIME { 2.0 } else { 0.0 };
             for i in b * self.nb..(b + 1) * self.nb {
                 if self.alive[i] == 0 { continue; }
                 let sc = self.scale[i].clamp(0.0, 1.0);
                 let p = [self.p[i * 3], self.p[i * 3 + 1], self.p[i * 3 + 2]];
+                if lava {
+                    // what the picture of lava is made from: a pattern that belongs to the particle, and how far it has cooled
+                    let speed = (self.v[i * 3] * self.v[i * 3] + self.v[i * 3 + 1] * self.v[i * 3 + 1] + self.v[i * 3 + 2] * self.v[i * 3 + 2]).sqrt();
+                    slime = lava_bits(b, i - b * self.nb, self.n, cold, speed);
+                }
                 put(p[0], p[1], p[2], sc + slime, &mut n);
                 if bd.state != 1 || sc < 0.99 { continue; }
                 for k in 0..self.spr_n[i] as usize {
@@ -1196,9 +1262,9 @@ impl World {
         let mut n = [0u32; 2];
         for b in 0..self.slots {
             let bd = &self.bodies[b];
-            if bd.state != 1 || (0..3).any(|a| bd.bb[a] > max[a] || bd.bb[a + 3] < min[a]) { continue; }
+            if bd.state != 1 || bd.mat > SLIME || (0..3).any(|a| bd.bb[a] > max[a] || bd.bb[a + 3] < min[a]) { continue; }
             for i in b * self.nb..(b + 1) * self.nb {
-                if self.alive[i] != 0 && (0..3).all(|a| self.p[i * 3 + a] >= min[a] && self.p[i * 3 + a] <= max[a]) { n[bd.mat as usize & 1] += 1; }
+                if self.alive[i] != 0 && (0..3).all(|a| self.p[i * 3 + a] >= min[a] && self.p[i * 3 + a] <= max[a]) { n[bd.mat as usize] += 1; }
             }
         }
         (n[0], n[1])

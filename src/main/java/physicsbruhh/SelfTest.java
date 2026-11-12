@@ -63,7 +63,7 @@ public final class SelfTest {
         return health;
     }
 
-    private static int blastsBefore;
+    private static int blastsBefore, lavaBefore;
 
     private static void run(MinecraftServer server, String... commands) {
         for (String command : commands) server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command);
@@ -325,6 +325,72 @@ public final class SelfTest {
                 expect("M: ... and not with the game rule off (" + (GasRules.blastsTold - blastsBefore) + ")", GasRules.blastsTold == blastsBefore + 1);
                 run(server, "gamerule physicsbruhh:physical_gas true");
             } else if (tick == 258) {
+                // N: lava. A block of it that finds room next to it lets go and becomes a body; one that is shut in stays a block.
+                run(server, "goo clear", "fill 18 " + (Y - 2) + " -3 40 " + (Y - 1) + " 9 minecraft:stone", "fill 18 " + Y + " -3 40 " + (Y + 2) + " 9 minecraft:air");
+                LavaFlow.anywhere = true; // no player is here
+                lavaBefore = LavaFlow.released;
+                level.setBlock(new BlockPos(22, Y, 2), Blocks.LAVA.defaultBlockState(), 3);
+                for (BlockPos wall : new BlockPos[] { new BlockPos(25, Y, 2), new BlockPos(27, Y, 2), new BlockPos(26, Y, 1), new BlockPos(26, Y, 3) }) level.setBlock(wall, Blocks.STONE.defaultBlockState(), 3);
+                level.setBlock(new BlockPos(26, Y, 2), Blocks.LAVA.defaultBlockState(), 3);
+                // three blocks of lava in a trench that is open at one end
+                run(server, "fill 30 " + Y + " 5 33 " + Y + " 5 minecraft:stone", "fill 30 " + Y + " 7 33 " + Y + " 7 minecraft:stone", "setblock 33 " + Y + " 6 minecraft:stone");
+                for (int x = 32; x >= 30; x--) level.setBlock(new BlockPos(x, Y, 6), Blocks.LAVA.defaultBlockState(), 3);
+            } else if (tick == 294) {
+                expect("N: the game asks the mod before lava spreads (the hook is in place)", LavaFlow.asked);
+                expect("N: lava set down in the open lets go of its block (" + level.getBlockState(new BlockPos(22, Y, 2)) + ")", level.getBlockState(new BlockPos(22, Y, 2)).isAir());
+                expect("N: ... and is a body of lava now (" + goo(level, PhysicsBruhh.LAVA_GOO.get(), new BlockPos(22, Y, 2)) + ")", goo(level, PhysicsBruhh.LAVA_GOO.get(), new BlockPos(22, Y, 2)) == 1);
+                boolean spread = false;
+                for (Direction side : Direction.Plane.HORIZONTAL) spread |= !level.getFluidState(new BlockPos(22, Y, 2).relative(side)).isEmpty();
+                expect("N: ... and nothing was put into the blocks around it", !spread);
+                expect("N: lava shut in on all sides stays a block", LavaFlow.isLavaSource(level.getBlockState(new BlockPos(26, Y, 2))) && level.getEntities(PhysicsBruhh.LAVA_GOO.get(), new AABB(new BlockPos(26, Y, 2)), e -> true).isEmpty());
+                expect("N: of lava in a trench the block at the open end goes first (" + level.getBlockState(new BlockPos(30, Y, 6)) + ", " + level.getBlockState(new BlockPos(31, Y, 6)) + ")",
+                        level.getBlockState(new BlockPos(30, Y, 6)).isAir() && LavaFlow.isLavaSource(level.getBlockState(new BlockPos(31, Y, 6))) && LavaFlow.isLavaSource(level.getBlockState(new BlockPos(32, Y, 6))));
+            } else if (tick == 362) {
+                expect("N: ... and the blocks behind it follow, one after the other (" + (LavaFlow.released - lavaBefore) + " let go in all)",
+                        level.getBlockState(new BlockPos(31, Y, 6)).isAir() && level.getBlockState(new BlockPos(32, Y, 6)).isAir() && LavaFlow.released - lavaBefore == 4);
+                GooEntity lava = nearest(level, PhysicsBruhh.LAVA_GOO.get(), 22.5, 2.5);
+                expect("N: a body of lava is not something to hit or scoop", lava != null && !lava.isPickable() && !lava.hurtServer(level, level.damageSources().generic(), 1.0F) && !lava.isRemoved() && lava.fireImmune());
+                // with the rule off lava is the game's own again
+                run(server, "gamerule physicsbruhh:physical_lava false");
+                level.setBlock(new BlockPos(22, Y, 8), Blocks.LAVA.defaultBlockState(), 3);
+            } else if (tick == 398) {
+                boolean spread = false;
+                for (Direction side : Direction.Plane.HORIZONTAL) spread |= !level.getFluidState(new BlockPos(22, Y, 8).relative(side)).isEmpty();
+                expect("N: with the rule off lava flows block by block as ever", LavaFlow.isLavaSource(level.getBlockState(new BlockPos(22, Y, 8))) && spread && LavaFlow.released - lavaBefore == 4);
+                run(server, "gamerule physicsbruhh:physical_lava true", "goo clear", "fill 18 " + Y + " -3 40 " + (Y + 2) + " 9 minecraft:air");
+                // what a client says about its lava: a creature stands in it, a piece has crept on, a hollow is full to the brim
+                level.setBlock(new BlockPos(36, Y, 2), Blocks.LAVA.defaultBlockState(), 3);
+                level.setBlock(new BlockPos(34, Y, 8), Blocks.LAVA.defaultBlockState(), 3);
+                LavaFlow.release(level, new BlockPos(36, Y, 2), Direction.EAST);
+                LavaFlow.release(level, new BlockPos(34, Y, 8), Direction.EAST);
+                run(server, "setblock 37 " + (Y - 1) + " 2 minecraft:air", "summon minecraft:pig 36.5 " + Y + " 3.5 {NoAI:1b,Silent:1b}");
+            } else if (tick == 402) {
+                GooEntity first = nearest(level, PhysicsBruhh.LAVA_GOO.get(), 36.5, 2.5), second = nearest(level, PhysicsBruhh.LAVA_GOO.get(), 34.5, 8.5);
+                Entity pig = null;
+                for (Entity e : level.getEntities((Entity) null, new AABB(34, Y - 1, 1, 39, Y + 2, 6), e -> e instanceof LivingEntity && EntityType.getKey(e.getType()).getPath().equals("pig"))) pig = e;
+                expect("N: two blocks of lava let go by hand, and a pig next to one", first != null && second != null && pig != null);
+                if (first != null && second != null && pig != null) {
+                    var player = FakePlayerFactory.getMinecraft(level);
+                    player.setPos(36.5, Y, 0.5);
+                    int pooledBefore = LavaFlow.pooled;
+                    float health = ((LivingEntity) pig).getHealth();
+                    BlockPos pit = new BlockPos(37, Y - 1, 2);
+                    LavaFlow.report(player, level, new LavaFlow.Report(new int[] { pig.getId() }, new int[] { second.getId() }, new float[] { 35.5F, Y, 8.5F }, new long[] { pit.asLong() }));
+                    expect("N: a creature a client says stands in the lava burns (" + pig.getRemainingFireTicks() + " ticks of fire, health " + health + " -> " + ((LivingEntity) pig).getHealth() + ")",
+                            pig.getRemainingFireTicks() > 0 && ((LivingEntity) pig).getHealth() < health);
+                    expect("N: the marker follows where a client says its piece has got to (" + second.getX() + ")", Math.abs(second.getX() - 35.5) < 0.01 && Math.abs(second.getZ() - 8.5) < 0.01);
+                    expect("N: lava that has filled a hollow to the brim is a block again (" + level.getBlockState(pit) + ", " + (LavaFlow.pooled - pooledBefore) + " pooled), and the piece it came from is used up",
+                            LavaFlow.isLavaSource(level.getBlockState(pit)) && LavaFlow.pooled == pooledBefore + 1 && first.isRemoved() && !second.isRemoved());
+                    // not from the far side of the world, and not where there is no lava
+                    player.setPos(500.5, Y, 0.5);
+                    double before = second.getX();
+                    LavaFlow.report(player, level, new LavaFlow.Report(new int[0], new int[] { second.getId() }, new float[] { 38.5F, Y, 8.5F }, new long[0]));
+                    expect("N: ... but not on the word of a player who is nowhere near", second.getX() == before);
+                }
+            } else if (tick == 404) {
+                LavaFlow.anywhere = false;
+                run(server, "kill @e[type=minecraft:pig]", "goo clear", "kill @e[type=minecraft:item]", "fill 18 " + (Y - 2) + " -3 40 " + (Y + 2) + " 9 minecraft:air");
+            } else if (tick == 406) {
                 finish(server);
             }
         } catch (Throwable t) {

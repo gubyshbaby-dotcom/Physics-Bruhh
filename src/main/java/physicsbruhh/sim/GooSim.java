@@ -11,6 +11,14 @@ import java.nio.ByteBuffer;
 public interface GooSim extends AutoCloseable {
     int HONEY = 0;
     int SLIME = 1;
+    /**
+     * Lava that has left its block: thick, heavy, slow. It is not counted by {@link #probe} (what it
+     * does to a creature is not what goo does), and its particles say more about themselves, see
+     * {@link #particles}.
+     */
+    int LAVA = 2;
+    /** How many materials there are. */
+    int MATERIALS = 3;
     int STATIC_FLOATS = 7;      // min xyz, max xyz, stick
     int KINEMATIC_FLOATS = 12;  // id (> 0 piston part or moving block, < 0 creature), min xyz, max xyz, velocity xyz, stick, front (0 none, 1..6 = +x -x +y -y +z -z)
     int FLOATS_PER_QUAD = 24;   // 4 * (position xyz + normal xyz)
@@ -76,8 +84,11 @@ public interface GooSim extends AutoCloseable {
 
     /**
      * Writes every particle as four floats: position, then its size (0..1, shrinking while its piece
-     * fades away) plus 2 for slime. Returns the number of particles, or minus the floats needed if
-     * {@code out} is too small.
+     * fades away) plus 2 for slime, plus 4 for a filler (a point that only closes a gap along goo
+     * pulled long). A particle of lava adds 8, 16 times a pattern (0..63: a blotchy noise over the
+     * block the lava came from, which travels and stretches with it) and 1024 times its heat (0..63:
+     * what is left of it as the lava cools, more where it is on the move). Returns the number of
+     * particles, or minus the floats needed if {@code out} is too small.
      */
     int particles(ByteBuffer out);
 

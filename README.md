@@ -17,6 +17,10 @@ being rigid cubes:
 
 Everything is on by default for the vanilla `honey_block` and `slime_block`.
 
+**Lava** that finds room to flow lets go of its block and oozes out as one thick, glowing body
+that pours, creeps, crusts over and cools; lava that stands is one smooth surface that heaves and
+bubbles. See [Lava](#lava).
+
 And **fire and smoke are gas**: flames and smoke are simulated as moving air around you instead of
 being drawn as flat pictures and puffs. See [Smoke and fire](#smoke-and-fire).
 
@@ -221,9 +225,14 @@ measured number for a real graphics card in this file.
 
 ## Lava
 
-Every block of lava the game would draw, wherever it is, is drawn by the mod instead. The blocks
-themselves are left exactly as they are: lava flows, burns, lights and makes stone the way it
-always did, on a server that knows nothing of this. Only what is seen is the mod's.
+Two things happen to lava.
+
+**Lava that stands or is already flowing** is drawn by the mod instead of by the game: every block
+of it, wherever it is. Those blocks are left exactly as they are; only what is seen is the mod's
+(the rest of this section up to "Lava that lets go").
+
+**Lava that starts to flow** does not do what the game has it do. See
+[Lava that lets go of its block](#lava-that-lets-go-of-its-block).
 
 **One surface.** Instead of a tilted square per block the top is one smooth sheet through the
 levels of the blocks; where lava ends in the open it ends in a rounded front that comes down to
@@ -261,6 +270,52 @@ With a shader pack on, the pack draws the lava its own way and the mod's lava wa
 pack is off. If the mod's shaders do not work on a machine, that is said once in the log and the
 game's own lava is back.
 
+### Lava that lets go of its block
+
+In the game a block of lava that finds room next to it stays where it is and fills the blocks
+around it with thinner and thinner copies of itself, for ever. With the game rule
+`physicsbruhh:physical_lava` on (the default), within 48 blocks of a player, it does what a block
+of something thick and liquid would do: **the block itself lets go**, and what was in it flows
+out as one body.
+
+- Break the block in front of lava, or pour a bucket of it out in the open: a second and a half
+  later (the time lava always took to start moving) the block is gone and its lava bulges out of
+  the hole, hangs over the edge as a thick tongue, pours down the wall as a rope and creeps over
+  the floor as a lobe a quarter of a block thick with a rounded front. It is slow: a block of lava
+  takes ten to twenty seconds to come out of a hole and half a minute to come to rest.
+- **It is as much lava as the block held.** One block gives one block's worth; it does not go on
+  coming. A layer of it stays behind wherever it has been (in the hole too).
+- **A lake drains block by block.** When a block has let go, the blocks of lava next to the gap
+  it left have room in their turn and follow, a second and a half apart: first the one behind the
+  hole, then its neighbours. At most a dozen pieces are let go around one place within twenty
+  seconds, and forty may lie there at all; further blocks hold until there is room again.
+- **It cools.** For a few seconds it is all yellow. Then a crust of dark rock takes it over in
+  patches: on top before the flanks, later where it is still on the move, last along its edges and
+  wherever one looks along its skin. The patches belong to the lava: they travel with it and are
+  drawn out and torn where it stretches. After a minute and a half it is a dull crust with a few
+  glowing seams, and after two minutes it is gone.
+- **It lights what is around it.** The game's light knows nothing of lava that is not a block (and
+  the block that gave light is gone), so the glow on the walls and the floor is drawn by the mod.
+- **It burns.** A creature, a player or a dropped thing the lava touches is set alight and hurt
+  as in a block of lava; things that burn near it catch fire the way they do near lava.
+- **It can be a block again.** Lava that has run into a hollow and filled a block of it to the
+  brim (something under it and on all four sides) becomes a block of lava there.
+- **In water it is put out**: a hiss, and cobblestone if it was most of a block.
+- Lava shut in on all sides is left alone, and so is lava that is already flowing (a lava-fall in
+  a cave goes on falling the game's way) and all lava further than 48 blocks from every player:
+  the world is generated the way it always was.
+- A piece of lava is not something to hit or to scoop up.
+
+`/gamerule physicsbruhh:physical_lava false` gives lava back to the game: it flows block by block
+again (pieces that are already out stay until they have cooled). `/goo clear` removes them.
+`/lavalook info` says how many pieces this client is simulating and how they are drawn.
+
+It is drawn from the particles of the simulation, after the world, like clear goo: every particle
+a disc, the discs merged into one surface on the screen, then what the surface carries, then the
+lava itself and its glow on the world. With `/goolook plain`, with a shader pack that is handed
+everything, or on a machine where those passes do not work, it is drawn as a plain glowing
+surface instead.
+
 ## How it works
 
 | Part | Where | What it does |
@@ -270,6 +325,7 @@ game's own lava is back.
 | Server side | `GooEvents`, `GooEntity`, `GooCommands` | Decides when a block becomes goo (placement, piston about to move it), keeps a small marker entity so it is saved and synced, applies the blocks' effects to mobs and falls, runs `/goo clear`. |
 | Server side, hands and dispensers | `GooEntity`, `GooEvents`, `GooDispense` | A marker also knows how much goo its piece holds. Pouring, throwing and scooping change that amount and say where and with what velocity; clients let the same happen to their simulated goo (a stream or a lump out of a spout, particles taken away near a point). |
 | Client side | `client/` | Runs the simulation on its own thread at 60 Hz, feeds it the blocks, pistons and creatures around the goo, draws it, applies the blocks' effects to the player. |
+| Lava that lets go | `LavaFlow`, `mixin/LavaFluidMixin`, `client/LavaGoo`, `shaders/core/lava_splat`, `lava_skin`, `lava_goo` | The one place where the game asks whether lava may spread into the next block is hooked (the only thing in this mod that reaches into the game's own code; if the hook cannot be put in, lava flows as it always did). A whole block of lava that asks becomes a marker entity instead, like honey, and the clients simulate it as a third material of the same core: liquid from the start, no strength of its own, does not cling. The clients tell the server what only they know: which creatures stand in it, where each piece has got to, where it has filled a hollow. |
 | Drawing | `client/GooRenderer`, `client/GooFluid`, `assets/.../shaders` | Textured goo is a surface mesh with the mod's shader (gloss, sky reflection, colour by depth; works with and without "improved transparency"). Clear goo is drawn from the particles themselves, after the world: discs into a nearest-surface texture and an amount texture, an edge-keeping blur that turns the heap of discs into one surface, then one pass that bends the picture behind it, lets the goo absorb light by its thickness, and adds the mirrored sky and the sun's glint; a pass from straight above gives the shade on the ground. The colours and the way light behaves were set against photographs of honey, poured caramel, toy slime and jelly. |
 
 The mod jar carries the native library for Windows x64, Linux x64 and macOS (Intel and Apple
@@ -368,7 +424,23 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
 
 ## Limits
 
-- Lava is still the game's lava: what the mod adds is how its surface is drawn and how that
+- Lava that has let go of its block is simulated separately on every client, like goo: two
+  players see slightly different tongues of the same lava, and the server only knows what the
+  clients tell it. A creature is burnt when some client near it sees it standing in the lava; with
+  no player near, nothing is simulated and nothing burns. The server takes a client's word for
+  this (within limits: the creature has to be near that player and near a piece of lava).
+  A piece is a block's worth of lava and never more, it is gone two minutes after it came out
+  (it does not turn to stone), and it only becomes a block again where it fills a whole block of
+  a hollow, so most of a lake that is drained this way is lost. A lake is not drained evenly: the
+  blocks next to the hole go first and leave a pit with walls of lava. Lava that was already
+  flowing when a player came near stays the game's block-by-block lava, so both kinds can be seen
+  side by side, and it does not react to the other kind. The glow on the surroundings is drawn,
+  not real light: it shows on the screen, it does not keep monsters from spawning, and it passes
+  through walls thinner than its reach (three and a half blocks). The lava's own material numbers
+  were set by eye against one video of the look that was asked for, not measured against real
+  lava. Its shaders have been run on the software renderers of the build machines and in a
+  browser's WebGL only.
+- Lava that stands is still the game's lava: what the mod adds is how its surface is drawn and how that
   surface moves. The waves and the bubbles are worked out on each client and are only something to
   look at: they do not push, burn or carry anything, and two players see different bubbles in the
   same lake. The waves exist in a square of 64 blocks around the player; lava further away is drawn

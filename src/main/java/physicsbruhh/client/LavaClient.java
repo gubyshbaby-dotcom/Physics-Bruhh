@@ -637,6 +637,8 @@ final class LavaClient {
                             sections, quads, drawnSections, drawnQuads, String.format(Locale.ROOT, "%.2f", prepareMillis),
                             LavaWaves.off ? Component.translatableWithFallback("commands.physicsbruhh.lava.waves.off", "off, they did not work on this machine (see the log)") : Component.translatableWithFallback("commands.physicsbruhh.lava.waves.on", "on"),
                             LavaWaves.lavaColumns, cutQuads, LavaBubbles.alive), false);
+                    // lava that has left its block is another matter: it is simulated with the goo and drawn from its particles, whatever is chosen here
+                    context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.lava.body", "Lava that flows as a body: %s", LavaGoo.describe()), false);
                     return 1;
                 })));
     }

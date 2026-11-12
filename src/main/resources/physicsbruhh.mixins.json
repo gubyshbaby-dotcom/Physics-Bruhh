@@ -1,0 +1,11 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "physicsbruhh.mixin",
+  "mixins": [
+    "LavaFluidMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

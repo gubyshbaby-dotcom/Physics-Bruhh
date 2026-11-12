@@ -60,6 +60,18 @@ public final class JavaSim implements GooSim {
             return m;
         }
 
+        /** Lava, see {@code Material::lava} of the native core. */
+        static Material lava() {
+            Material m = new Material();
+            m.meltTime = 1f; m.dampFresh = 3f; m.dampMelted = 12f;
+            m.springK0 = 0.3f; m.springK1 = 0.12f; m.plast0 = 6f; m.plast1 = 3f; m.yield = 0f;
+            m.dynamicSprings = true; m.breakStrain = 4f; m.springMaxL = 0.21f; m.shockK = 0.42f; m.shockPlast = 0.6f; m.shockDecay = 1.1f; m.shockBreak = 16f; m.shockMaxL = 1.7f; m.threadSag = 0.16f;
+            m.cohK = 0.45f; m.cohLim = 0.35f; m.xsph = 0.45f;
+            m.adhK = 0f; m.adhCreep = 30f; m.adhBreak = 0.01f;
+            m.setAfter = 25f; m.setRate = 0.1f; m.tip = 0f; m.sleepV = 0.01f;
+            return m;
+        }
+
         static Material slime() {
             Material m = new Material();
             m.meltTime = 0f; m.dampFresh = 2.2f; m.dampMelted = 2.2f;
@@ -97,7 +109,7 @@ public final class JavaSim implements GooSim {
     final int n, nb, slots, maxp;
     final float s, h, side, rc;
     private static final Material HONEY_PLAIN = Material.honey();
-    final Material[] mats = { HONEY_PLAIN, Material.slime() };
+    final Material[] mats = { HONEY_PLAIN, Material.slime(), Material.lava() };
     float gravity = 9.8f, eps = 60f, kCorr = 2.0e-4f, killY = -64f;
     int iters = 3, viscIters = 1;
     final float[] p, q, v, scale;
@@ -115,7 +127,7 @@ public final class JavaSim implements GooSim {
     float clock, acc; int seed = 0x9E3779B9;
     private float[] meshOut = new float[1 << 16]; private int meshLen;
     /** Where the puddles of the last surface built for each material are, see {@link GooSim#meshParts}. */
-    private final float[][] partsOut = { new float[64], new float[64] }; private final int[] partsLen = { 0, 0 };
+    private final float[][] partsOut = { new float[64], new float[64], new float[64] }; private final int[] partsLen = { 0, 0, 0 };
 
     private static final int[] HX = { 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1 };
     private static final int[] HY = { 0, 0, 1, 1, 1, -1, -1, -1, 0, 0, 0, 1, 1, 1 };
@@ -162,7 +174,7 @@ public final class JavaSim implements GooSim {
         int honey = 0, slime = 0;
         for (int b = 0; b < slots; b++) {
             Body bd = bodies[b];
-            if (bd.state != 1 || bd.bb[0] > x1 || bd.bb[3] < x0 || bd.bb[1] > y1 || bd.bb[4] < y0 || bd.bb[2] > z1 || bd.bb[5] < z0) continue;
+            if (bd.state != 1 || bd.mat > SLIME || bd.bb[0] > x1 || bd.bb[3] < x0 || bd.bb[1] > y1 || bd.bb[4] < y0 || bd.bb[2] > z1 || bd.bb[5] < z0) continue;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
                 if (alive[i] == 0) continue;
                 float x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
@@ -226,7 +238,7 @@ public final class JavaSim implements GooSim {
 
     @Override
     public int addEmpty(int material, float x, float y, float z, float thick) {
-        int mat = material == SLIME ? SLIME : HONEY;
+        int mat = material == SLIME || material == LAVA ? material : HONEY;
         int slot = takeSlot();
         if (slot < 0) return -1;
         Body bd = bodies[slot];
@@ -239,7 +251,7 @@ public final class JavaSim implements GooSim {
 
     @Override
     public int addResting(int material, float x, float y, float z, int count, float thick) {
-        int mat = material == SLIME ? SLIME : HONEY;
+        int mat = material == SLIME || material == LAVA ? material : HONEY;
         count = Math.max(0, Math.min(count, nb));
         int slot = takeSlot();
         if (slot < 0) return -1;
@@ -413,12 +425,12 @@ public final class JavaSim implements GooSim {
 
     @Override
     public int addBody(int material, float x, float y, float z, float dirX, float dirZ, float age, float thick) {
-        int mat = material == SLIME ? SLIME : HONEY;
+        int mat = material == SLIME || material == LAVA ? material : HONEY;
         int slot = takeSlot();
         if (slot < 0) return -1;
         Material m = mats[mat].thick(thick);
         int base = slot * nb;
-        boolean puddle = mat == HONEY && age > 6f;
+        boolean puddle = mat != SLIME && age > 6f;
         float cx = x + 0.5f, cz = z + 0.5f;
         float dl = (float) Math.sqrt(dirX * dirX + dirZ * dirZ);
         float dx = dl > 1e-4f ? dirX / dl : 1f, dz = dl > 1e-4f ? dirZ / dl : 0f;
@@ -1053,7 +1065,7 @@ public final class JavaSim implements GooSim {
     @Override
     public int mesh(int material, ByteBuffer out) {
         meshLen = 0;
-        partsLen[material & 1] = 0;
+        partsLen[part(material)] = 0;
         int[] ids = new int[slots]; int nIds = 0;
         for (int b = 0; b < slots; b++) if (bodies[b].state != 0 && bodies[b].mat == material && bodies[b].count > 0) ids[nIds++] = b;
         int[] group = new int[nIds];
@@ -1077,7 +1089,7 @@ public final class JavaSim implements GooSim {
                 // where this puddle is: its bodies' bounds, and room for the surface around them and for strands to droop
                 float[] box = { Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE };
                 for (int m = 0; m < nm; m++) { float[] bb = bodies[members[m]].bb; for (int k = 0; k < 3; k++) { box[k] = Math.min(box[k], bb[k]); box[k + 3] = Math.max(box[k + 3], bb[k + 3]); } }
-                int part = material & 1, at = partsLen[part];
+                int part = part(material), at = partsLen[part];
                 if (at + PART_FLOATS > partsOut[part].length) partsOut[part] = Arrays.copyOf(partsOut[part], partsOut[part].length * 2);
                 float[] to = partsOut[part];
                 to[at] = from / FLOATS_PER_QUAD; to[at + 1] = (meshLen - from) / FLOATS_PER_QUAD;
@@ -1092,12 +1104,14 @@ public final class JavaSim implements GooSim {
         return meshLen / FLOATS_PER_QUAD;
     }
 
+    private static int part(int material) { return material == SLIME || material == LAVA ? material : HONEY; }
+
     @Override
     public int meshParts(int material, ByteBuffer out) {
         FloatBuffer fb = out.asFloatBuffer();
-        int len = partsLen[material & 1];
+        int len = partsLen[part(material)];
         if (len > fb.capacity()) return -len;
-        fb.put(0, partsOut[material & 1], 0, len);
+        fb.put(0, partsOut[part(material)], 0, len);
         return len / PART_FLOATS;
     }
 
@@ -1270,6 +1284,33 @@ public final class JavaSim implements GooSim {
         for (int vtx : new int[] { v0, v1, v2, v3 }) { int o = vtx * 6; emit(verts[o], verts[o + 1], verts[o + 2], verts[o + 3], verts[o + 4], verts[o + 5]); }
     }
 
+    /** How far lava of this age has cooled, 0 to 1; mirrors {@code lava_cold} of the native core. */
+    static float lavaCold(float age) { return 0.35f * smooth((age - 1f) * 0.1f) + 0.65f * smooth((age - 10f) * (1f / 70f)); }
+
+    private static float lavaHash(int x, int y, int z, int s) {
+        int h = x * 0x9E3779B1 ^ y * 0x85EBCA77 ^ z * 0xC2B2AE3D ^ s * 0x27D4EB2F;
+        h ^= h >>> 15; h *= 0x2C1B3C6D; h ^= h >>> 12;
+        return (h & 0xff) * (1f / 255f);
+    }
+
+    /** What a particle of lava says about itself besides where it is; mirrors {@code lava_bits} of the native core. */
+    static float lavaBits(int body, int k, int n, float cold, float speed) {
+        float a = k / (n * n), b = (k / n) % n, c = k % n;
+        float fx = a * 0.25f, fy = b * 0.25f, fz = c * 0.25f;
+        int ix = (int) fx, iy = (int) fy, iz = (int) fz;
+        float tx = smooth(fx - ix), ty = smooth(fy - iy), tz = smooth(fz - iz);
+        float h000 = lavaHash(ix, iy, iz, body), h100 = lavaHash(ix + 1, iy, iz, body), h010 = lavaHash(ix, iy + 1, iz, body), h110 = lavaHash(ix + 1, iy + 1, iz, body);
+        float h001 = lavaHash(ix, iy, iz + 1, body), h101 = lavaHash(ix + 1, iy, iz + 1, body), h011 = lavaHash(ix, iy + 1, iz + 1, body), h111 = lavaHash(ix + 1, iy + 1, iz + 1, body);
+        float x00 = h000 + (h100 - h000) * tx, x10 = h010 + (h110 - h010) * tx, x01 = h001 + (h101 - h001) * tx, x11 = h011 + (h111 - h011) * tx;
+        float y0 = x00 + (x10 - x00) * ty, y1 = x01 + (x11 - x01) * ty;
+        float blotch = y0 + (y1 - y0) * tz;
+        float grain = lavaHash(k, 7, 13, body);
+        int pattern = (int) (Math.max(0f, Math.min(1f, blotch * 0.8f + grain * 0.2f)) * 63f + 0.5f);
+        float warm = (1f - cold) + cold * 0.5f * Math.min(1f, speed * (1f / 0.8f));
+        int heat = (int) (Math.max(0f, Math.min(1f, warm)) * 63f + 0.5f);
+        return 8 + 16 * pattern + 1024 * heat;
+    }
+
     /** Filler points {@link #particles} may add along stretched springs. */
     public static final int PARTICLE_FILLERS = 16_000;
 
@@ -1282,11 +1323,18 @@ public final class JavaSim implements GooSim {
             if (bd.state == 0) continue;
             Material m = bd.m;
             boolean jelly = !m.dynamicSprings;
+            boolean lava = bd.mat == LAVA;
+            float cold = lava ? lavaCold(bd.age) : 0f;
             float slime = bd.mat == SLIME ? 2f : 0f;
             for (int i = b * nb; i < (b + 1) * nb; i++) {
                 if (alive[i] == 0) continue;
                 float sc = Math.max(0f, Math.min(1f, scale[i]));
                 float px = p[i * 3], py = p[i * 3 + 1], pz = p[i * 3 + 2];
+                if (lava) {
+                    // what the picture of lava is made from: a pattern that belongs to the particle, and how far it has cooled
+                    float speed = (float) Math.sqrt(v[i * 3] * v[i * 3] + v[i * 3 + 1] * v[i * 3 + 1] + v[i * 3 + 2] * v[i * 3 + 2]);
+                    slime = lavaBits(b, i - b * nb, n, cold, speed);
+                }
                 if (cnt < room) { fb.put(cnt * 4, px); fb.put(cnt * 4 + 1, py); fb.put(cnt * 4 + 2, pz); fb.put(cnt * 4 + 3, sc + slime); }
                 cnt++;
                 if (bd.state != 1 || sc < 0.99f) continue;
