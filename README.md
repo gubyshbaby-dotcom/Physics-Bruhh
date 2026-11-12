@@ -86,8 +86,12 @@ being drawn as flat pictures and puffs. See [Smoke and fire](#smoke-and-fire).
   the mod's own.
 - `/goolook info` says what the simulation is doing on this client: Rust or Java core, how many
   threads, how many pieces of goo and how many of them are moving, how long an update takes, and
-  whether it keeps up with real time; and, for goo drawn as a surface, how many of its quads are
-  in view and how long handing them to the game takes each frame.
+  whether it keeps up with real time; where a step of the Rust core goes (its own timers, part by
+  part); and, for goo drawn as a surface, how many of its quads are in view and how long handing
+  them to the game takes each frame.
+- `/goolook threads <n>` (or `auto`) makes the Rust core work on that many threads until the game
+  is closed: it changes how long a step takes and nothing else, and is there to find out what a
+  machine does best with (`PHYSICSBRUHH_THREADS` in the environment sets it for good).
 
 ### Shader packs and Sodium
 
@@ -241,6 +245,11 @@ What keeps the core quick when there is a lot of goo:
   to the last bit either way, and a test holds the two against each other; `PHYSICSBRUHH_PLAIN=1`
   in the environment switches the wide way off. On Apple silicon the core works one at a time.
 - The neighbour lists are walked in the order they lie in memory.
+- With the wide registers nothing is carried from the density to the correction: the correction
+  works the kernel towards every neighbour out again. Carrying it meant sixteen bytes for every
+  neighbour of every particle, written and read three times a step: half a gigabyte a step for
+  eighty thousand particles, which at sixty steps a second is more than a desktop's memory moves.
+  (On two cores this is no quicker; it is meant for many threads, where it has not been measured.)
 - Springs are relaxed on all threads: every piece its own, side by side, then the springs between
   two pieces, pair by pair, in rounds in which no piece is in two pairs. A lake of honey, where
   every piece is joined to its neighbours, used to do all of this on one thread.
@@ -251,8 +260,13 @@ What keeps the core quick when there is a lot of goo:
 On the machine this was measured on (two cores of a 2.1 GHz server processor), a step with 24
 pieces moving (41 thousand particles) took 92 ms on one thread before and takes 70 ms now, and
 51 ms against 42 ms on two; a lake of 24 pieces takes 76 ms on one thread and 45 ms on two. See
-`cargo run --release --example bench -- 24 3 [lake]` in `native/`. How it goes on a real
-desktop processor with eight or twelve threads has not been measured.
+`cargo run --release --example bench -- 24 3 [lake]` in `native/`.
+
+On a real desktop it has been reported once (16 threads, before the last two points above and
+before the last loops over all particles were taken off the single thread): 50 pieces of honey,
+49 of them moving, on 10 threads ran at 37 % of real time, about 40 ms a step. That is three
+times what the same step should take if ten threads were worth eight cores, and why is not known
+yet; `/goolook info` and `/goolook threads` are there to find out.
 
 An error inside the mod's client code does not take the game down: the goo is dropped, the reason
 is written to the log, and after three errors in one world the mod stays quiet until the world is
@@ -377,7 +391,9 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
   rest about three seconds after it was last disturbed, honey about seven. A moving piece takes
   roughly 3 ms of one core per step (measured on a slow server core, see above), 60 steps a
   second, so a big puddle that is still spreading needs several cores. A machine that cannot keep up shows the goo in slow motion
-  rather than skipping steps (`/goolook info` shows the percentage).
+  rather than skipping steps (`/goolook info` shows the percentage); it then takes one step
+  between two looks at the goo instead of making up for lost time with three, so that the slow
+  motion is at least even.
 
 ## License
 

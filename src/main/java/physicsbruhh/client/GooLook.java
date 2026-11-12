@@ -78,11 +78,11 @@ final class GooLook {
                                 "Goo: %s core on %s threads, %s pieces (%s moving), %s ms per update, running at %s %% of real time",
                                 info[0], info[1], info[2], info[3], ms, speed), false);
                         if (info[7] instanceof float[] went) {
-                            String[] ms = new String[went.length];
-                            for (int k = 0; k < went.length; k++) ms[k] = String.format(java.util.Locale.ROOT, "%.1f", went[k]);
+                            String[] part = new String[went.length];
+                            for (int k = 0; k < went.length; k++) part[k] = String.format(java.util.Locale.ROOT, "%.1f", went[k]);
                             context.getSource().sendSuccess(() -> Component.translatableWithFallback("commands.physicsbruhh.look.info.phases",
                                     "A step, in ms: moving and blocks %s, neighbours %s, new springs %s, constraints %s (density %s, correction %s, springs %s, sticking and blocks %s), afterwards %s, velocities %s",
-                                    ms[0], ms[1], ms[2], ms[3], ms[7], ms[8], ms[9], ms[10], ms[4], ms[5]), false);
+                                    part[0], part[1], part[2], part[3], part[7], part[8], part[9], part[10], part[4], part[5]), false);
                         }
                         if (GooRenderer.quadsInAll > 0) {
                             String handover = String.format(java.util.Locale.ROOT, "%.2f", GooRenderer.handoverMillis);
