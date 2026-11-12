@@ -163,6 +163,7 @@ simulated: how it moves, how hot it is, how much smoke and unburnt fuel it carri
 | `/gaslook ultra` | 40 x 28 x 40 blocks, 8 cells to the block (22.9 million cells) |
 | `/gaslook off` | fire and smoke as the game draws them, on this client only |
 | `/gaslook solver auto\|gpu\|compute\|cpu` | where it is computed (see below) |
+| `/gaslook range 24`, `32`, `48`, `64`, `96` | how wide the box is, in blocks, whatever the setting above says (it is about two thirds as high). The grid is as fine as that setting asks for if that fits into about a gigabyte of the graphics card's memory, otherwise as fine as does; the answer says what it came to and how much memory it takes |
 | `/gaslook info` | which solver, how many cells, how long a step and the drawing take, how much of the box is being computed |
 
 **Where it is computed.** On the graphics card: every step of the solver is a pass over a texture
@@ -184,6 +185,20 @@ dozen blocks of thousands. The solver on the graphics card works only on a small
 there is (the gas last seen and three blocks more, the blocks that feed it and the room over
 them, burning creatures, for three seconds the place of an explosion); `/gaslook info` says how
 much of the whole that is. `-Dphysicsbruhh.gas.whole=true` computes everything always.
+
+That part grows at once and shrinks only now and then, because a texture that held something
+outside the part it is written over has to be cleared first; as long as the part stays or grows,
+nothing is cleared, and a step costs what the part costs and not what the box would. (Clearing
+every texture before every pass used to be most of the cost of a wide box with one fire in it.)
+The fine grid's textures are left uncleared only while the part is less than a quarter of the box:
+they are then written over with nothing where no block is awake, which is cheaper than clearing a
+large texture and dearer than clearing a small one.
+
+**The map of the world in the box** (what is solid, what burns, how light it is) moves with the
+box: what stays in the box keeps what is known of it, and only the blocks that have come into it
+are looked up in the world. The rest is gone over again a few thousand blocks a tick; in a wide
+box that takes seconds, so the columns near the player are gone over more often, and those around
+an explosion a moment after it.
 Inside that box, smoke, heat and fuel (the fine grid, where most of the work is) are worked on
 only in blocks that are awake: where something feeds the gas, or where gas was seen in the block
 or in one of the six next to it after the last step. Over one fire in a box of five thousand
@@ -298,7 +313,13 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
 ## Limits
 
 - Smoke and fire exist in a box around each player and nowhere else: a fire further away than
-  that is drawn the vanilla way, and a column of smoke ends at the top of the box. The gas is
+  that is drawn the vanilla way, and a column of smoke ends at the top of the box. The box is 24
+  blocks wide unless `/gaslook range` says otherwise, 96 at most (an explosion is then gas up to
+  48 blocks away; the server tells clients of explosions within 96). What stops it going further
+  is the graphics card's memory: 96 blocks wide at 4 cells to the block is 38 million cells, about
+  0.9 GB. Nothing wider than 24 blocks has been run on a real graphics card, nor in the game at
+  all: the passes are the same ones and the tests of the game run them on the small box. Up to 32
+  burning creatures and explosions feed the gas at once. The gas is
   computed separately on every client and is only something to look at: it does not burn, choke
   or push anything, and two players see different curls of the same smoke.
 - The gas solver's passes have been run on the software renderers of the build machines (Vulkan

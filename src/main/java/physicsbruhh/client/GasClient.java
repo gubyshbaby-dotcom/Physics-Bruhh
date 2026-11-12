@@ -65,11 +65,40 @@ final class GasClient {
         GasBox box() { return new GasBox(bx, by, bz, cpb, ratio, rounds); }
     }
 
+    /** How wide the box may be asked to be ({@code /gaslook range}), in blocks. */
+    static final int[] RANGES = { 24, 32, 48, 64, 96 };
+    /**
+     * The most cells of the fine grid a box may have: three textures of eight bytes a cell hold them, so this is
+     * about a gigabyte of the graphics card's memory. And the most a texture may measure along a side.
+     */
+    private static final long MOST_CELLS = 40_000_000L;
+    private static final int MOST_TEXTURE = 8192;
+    /** How fine a grid can be, from finest to coarsest: coarse cells to a block, fine cells to a coarse one. */
+    private static final int[][] FINENESS = { { 4, 2 }, { 3, 2 }, { 2, 2 } };
+
+    /**
+     * The box for a quality and a range: as wide as {@code range} blocks (0: as wide as the quality itself says),
+     * about two thirds as high, and as fine as the quality asks for if that fits into the graphics card's memory,
+     * otherwise as fine as does.
+     */
+    static GasBox boxFor(Quality q, int range) {
+        if (q == Quality.OFF || range <= 0 || range == q.bx) return q.box();
+        int high = Math.max(16, Math.min(64, Math.round(range * 0.66F / 4.0F) * 4));
+        for (int[] fine : FINENESS) {
+            if (fine[0] * fine[1] > q.cpb * q.ratio) continue;
+            GasBox box = new GasBox(range, high, range, fine[0], fine[1], q.rounds);
+            if (box.fineCells() <= MOST_CELLS && box.fineW <= MOST_TEXTURE && box.fineH <= MOST_TEXTURE) return box;
+        }
+        return new GasBox(range, high, range, 2, 2, q.rounds);
+    }
+
     /** What the processor's solver computes, whatever the quality asked for: the same reach as "low", half as fine. */
     private static final GasBox COARSE = new GasBox(24, 16, 24, 2, 1, 4);
 
     /** This client's choices ({@code /gaslook}; the command line wins: {@code -Dphysicsbruhh.gas=off|low|medium|high|ultra}, {@code -Dphysicsbruhh.gas.solver=auto|gpu|compute|cpu}). */
     static volatile Quality quality = Quality.MEDIUM;
+    /** How wide the box is, in blocks ({@code /gaslook range}); 0: as wide as the quality itself says. */
+    static volatile int range;
     static volatile String solver = "auto";
     /** The picture of the gas is computed at the screen's size divided by this. */
     static volatile int drawScale = 2;
@@ -147,7 +176,14 @@ final class GasClient {
     static void onBlast(GasRules.Blast blast) {
         lastBlastX = blast.x(); lastBlastY = blast.y(); lastBlastZ = blast.z(); lastBlastPower = blast.power(); lastBlast = System.nanoTime();
         synchronized (BLASTS) {
-            if (BLASTS.size() < 32) BLASTS.add(new Blast(blast.x(), blast.y(), blast.z(), blast.power(), System.nanoTime()));
+            if (BLASTS.size() < 96) BLASTS.add(new Blast(blast.x(), blast.y(), blast.z(), blast.power(), System.nanoTime()));
+        }
+        synchronized (blasted) {
+            int reach = 3 + (int) Math.ceil(1.5F * blast.power());
+            int x0 = (int) Math.floor(blast.x()) - reach, z0 = (int) Math.floor(blast.z()) - reach, x1 = (int) Math.floor(blast.x()) + reach, z1 = (int) Math.floor(blast.z()) + reach;
+            if (blastedAny) { x0 = Math.min(x0, blasted[0]); z0 = Math.min(z0, blasted[1]); x1 = Math.max(x1, blasted[2]); z1 = Math.max(z1, blasted[3]); }
+            blasted[0] = x0; blasted[1] = z0; blasted[2] = x1; blasted[3] = z1;
+            blastedAny = true; blastedAt = 0; blastedTick = mapTick + 3;
         }
         blastsSeen++;
     }
@@ -212,7 +248,7 @@ final class GasClient {
         if (cpu != null) { cpu.close(); cpu = null; }
         mapNew = true;
         GasDraw.close();
-        box = null; placed = false; sources = 0; blobCount = 0; pending = 0.0F;
+        box = null; placed = false; sources = 0; blobCount = 0; pending = 0.0F; lastPartKnown = false; roomy = 0;
         GasHide.update(Minecraft.getInstance().level, new it.unimi.dsi.fastutil.longs.LongOpenHashSet());
     }
 
@@ -224,7 +260,7 @@ final class GasClient {
             return;
         }
         try {
-            GasBox want = useGpu() || useCompute() ? quality.box() : COARSE;
+            GasBox want = useGpu() || useCompute() ? boxFor(quality, range) : COARSE;
             if (!want.same(box)) {
                 release();
                 box = want;
@@ -235,18 +271,28 @@ final class GasClient {
             }
             Vec3 eye = mc.player.getEyePosition();
             int wantX = (int) Math.floor(eye.x) - box.bx / 2, wantY = (int) Math.floor(eye.y) - Math.round(box.by * 0.35F), wantZ = (int) Math.floor(eye.z) - box.bz / 2;
-            boolean all = false;
+            // (a wide box takes longer steps: every move is a pass over all of the map)
+            final int stride = Math.max(2, box.bx / 16);
+            boolean all = false, moved = false;
             if (!placed) {
                 ox = wantX; oy = wantY; oz = wantZ; gridX = ox; gridY = oy; gridZ = oz; placed = true; all = true;
-            } else if (Math.abs(wantX - ox) >= 2 || Math.abs(wantY - oy) >= 2 || Math.abs(wantZ - oz) >= 2) {
-                ox = wantX; oy = wantY; oz = wantZ; all = true;
+            } else if (Math.abs(wantX - ox) >= stride || Math.abs(wantY - oy) >= stride || Math.abs(wantZ - oz) >= stride) {
+                final int dx = wantX - ox, dy = wantY - oy, dz = wantZ - oz;
+                ox = wantX; oy = wantY; oz = wantZ;
+                // what stays in the box keeps what is known of it; only what has come into the box is looked up in the world
+                if (Math.abs(dx) >= box.bx || Math.abs(dy) >= box.by || Math.abs(dz) >= box.bz) all = true;
+                else { moveMap(level, dx, dy, dz); moved = true; }
             }
             if (all) {
                 scan(level, 0, box.bx);
+                scanAt = 0; nearAt = 0;
             } else {
-                int columns = Math.max(1, (box.bx + 3) / 4);
+                // the rest is gone over again bit by bit, a few thousand blocks a tick, for whatever has changed in the world
+                int columns = Math.max(1, Math.min((box.bx + 3) / 4, 4000 / (box.bz * box.by)));
                 scan(level, scanAt, Math.min(box.bx, scanAt + columns));
                 scanAt = scanAt + columns >= box.bx ? 0 : scanAt + columns;
+                if (box.bx > 28 && !moved) scanNear(level, eye);
+                scanBlasts(level);
             }
             int total = 0;
             for (int count : sourcesInColumn) total += count;
@@ -265,55 +311,159 @@ final class GasClient {
     /** Columns {@code from..to} (along x) of the map, from the world, each from the top down. */
     private static void scan(ClientLevel level, int from, int to) {
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        final int bx = box.bx, by = box.by, bz = box.bz;
         for (int x = from; x < to; x++) {
-            int found = 0, fromY = by, toY = -1, fromZ = bz, toZ = -1;
-            for (int z = 0; z < bz; z++) {
-                BlockState state = level.getBlockState(pos.set(ox + x, oy + by - 1, oz + z));
-                int skyAbove = 0, lampsAbove = 0;
-                boolean openAbove = false;
-                for (int y = by - 1; y >= 0; y--) {
-                    BlockState below = level.getBlockState(pos.set(ox + x, oy + y - 1, oz + z));
-                    pos.set(ox + x, oy + y, oz + z);
-                    int kind = 0, strength = 127;
-                    boolean solid = false;
-                    if (!state.isAir()) {
-                        if (state.getBlock() instanceof BaseFireBlock) {
-                            kind = GasParams.FIRE | (state.is(Blocks.SOUL_FIRE) ? GasParams.SOUL : 0);
-                        } else if (state.getBlock() instanceof CampfireBlock) {
-                            if (state.getValue(CampfireBlock.LIT)) {
-                                kind = GasParams.CAMPFIRE | (state.is(Blocks.SOUL_CAMPFIRE) ? GasParams.SOUL : 0);
-                                if (state.getValue(CampfireBlock.SIGNAL_FIRE)) strength = 230;
-                            }
-                        } else if (state.getBlock() instanceof TorchBlock) {
-                            kind = GasParams.TORCH | (state.is(Blocks.SOUL_TORCH) || state.is(Blocks.SOUL_WALL_TORCH) ? GasParams.SOUL : 0);
-                        } else if (!state.getFluidState().isEmpty()) {
-                            solid = true; // gas does not go into water or lava
-                        } else {
-                            solid = state.isCollisionShapeFullBlock(level, pos);
-                        }
+            for (int z = 0; z < box.bz; z++) scanColumn(level, pos, x, z, box.by, 0);
+            count(x);
+        }
+    }
+
+    /**
+     * One column of blocks of the map, from the world: the blocks from just under {@code top} down to {@code bottom}.
+     * (A block is as light as the open space over it, so each block goes by the one above: the one the map already
+     * holds, if {@code top} is not the top of the box.)
+     */
+    private static void scanColumn(ClientLevel level, BlockPos.MutableBlockPos pos, int x, int z, int top, int bottom) {
+        final int bx = box.bx, by = box.by, bz = box.bz;
+        if (top <= bottom) return;
+        BlockState state = level.getBlockState(pos.set(ox + x, oy + top - 1, oz + z));
+        int skyAbove = 0, lampsAbove = 0;
+        boolean openAbove = false;
+        if (top < by) {
+            int above = (x + bx * (z + bz * top)) * 4;
+            openAbove = plain[above] == 0; skyAbove = (plain[above + 3] & 255) >> 4; lampsAbove = plain[above + 3] & 15;
+        }
+        for (int y = top - 1; y >= bottom; y--) {
+            BlockState below = level.getBlockState(pos.set(ox + x, oy + y - 1, oz + z));
+            pos.set(ox + x, oy + y, oz + z);
+            int kind = 0, strength = 127;
+            boolean solid = false;
+            if (!state.isAir()) {
+                if (state.getBlock() instanceof BaseFireBlock) {
+                    kind = GasParams.FIRE | (state.is(Blocks.SOUL_FIRE) ? GasParams.SOUL : 0);
+                } else if (state.getBlock() instanceof CampfireBlock) {
+                    if (state.getValue(CampfireBlock.LIT)) {
+                        kind = GasParams.CAMPFIRE | (state.is(Blocks.SOUL_CAMPFIRE) ? GasParams.SOUL : 0);
+                        if (state.getValue(CampfireBlock.SIGNAL_FIRE)) strength = 230;
                     }
-                    if (kind == 0 && !solid) {
-                        // open space: lava or a lit furnace under it warms and smokes it
-                        if (below.is(Blocks.LAVA)) kind = GasParams.OVER_LAVA;
-                        else if (below.getBlock() instanceof AbstractFurnaceBlock && below.getValue(AbstractFurnaceBlock.LIT)) kind = GasParams.CHIMNEY;
-                    }
-                    if (kind != 0) {
-                        found++;
-                        fromY = Math.min(fromY, y); toY = Math.max(toY, y); fromZ = Math.min(fromZ, z); toZ = Math.max(toZ, z);
-                    }
-                    // a block is as light as the open space over it: smoke lying on the ground is not darkened by the ground
-                    int sky = solid ? (openAbove ? skyAbove : 0) : level.getBrightness(LightLayer.SKY, pos);
-                    int lamps = solid ? (openAbove ? lampsAbove : 0) : level.getBrightness(LightLayer.BLOCK, pos);
-                    int at = (x + bx * (z + bz * y)) * 4;
-                    plain[at] = (byte) (solid ? 255 : 0); plain[at + 1] = (byte) kind; plain[at + 2] = (byte) strength; plain[at + 3] = (byte) (sky * 16 + lamps);
-                    put(box.blockPixel(x, y, z), sky * 17, kind | (solid ? 128 : 0), strength, lamps * 17);
-                    openAbove = !solid; skyAbove = sky; lampsAbove = lamps;
-                    state = below;
+                } else if (state.getBlock() instanceof TorchBlock) {
+                    kind = GasParams.TORCH | (state.is(Blocks.SOUL_TORCH) || state.is(Blocks.SOUL_WALL_TORCH) ? GasParams.SOUL : 0);
+                } else if (!state.getFluidState().isEmpty()) {
+                    solid = true; // gas does not go into water or lava
+                } else {
+                    solid = state.isCollisionShapeFullBlock(level, pos);
                 }
             }
-            sourcesInColumn[x] = found;
-            sourcesFromY[x] = fromY; sourcesToY[x] = toY; sourcesFromZ[x] = fromZ; sourcesToZ[x] = toZ;
+            if (kind == 0 && !solid) {
+                // open space: lava or a lit furnace under it warms and smokes it
+                if (below.is(Blocks.LAVA)) kind = GasParams.OVER_LAVA;
+                else if (below.getBlock() instanceof AbstractFurnaceBlock && below.getValue(AbstractFurnaceBlock.LIT)) kind = GasParams.CHIMNEY;
+            }
+            // a block is as light as the open space over it: smoke lying on the ground is not darkened by the ground
+            int sky = solid ? (openAbove ? skyAbove : 0) : level.getBrightness(LightLayer.SKY, pos);
+            int lamps = solid ? (openAbove ? lampsAbove : 0) : level.getBrightness(LightLayer.BLOCK, pos);
+            int at = (x + bx * (z + bz * y)) * 4;
+            plain[at] = (byte) (solid ? 255 : 0); plain[at + 1] = (byte) kind; plain[at + 2] = (byte) strength; plain[at + 3] = (byte) (sky * 16 + lamps);
+            put(box.blockPixel(x, y, z), sky * 17, kind | (solid ? 128 : 0), strength, lamps * 17);
+            openAbove = !solid; skyAbove = sky; lampsAbove = lamps;
+            state = below;
+        }
+    }
+
+    /** For the column {@code x} of the map (all its z and y): how many blocks feed the gas, and where they are. */
+    private static void count(int x) {
+        final int bx = box.bx, by = box.by, bz = box.bz;
+        int found = 0, fromY = by, toY = -1, fromZ = bz, toZ = -1;
+        for (int y = 0; y < by; y++) {
+            for (int z = 0; z < bz; z++) {
+                if (plain[(x + bx * (z + bz * y)) * 4 + 1] == 0) continue;
+                found++;
+                fromY = Math.min(fromY, y); toY = Math.max(toY, y); fromZ = Math.min(fromZ, z); toZ = Math.max(toZ, z);
+            }
+        }
+        sourcesInColumn[x] = found;
+        sourcesFromY[x] = fromY; sourcesToY[x] = toY; sourcesFromZ[x] = fromZ; sourcesToZ[x] = toZ;
+    }
+
+    /**
+     * The box has moved by so many blocks (less than its size): what is still in it keeps what the map knows of it,
+     * and what has come into it is looked up in the world: whole columns where the box has moved sideways, the new
+     * layers where it has moved up or down. Looking all of it up again on every move was fine for a box of twelve
+     * thousand blocks; a box of half a million would stop the game for a moment every few steps the player takes.
+     */
+    private static void moveMap(ClientLevel level, int dx, int dy, int dz) {
+        final int bx = box.bx, by = box.by, bz = box.bz;
+        final int x0 = Math.max(0, -dx), x1 = Math.min(bx, bx - dx), y0 = Math.max(0, -dy), y1 = Math.min(by, by - dy), z0 = Math.max(0, -dz), z1 = Math.min(bz, bz - dz);
+        byte[] old = plain, next = new byte[old.length];
+        for (int y = y0; y < y1; y++) {
+            for (int z = z0; z < z1; z++) System.arraycopy(old, (x0 + dx + bx * (z + dz + bz * (y + dy))) * 4, next, (x0 + bx * (z + bz * y)) * 4, (x1 - x0) * 4);
+        }
+        plain = next;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int x = 0; x < bx; x++) {
+            for (int z = 0; z < bz; z++) {
+                if (x < x0 || x >= x1 || z < z0 || z >= z1) {
+                    scanColumn(level, pos, x, z, by, 0);
+                } else {
+                    scanColumn(level, pos, x, z, by, y1); // layers that have come in at the top
+                    scanColumn(level, pos, x, z, y0, 0);  // ... and at the bottom
+                }
+            }
+        }
+        // the picture of the map that the passes read: anew from what is known
+        for (int y = 0; y < by; y++) {
+            for (int z = 0; z < bz; z++) {
+                for (int x = 0; x < bx; x++) {
+                    int at = (x + bx * (z + bz * y)) * 4, light = next[at + 3] & 255;
+                    put(box.blockPixel(x, y, z), (light >> 4) * 17, (next[at + 1] & 255) | (next[at] != 0 ? 128 : 0), next[at + 2] & 255, (light & 15) * 17);
+                }
+            }
+        }
+        for (int x = 0; x < bx; x++) count(x);
+        scanAt = Math.max(0, Math.min(bx - 1, scanAt - dx));
+    }
+
+    private static int nearAt;
+
+    /**
+     * In a wide box going over the whole map takes seconds. What is near the player is gone over more often: a fire
+     * lit at one's feet has to smoke at once, one lit eighty blocks away may take a moment.
+     */
+    private static void scanNear(ClientLevel level, Vec3 eye) {
+        final int reach = 8, side = 2 * reach + 1;
+        final int columns = Math.max(4, 3000 / box.by);
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        final int px = (int) Math.floor(eye.x) - ox, pz = (int) Math.floor(eye.z) - oz;
+        int changedFrom = box.bx, changedTo = -1;
+        for (int i = 0; i < columns; i++) {
+            int x = px - reach + nearAt % side, z = pz - reach + nearAt / side;
+            nearAt = (nearAt + 1) % (side * side);
+            if (x < 0 || z < 0 || x >= box.bx || z >= box.bz) continue;
+            scanColumn(level, pos, x, z, box.by, 0);
+            changedFrom = Math.min(changedFrom, x); changedTo = Math.max(changedTo, x);
+        }
+        for (int x = changedFrom; x <= changedTo; x++) count(x);
+    }
+
+    /** Where explosions have just gone off (in the world: least x and z, greatest x and z), to be looked at again, and from which tick on. */
+    private static final int[] blasted = new int[4];
+    private static boolean blastedAny;
+    private static int blastedAt, blastedTick, mapTick;
+
+    /**
+     * An explosion changes the blocks around it at once, and the smoke of it must not be held back for seconds by
+     * walls that are no longer there: the columns around it are looked at again a moment after, a few hundred a tick.
+     */
+    private static void scanBlasts(ClientLevel level) {
+        mapTick++;
+        synchronized (blasted) {
+            if (!blastedAny || mapTick < blastedTick) return;
+            final int x0 = Math.max(0, blasted[0] - ox), z0 = Math.max(0, blasted[1] - oz), x1 = Math.min(box.bx - 1, blasted[2] - ox), z1 = Math.min(box.bz - 1, blasted[3] - oz);
+            if (x1 < x0 || z1 < z0) { blastedAny = false; return; }
+            final int wide = x1 - x0 + 1, all = wide * (z1 - z0 + 1), columns = Math.max(8, 6000 / box.by);
+            BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+            for (int i = 0; i < columns && blastedAt < all; i++, blastedAt++) scanColumn(level, pos, x0 + blastedAt % wide, z0 + blastedAt / wide, box.by, 0);
+            for (int x = x0; x <= x1; x++) count(x);
+            if (blastedAt >= all) blastedAny = false;
         }
     }
 
@@ -342,6 +492,8 @@ final class GasClient {
         if (seen == null || WHOLE) {
             part[0] = 0; part[1] = 0; part[2] = 0; part[3] = bx; part[4] = by; part[5] = bz;
             partOfBox = 1.0F;
+            System.arraycopy(part, 0, lastPart, 0, 6);
+            lastPartKnown = true; roomy = 0;
             return;
         }
         part[0] = bx; part[1] = by; part[2] = bz; part[3] = 0; part[4] = 0; part[5] = 0;
@@ -366,7 +518,34 @@ final class GasClient {
             // nothing anywhere: one block, so that there is something to draw the passes over
             part[0] = 0; part[1] = 0; part[2] = 0; part[3] = 1; part[4] = 1; part[5] = 1;
         }
+        settle();
         partOfBox = (float) (part[3] - part[0]) * (part[4] - part[1]) * (part[5] - part[2]) / ((float) bx * by * bz);
+    }
+
+    /** The part that was computed last step, and for how many steps running a much smaller one would have done. */
+    private static final int[] lastPart = new int[6];
+    private static boolean lastPartKnown;
+    private static int roomy;
+
+    /**
+     * The part that is computed grows at once but shrinks only now and then: a texture has to be cleared whenever the
+     * part it is written over no longer holds all of the part it was written over before ({@code GasGpu.wipe}), and a
+     * part that follows a burning creature step by step, or the outline of a plume of smoke, would have every texture
+     * cleared in every step. So the part is what is needed now together with what was computed last step, until for a
+     * second or so less than two thirds of that would have done; then it is cut back to what is needed.
+     */
+    private static void settle() {
+        if (lastPartKnown) {
+            long needed = (long) (part[3] - part[0]) * (part[4] - part[1]) * (part[5] - part[2]);
+            int x0 = Math.min(part[0], lastPart[0]), y0 = Math.min(part[1], lastPart[1]), z0 = Math.min(part[2], lastPart[2]);
+            int x1 = Math.max(part[3], lastPart[3]), y1 = Math.max(part[4], lastPart[4]), z1 = Math.max(part[5], lastPart[5]);
+            long both = (long) (x1 - x0) * (y1 - y0) * (z1 - z0);
+            roomy = needed * 3 < both * 2 ? roomy + 1 : 0;
+            if (roomy > 60) roomy = 0;
+            else { part[0] = x0; part[1] = y0; part[2] = z0; part[3] = x1; part[4] = y1; part[5] = z1; }
+        }
+        System.arraycopy(part, 0, lastPart, 0, 6);
+        lastPartKnown = true;
     }
 
     /** {@code -Dphysicsbruhh.gas.whole=true}: the whole box is computed every step, as if gas were everywhere (to compare). */
@@ -544,7 +723,7 @@ final class GasClient {
         Timer.begin(encoder);
         if (gpu != null) {
             if (stepped) {
-                gpu.step(encoder, grid, world, GasDraw.info(box), part);
+                gpu.step(encoder, grid, world, GasDraw.info(box), part, partOfBox);
                 gridX = ox; gridY = oy; gridZ = oz;
                 stepsDone++;
                 GasDraw.where(encoder, box, grid, gpu.gas(), false, gridX, gridY, gridZ);
@@ -670,6 +849,7 @@ final class GasClient {
                 Properties properties = new Properties();
                 try (var in = Files.newInputStream(file)) { properties.load(in); }
                 if (fine == null) fine = properties.getProperty("gas");
+                try { range = Integer.parseInt(properties.getProperty("range", "0").trim()); } catch (NumberFormatException e) { range = 0; }
                 if (by == null) by = properties.getProperty("solver");
             }
         } catch (Exception e) {
@@ -679,6 +859,9 @@ final class GasClient {
             try { quality = Quality.valueOf(fine.trim().toUpperCase(Locale.ROOT)); } catch (IllegalArgumentException e) { PhysicsBruhh.LOGGER.warn("Gas: unknown setting '{}'", fine); }
         }
         if (by != null && (by.equals("auto") || by.equals("gpu") || by.equals("compute") || by.equals("cpu"))) solver = by;
+        String wide = System.getenv("PHYSICSBRUHH_GAS_RANGE");
+        if (wide != null) { try { range = Integer.parseInt(wide.trim()); } catch (NumberFormatException e) { PhysicsBruhh.LOGGER.warn("Gas: unknown range '{}'", wide); } }
+        if (range != 0 && java.util.Arrays.stream(RANGES).noneMatch(r -> r == range)) range = 0;
         drawScale = Integer.getInteger("physicsbruhh.gas.scale", 2) <= 1 ? 1 : 2;
     }
 
@@ -687,10 +870,19 @@ final class GasClient {
             Properties properties = new Properties();
             properties.setProperty("gas", quality.name().toLowerCase(Locale.ROOT));
             properties.setProperty("solver", solver);
-            try (var out = Files.newOutputStream(file())) { properties.store(out, "Physics Bruhh, smoke and fire, this client only. gas = off | low | medium | high | ultra; solver = auto | gpu | compute | cpu"); }
+            properties.setProperty("range", String.valueOf(range));
+            try (var out = Files.newOutputStream(file())) { properties.store(out, "Physics Bruhh, smoke and fire, this client only. gas = off | low | medium | high | ultra; solver = auto | gpu | compute | cpu; range = 0 (the quality's own) | 24 | 32 | 48 | 64 | 96 blocks"); }
         } catch (Exception e) {
             PhysicsBruhh.LOGGER.warn("Could not save the gas setting: {}", e.toString());
         }
+    }
+
+    /** What a box is, for the chat: its size, how fine it is, and how much of the graphics card's memory it takes. */
+    private static Component said(GasBox b) {
+        // (three textures of eight bytes a cell of the fine grid; the rest is small beside them)
+        String memory = String.valueOf(Math.round(b.fineCells() * 24.0 / (1024.0 * 1024.0) / 10.0) * 10L);
+        return Component.translatableWithFallback("commands.physicsbruhh.gas.box", "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block (%s million cells, about %s MB of the graphics card's memory)",
+                b.bx, b.by, b.bz, b.cpb * b.ratio, String.format(Locale.ROOT, "%.1f", b.fineCells() / 1.0e6), memory);
     }
 
     static void registerCommand(RegisterClientCommandsEvent event) {
@@ -701,10 +893,20 @@ final class GasClient {
                 save();
                 context.getSource().sendSuccess(() -> q == Quality.OFF
                         ? Component.translatableWithFallback("commands.physicsbruhh.gas.off", "Fire and smoke are left as the game draws them on this client")
-                        : Component.translatableWithFallback("commands.physicsbruhh.gas.set", "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block", q.bx, q.by, q.bz, q.cpb * q.ratio), false);
+                        : said(boxFor(q, range)), false);
                 return 1;
             }));
         }
+        var wide = Commands.literal("range");
+        for (int blocks : RANGES) {
+            wide.then(Commands.literal(String.valueOf(blocks)).executes(context -> {
+                range = blocks;
+                save();
+                context.getSource().sendSuccess(() -> said(boxFor(quality == Quality.OFF ? Quality.MEDIUM : quality, range)), false);
+                return 1;
+            }));
+        }
+        command.then(wide);
         for (String by : new String[] { "auto", "gpu", "compute", "cpu" }) {
             command.then(Commands.literal("solver").then(Commands.literal(by).executes(context -> {
                 solver = by;

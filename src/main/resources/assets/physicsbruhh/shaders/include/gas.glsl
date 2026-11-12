@@ -8,7 +8,7 @@
 // A grid lies in its texture as layers of constant height side by side, `tiles` of them to a row;
 // cell (x, y, z) is the pixel (x + (y mod tiles) * nx, z + (y / tiles) * nz).
 
-#define GAS_BLOBS 16
+#define GAS_BLOBS 32
 
 layout(std140) uniform GasGrid {
     vec4 GasCoarse;   // the coarse grid (velocity, pressure): cells along x, y, z, and tiles to a row of its texture

@@ -71,7 +71,8 @@ final class GasGpu {
 
     /**
      * A step of the solver: drawn not over the whole texture of its grid but over one rectangle for each layer of the
-     * part of the box that is computed ({@code shaders/core/gas_region.vsh}); the rest of the texture is cleared.
+     * part of the box that is computed ({@code shaders/core/gas_region.vsh}). The rest of the texture holds nothing:
+     * it is cleared before the pass if it held anything outside that part ({@code wipe}), and otherwise left alone.
      */
     private static RenderPipeline step(String name, GpuFormat format, boolean fine, String... textures) {
         return pipeline(name, name, format, fine ? "core/gas_blocks" : "core/gas_region", null, textures);
@@ -123,9 +124,12 @@ final class GasGpu {
     private static final RenderPipeline PROJECT = step("gas_project", GpuFormat.RGBA16_FLOAT, false, "VelSampler", "PressureSampler");
     private static final RenderPipeline CARRY = step("gas_carry", GpuFormat.RGBA16_FLOAT, true, "GasSampler", "VelSampler", "WorldSampler", "InfoSampler");
     private static final RenderPipeline BURN = step("gas_burn", GpuFormat.RGBA16_FLOAT, true, "CarriedSampler", "GasSampler", "VelSampler", "WorldSampler", "InfoSampler");
+    /** The same two for a texture that was not cleared first: the blocks that are not awake are drawn too, as nothing ({@code gas_blocks.vsh}). */
+    private static final RenderPipeline CARRY_KEPT = pipeline("gas_carry_kept", "gas_carry", GpuFormat.RGBA16_FLOAT, "core/gas_blocks", "GAS_KEPT", "GasSampler", "VelSampler", "WorldSampler", "InfoSampler");
+    private static final RenderPipeline BURN_KEPT = pipeline("gas_burn_kept", "gas_burn", GpuFormat.RGBA16_FLOAT, "core/gas_blocks", "GAS_KEPT", "CarriedSampler", "GasSampler", "VelSampler", "WorldSampler", "InfoSampler");
     private static final RenderPipeline[] ALL;
     static {
-        java.util.List<RenderPipeline> all = new java.util.ArrayList<>(java.util.List.of(SPIN, VELOCITY, DIVERGENCE, PROJECT, CARRY, BURN));
+        java.util.List<RenderPipeline> all = new java.util.ArrayList<>(java.util.List.of(SPIN, VELOCITY, DIVERGENCE, PROJECT, CARRY, BURN, CARRY_KEPT, BURN_KEPT));
         all.addAll(java.util.List.of(PRESSURE)); all.addAll(java.util.List.of(DOWN)); all.addAll(java.util.List.of(UP));
         ALL = all.toArray(new RenderPipeline[0]);
     }
@@ -151,6 +155,20 @@ final class GasGpu {
     }
 
     private static final Vector4f NOTHING = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
+    /**
+     * The textures of the fine grid are left uncleared while the part that is computed is less than this much of the
+     * box ({@code PHYSICSBRUHH_GAS_KEEP} in the environment sets it; 1 = always, 0 = never, as it was before).
+     */
+    private static final float KEEP_UNDER = keepUnder();
+
+    private static float keepUnder() {
+        try {
+            String set = System.getenv("PHYSICSBRUHH_GAS_KEEP");
+            return set == null ? 0.25F : Float.parseFloat(set) >= 1.0F ? 2.0F : Float.parseFloat(set);
+        } catch (RuntimeException e) {
+            return 0.25F;
+        }
+    }
 
     final GasBox box;
     private final TextureTarget[] velocity = new TextureTarget[2], gas = new TextureTarget[3];
@@ -159,6 +177,11 @@ final class GasGpu {
     private final TextureTarget spin;
     /** Which of each holds what the last step left. */
     private int v, p, g;
+    /**
+     * For each texture of the coarse and the fine grid: the part of the box it was last written over (blocks: the
+     * least corner, the corner just past the greatest). Outside that part it holds nothing. Not in here: empty.
+     */
+    private final java.util.IdentityHashMap<TextureTarget, int[]> holds = new java.util.IdentityHashMap<>();
     int steps;
 
     GasGpu(GasBox box) {
@@ -181,6 +204,18 @@ final class GasGpu {
         for (TextureTarget[] level : pressure) for (TextureTarget target : level) encoder.clearColorTexture(target.getColorTexture(), NOTHING);
         for (TextureTarget target : gas) encoder.clearColorTexture(target.getColorTexture(), NOTHING);
         encoder.clearColorTexture(spin.getColorTexture(), NOTHING);
+        holds.clear();
+    }
+
+    /**
+     * Whether a texture has to be cleared before it is written over {@code part}: only if it holds something outside
+     * that part, which then would be left lying there. As long as the part that is computed stays as it is or grows,
+     * nothing is cleared at all, and a pass costs what the part costs and not what the whole box would. (Clearing
+     * every texture before every pass was most of the cost of a large box with a small fire in it.)
+     */
+    private boolean wipe(TextureTarget to, int[] part) {
+        int[] had = holds.put(to, part.clone());
+        return had != null && (had[0] < part[0] || had[1] < part[1] || had[2] < part[2] || had[3] > part[3] || had[4] > part[4] || had[5] > part[5]);
     }
 
     /** Smoke, heat and fuel as the last step left them. */
@@ -188,11 +223,14 @@ final class GasGpu {
         return gas[g].getColorTextureView();
     }
 
-    /** One pass: the whole texture cleared, then {@code layers} rectangles (one for each layer of the part that is computed; for the fine grid one for each layer of each block of it). */
-    private static void run(CommandEncoder encoder, String name, RenderPipeline pipeline, TextureTarget to, GpuBuffer grid, int layers, Consumer<RenderPass> textures) {
+    /**
+     * One pass: {@code layers} rectangles (one for each layer of the part that is computed; for the fine grid one for
+     * each layer of each block of it), over a texture that is cleared first if {@code wipe} says so.
+     */
+    private static void run(CommandEncoder encoder, String name, RenderPipeline pipeline, TextureTarget to, GpuBuffer grid, int layers, boolean wipe, Consumer<RenderPass> textures) {
         RenderSystem.AutoStorageIndexBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS);
         GpuBuffer indexBuffer = indices.getBuffer(layers * 6);
-        try (RenderPass pass = encoder.createRenderPass(() -> name, to.getColorTextureView(), Optional.of(NOTHING))) {
+        try (RenderPass pass = encoder.createRenderPass(() -> name, to.getColorTextureView(), wipe ? Optional.of(NOTHING) : Optional.empty())) {
             pass.setPipeline(compiled(pipeline));
             pass.setUniform("GasGrid", grid);
             textures.accept(pass);
@@ -207,22 +245,22 @@ final class GasGpu {
      * that is computed) are in {@code grid}; {@code part} is that part once more (blocks: the least corner, then the
      * corner just past the greatest); {@code info}: what each block held after the last step.
      */
-    void step(CommandEncoder encoder, GpuBuffer grid, GpuTextureView world, GpuTextureView info, int[] part) {
+    void step(CommandEncoder encoder, GpuBuffer grid, GpuTextureView world, GpuTextureView info, int[] part, float partOfBox) {
         final int coarse = (part[4] - part[1]) * box.cpb;
         // the fine grid: a rectangle for each of its layers through each block of the part
         final int fine = (part[3] - part[0]) * (part[4] - part[1]) * (part[5] - part[2]) * box.cpb * box.ratio;
         GpuSampler nearest = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST), linear = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
         final GpuTextureView was = velocity[v].getColorTextureView(), pushed = velocity[1 - v].getColorTextureView();
         final GpuTextureView before = gas[g].getColorTextureView(), carried = gas[(g + 1) % 3].getColorTextureView();
-        run(encoder, "Gas: spin", SPIN, spin, grid, coarse, pass -> pass.setUniform("VelSampler", was, nearest));
-        run(encoder, "Gas: velocity", VELOCITY, velocity[1 - v], grid, coarse, pass -> {
+        run(encoder, "Gas: spin", SPIN, spin, grid, coarse, wipe(spin, part), pass -> pass.setUniform("VelSampler", was, nearest));
+        run(encoder, "Gas: velocity", VELOCITY, velocity[1 - v], grid, coarse, wipe(velocity[1 - v], part), pass -> {
             pass.setUniform("VelSampler", was, linear);
             pass.setUniform("SpinSampler", spin.getColorTextureView(), nearest);
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("WorldSampler", world, nearest);
         });
         final GpuTextureView lastPressure = pressure[0][p].getColorTextureView();
-        run(encoder, "Gas: divergence", DIVERGENCE, pressure[0][1 - p], grid, coarse, pass -> {
+        run(encoder, "Gas: divergence", DIVERGENCE, pressure[0][1 - p], grid, coarse, wipe(pressure[0][1 - p], part), pass -> {
             pass.setUniform("VelSampler", pushed, nearest);
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("PressureSampler", lastPressure, nearest);
@@ -232,22 +270,26 @@ final class GasGpu {
         final int[] at = new int[GasBox.UNDER + 1];
         at[0] = 1 - p;
         final int cycles = Math.max(1, box.rounds / 4), each = Math.max(1, box.rounds / (2 * cycles));
-        for (int cycle = 0; cycle < cycles; cycle++) downAndUp(encoder, grid, nearest, 0, at, each, coarse);
+        for (int cycle = 0; cycle < cycles; cycle++) downAndUp(encoder, grid, nearest, 0, at, each, coarse, part);
         p = at[0];
         final GpuTextureView solved = pressure[0][p].getColorTextureView();
-        run(encoder, "Gas: project", PROJECT, velocity[v], grid, coarse, pass -> {
+        run(encoder, "Gas: project", PROJECT, velocity[v], grid, coarse, wipe(velocity[v], part), pass -> {
             pass.setUniform("VelSampler", pushed, nearest);
             pass.setUniform("PressureSampler", solved, nearest);
         });
         // velocity[v] holds the new velocity again
         final GpuTextureView now = velocity[v].getColorTextureView();
-        run(encoder, "Gas: carry", CARRY, gas[(g + 1) % 3], grid, fine, pass -> {
+        // A texture of the fine grid that is not cleared gets its blocks that are not awake written over with nothing.
+        // That is drawing over the part, where clearing is wiping the whole box: worth it only while the part is small.
+        final boolean small = partOfBox < KEEP_UNDER;
+        final boolean wipeCarried = wipe(gas[(g + 1) % 3], part) | !small, wipeBurnt = wipe(gas[(g + 2) % 3], part) | !small;
+        run(encoder, "Gas: carry", wipeCarried ? CARRY : CARRY_KEPT, gas[(g + 1) % 3], grid, fine, wipeCarried, pass -> {
             pass.setUniform("GasSampler", before, linear);
             pass.setUniform("VelSampler", now, linear);
             pass.setUniform("WorldSampler", world, nearest);
             pass.setUniform("InfoSampler", info, nearest);
         });
-        run(encoder, "Gas: burn", BURN, gas[(g + 2) % 3], grid, fine, pass -> {
+        run(encoder, "Gas: burn", wipeBurnt ? BURN : BURN_KEPT, gas[(g + 2) % 3], grid, fine, wipeBurnt, pass -> {
             pass.setUniform("CarriedSampler", carried, linear);
             pass.setUniform("GasSampler", before, nearest);
             pass.setUniform("VelSampler", now, linear);
@@ -259,35 +301,37 @@ final class GasGpu {
     }
 
     /** Rounds of the pressure solve on a level; {@code at} says which of the level's two textures holds the pressure. */
-    private void even(CommandEncoder encoder, GpuBuffer grid, GpuSampler nearest, int level, int[] at, int rounds, int layers) {
+    private void even(CommandEncoder encoder, GpuBuffer grid, GpuSampler nearest, int level, int[] at, int rounds, int layers, int[] part) {
         for (int round = 0; round < rounds; round++) {
             final GpuTextureView from = pressure[level][at[level]].getColorTextureView();
-            run(encoder, "Gas: pressure", PRESSURE[level], pressure[level][1 - at[level]], grid, layers, pass -> pass.setUniform("PressureSampler", from, nearest));
+            // (the grids under the coarse one are small and lie where the part begins: they are cleared every time)
+            final boolean wipe = level > 0 || wipe(pressure[level][1 - at[level]], part);
+            run(encoder, "Gas: pressure", PRESSURE[level], pressure[level][1 - at[level]], grid, layers, wipe, pass -> pass.setUniform("PressureSampler", from, nearest));
             at[level] = 1 - at[level];
         }
     }
 
     /** A level of the pressure solve and those under it: rounds, what is left handed down, the answer taken up, rounds. {@code layers}: layers of the coarse grid that are computed. */
-    private void downAndUp(CommandEncoder encoder, GpuBuffer grid, GpuSampler nearest, int level, int[] at, int each, int layers) {
+    private void downAndUp(CommandEncoder encoder, GpuBuffer grid, GpuSampler nearest, int level, int[] at, int each, int layers, int[] part) {
         final int here = layers + (1 << level) - 1 >> level;
         if (level == GasBox.UNDER) {
             // nothing under the last: more rounds instead
-            even(encoder, grid, nearest, level, at, 2 * each + 4, here);
+            even(encoder, grid, nearest, level, at, 2 * each + 4, here, part);
             return;
         }
         final int under = layers + (2 << level) - 1 >> level + 1;
-        even(encoder, grid, nearest, level, at, each, here);
+        even(encoder, grid, nearest, level, at, each, here, part);
         final GpuTextureView left = pressure[level][at[level]].getColorTextureView();
-        run(encoder, "Gas: pressure handed down", DOWN[level], pressure[level + 1][0], grid, under, pass -> pass.setUniform("PressureSampler", left, nearest));
+        run(encoder, "Gas: pressure handed down", DOWN[level], pressure[level + 1][0], grid, under, true, pass -> pass.setUniform("PressureSampler", left, nearest));
         at[level + 1] = 0;
-        downAndUp(encoder, grid, nearest, level + 1, at, each, layers);
+        downAndUp(encoder, grid, nearest, level + 1, at, each, layers, part);
         final GpuTextureView own = pressure[level][at[level]].getColorTextureView(), answer = pressure[level + 1][at[level + 1]].getColorTextureView();
-        run(encoder, "Gas: pressure taken up", UP[level], pressure[level][1 - at[level]], grid, here, pass -> {
+        run(encoder, "Gas: pressure taken up", UP[level], pressure[level][1 - at[level]], grid, here, level > 0 || wipe(pressure[level][1 - at[level]], part), pass -> {
             pass.setUniform("PressureSampler", own, nearest);
             pass.setUniform("UnderSampler", answer, nearest);
         });
         at[level] = 1 - at[level];
-        even(encoder, grid, nearest, level, at, each, here);
+        even(encoder, grid, nearest, level, at, each, here, part);
     }
 
     void close() {

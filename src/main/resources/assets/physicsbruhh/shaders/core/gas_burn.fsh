@@ -16,11 +16,19 @@ uniform sampler2D InfoSampler;      // what each block held after the last step 
 
 layout(location = 0) out vec4 fragColor;
 
+#ifdef GAS_KEPT
+// (see gas_blocks.vsh) a block that is not awake holds nothing, whatever this texture held in it before
+layout(location = 0) flat in float gasAsleep;
+#endif
+
 float share(float soul, float fuel, float heat) {
     return fuel + heat > 1.0e-6 ? clamp(soul / (fuel + heat), 0.0, 1.0) : 0.0;
 }
 
 void main() {
+#ifdef GAS_KEPT
+    if (gasAsleep > 0.5) { fragColor = vec4(0.0); return; }
+#endif
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     ivec3 c = gasCell(GasFine, pixel);
     float fpbf = GasStep.z * GasStep.w;

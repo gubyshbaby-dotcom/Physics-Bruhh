@@ -58,7 +58,7 @@ final class GasBox {
     }
 
     /** Blobs the solvers take at once ({@code GAS_BLOBS} in gas.glsl). */
-    static final int BLOBS = 16;
+    static final int BLOBS = 32;
     /** How many numbers the passes are told about the grid and a step ({@code GasGrid} in gas.glsl): sixteen of four, then the blobs, three of four each. */
     static final int GRID_FLOATS = (16 + BLOBS * 3) * 4;
 

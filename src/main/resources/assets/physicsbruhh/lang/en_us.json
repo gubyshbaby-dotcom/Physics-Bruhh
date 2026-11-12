@@ -32,6 +32,7 @@
   "gamerule.physicsbruhh.physical_gas.description": "Fire, campfires, torches, lava, lit furnaces, burning creatures and explosions make flames and smoke that are simulated as gas: they rise, swirl, go round blocks and gather under ceilings. Each client computes and draws them for itself (/gaslook).",
   "gamerule.physicsbruhh:physical_gas": "Fire and smoke are physical gas",
   "gamerule.physicsbruhh:physical_gas.description": "Fire, campfires, torches, lava, lit furnaces, burning creatures and explosions make flames and smoke that are simulated as gas: they rise, swirl, go round blocks and gather under ceilings. Each client computes and draws them for itself (/gaslook).",
+  "commands.physicsbruhh.gas.box": "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block (%s million cells, about %s MB of the graphics card's memory)",
   "commands.physicsbruhh.gas.off": "Fire and smoke are left as the game draws them on this client",
   "commands.physicsbruhh.gas.set": "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block",
   "commands.physicsbruhh.gas.solver.auto": "Fire and smoke are computed on the graphics card where it can do it",
