@@ -42,7 +42,7 @@ public final class GooCommands {
 
     public static int clear(ServerLevel level, Vec3 centre, double radius) {
         int removed = 0;
-        for (var type : java.util.List.of(PhysicsBruhh.HONEY_GOO.get(), PhysicsBruhh.SLIME_GOO.get())) {
+        for (var type : java.util.List.of(PhysicsBruhh.HONEY_GOO.get(), PhysicsBruhh.SLIME_GOO.get(), PhysicsBruhh.LAVA_GOO.get())) {
             for (GooEntity goo : level.getEntities(type, e -> centre == null || e.position().distanceToSqr(centre) <= radius * radius)) {
                 goo.discard();
                 removed++;

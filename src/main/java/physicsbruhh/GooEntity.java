@@ -36,6 +36,9 @@ import physicsbruhh.sim.GooSim;
  * it marks where the goo is, how old it is, what it is made of and how much of it there is. Clients
  * turn it into simulated goo when it enters their view. Hitting it gives back what it is made of.
  *
+ * <p>Lava that has left its block is kept the same way (see {@link LavaFlow}): a marker, and the
+ * clients simulate what it marks. It cannot be hit or scooped, and it does not last.
+ *
  * <p>A piece is either a block that turned into goo, or goo that was poured or thrown (out of a
  * dispenser, out of a bottle). More can be poured into a piece until it holds a block's worth, and
  * goo can be taken out of it; the amount, and where and how the last of it came or went, is what
@@ -73,8 +76,12 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
     }
 
     public int material() {
-        return this.getType() == PhysicsBruhh.SLIME_GOO.get() ? GooSim.SLIME : GooSim.HONEY;
+        EntityType<?> type = this.getType();
+        return type == PhysicsBruhh.SLIME_GOO.get() ? GooSim.SLIME : type == PhysicsBruhh.LAVA_GOO.get() ? GooSim.LAVA : GooSim.HONEY;
     }
+
+    /** Server side: how long ago this piece came to be, in ticks. */
+    public int age() { return ageTicks; }
 
     public int spawnAgeTicks() { return spawnAgeTicks; }
 
@@ -170,6 +177,8 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
         super.tick();
         if (this.level() instanceof ServerLevel serverLevel) {
             ageTicks++;
+            // lava is not goo: it is not punched, scooped or waded through; what it does is in LavaFlow, and the clients say where it is
+            if (material() == GooSim.LAVA) { LavaFlow.tick(this, serverLevel, ageTicks); return; }
             applyLook(serverLevel);
             if (shiftIn > 0 && --shiftIn == 0) this.setPos(this.getX() + shiftX, this.getY() + shiftY, this.getZ() + shiftZ);
             touch(serverLevel);
@@ -235,12 +244,12 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
 
     @Override
     public boolean isPickable() {
-        return true;
+        return material() != GooSim.LAVA;
     }
 
     @Override
     public boolean hurtServer(ServerLevel level, DamageSource source, float damage) {
-        if (this.isRemoved()) return false;
+        if (this.isRemoved() || material() == GooSim.LAVA) return false;
         boolean slime = material() == GooSim.SLIME;
         // the block's own breaking sound and particles
         level.levelEvent(null, 2001, this.blockPosition(), Block.getId((slime ? Blocks.SLIME_BLOCK : Blocks.HONEY_BLOCK).defaultBlockState()));
@@ -259,6 +268,7 @@ public class GooEntity extends Entity implements IEntityWithComplexSpawn {
      */
     @Override
     public InteractionResult interact(Player player, InteractionHand hand, Vec3 location) {
+        if (material() == GooSim.LAVA) return InteractionResult.PASS;
         ItemStack stack = player.getItemInHand(hand);
         boolean honey = material() == GooSim.HONEY, bare = stack.isEmpty() && hand == InteractionHand.MAIN_HAND;
         boolean ours = honey ? bare || stack.is(Items.GLASS_BOTTLE) || stack.is(Items.HONEY_BOTTLE) : bare || stack.is(Items.SLIME_BALL);

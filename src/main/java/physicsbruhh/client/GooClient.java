@@ -67,22 +67,27 @@ public final class GooClient {
 
     /** Latest surface, shared with the renderer under {@link #MESH_LOCK}. */
     static final Object MESH_LOCK = new Object();
-    static float[][] meshData = { new float[0], new float[0] };
-    static int[] meshQuads = { 0, 0 };
+    static float[][] meshData = { new float[0], new float[0], new float[0] };
+    static int[] meshQuads = { 0, 0, 0 };
     /** Where the puddles of that surface are ({@link GooSim#PART_FLOATS} floats each), and how many there are. */
-    static float[][] meshParts = { new float[0], new float[0] };
-    static int[] meshPartCount = { 0, 0 };
+    static float[][] meshParts = { new float[0], new float[0], new float[0] };
+    static int[] meshPartCount = { 0, 0, 0 };
     static int meshVersion;
     static volatile BlockPos origin = BlockPos.ZERO;
     /**
      * Latest particles (x, y, z, kind and size: see {@link GooSim#particles}), shared with the liquid
-     * look under {@link #PARTICLE_LOCK}. Only kept up to date while {@link #wantParticles} is set; the
-     * surface mesh is not built meanwhile.
+     * look and with the lava under {@link #PARTICLE_LOCK}. Only kept up to date while
+     * {@link #wantParticles} is set. Which surface meshes are built meanwhile is in {@link #wantMeshes}.
      */
     static final Object PARTICLE_LOCK = new Object();
     static float[] particleData = new float[0];
     static int particleCount, particleVersion;
     static volatile boolean wantParticles;
+    /** The materials a surface mesh is wanted for, a bit each: honey and slime unless they are drawn as liquid, lava only where it cannot be drawn from its particles. */
+    static volatile int wantMeshes = 3;
+    /** Whether there is lava that flows as a body among the goo (it is drawn and looked after by {@link LavaGoo}). */
+    static volatile boolean lavaPresent;
+    private static int lavaLinger;
 
     private static volatile GooSim sim;
     private static Thread thread;
@@ -158,8 +163,9 @@ public final class GooClient {
         bodyInfo = new float[0]; KNOWN.clear(); LIVE.clear(); TOLD.clear(); clearLook = false; NEW_CELLS.clear(); BORN.clear(); probeBox = null; probeResult = 0; traceIds = new int[0]; traceCounts = new int[0];
         java.util.Arrays.fill(SLEEP_HASH_VALID, false); java.util.Arrays.fill(WAKING, 0);
         PART_IDS.clear(); HEADS.clear();
-        synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshPartCount[0] = 0; meshPartCount[1] = 0; meshVersion++; }
+        synchronized (MESH_LOCK) { java.util.Arrays.fill(meshQuads, 0); java.util.Arrays.fill(meshPartCount, 0); meshVersion++; }
         synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
+        lavaPresent = false;
     }
 
     private static void start() {
@@ -200,10 +206,18 @@ public final class GooClient {
         ClientLevel level = mc.level;
         if (level == null) { if (sim != null) reset(); return; }
         paused = mc.isPaused();
-        boolean clear = false;
-        for (GooEntity goo : LIVE.values()) { if (goo.clear()) { clear = true; break; } }
+        boolean clear = false, lava = false;
+        for (GooEntity goo : LIVE.values()) {
+            if (goo.material() == GooSim.LAVA) lava = true;
+            else if (goo.clear()) clear = true;
+        }
         clearLook = clear;
-        wantParticles = clear && GooFluid.inUse();
+        lavaPresent = lava;
+        // (a piece that has just gone shrinks away for a moment yet: its particles are wanted that long)
+        if (lava) lavaLinger = 20; else if (lavaLinger > 0) lavaLinger--;
+        boolean liquid = clear && GooFluid.inUse();
+        wantParticles = liquid || lava || lavaLinger > 0;
+        wantMeshes = (liquid ? 0 : 3) | (lava && !LavaGoo.inUse() ? 4 : 0);
         // What this tick has to tell the simulation is held back until the colliders it scanned are out: goo must not be
         // simulated for even one step against colliders from before it existed, which may hold the block it came from.
         List<Runnable> orders = new ArrayList<>();
@@ -371,6 +385,8 @@ public final class GooClient {
                 }
                 if (!inner) continue;
                 if (shape == null) shape = state.getCollisionShape(level, pos);
+                // a block of lava is a wall to lava that flows as a body (and to goo): what has come out of a lake lies on it and is pushed on by what follows
+                if (shape.isEmpty() && lavaBlock(state)) shape = net.minecraft.world.phys.shapes.Shapes.block();
                 if (shape.isEmpty()) continue;
                 float stick = stickiness(state);
                 for (AABB box : shape.toAabbs()) {
@@ -391,7 +407,13 @@ public final class GooClient {
 
     /** The block a piece of goo of this material comes from. */
     private static net.minecraft.world.level.block.Block sourceBlock(int material) {
-        return material == GooSim.HONEY ? Blocks.HONEY_BLOCK : Blocks.SLIME_BLOCK;
+        return material == GooSim.HONEY ? Blocks.HONEY_BLOCK : material == GooSim.LAVA ? Blocks.LAVA : Blocks.SLIME_BLOCK;
+    }
+
+    /** A whole block of lava (not lava that is running through a block). */
+    private static boolean lavaBlock(BlockState state) {
+        net.minecraft.world.level.material.FluidState fluid = state.getFluidState();
+        return fluid.isSource() && fluid.is(net.minecraft.tags.FluidTags.LAVA) && state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock;
     }
 
     /** A body's bounds as reported by the simulation: real numbers, the right way round, not absurdly large or far away. */
@@ -616,6 +638,28 @@ public final class GooClient {
 
     static boolean healthy() { return sim != null && running; }
 
+    /**
+     * The pieces of lava this client simulates, for {@link LavaGoo}: for each, the marker's id and where
+     * the simulation has it (least and greatest corner, in the world). Returns how many were written.
+     */
+    static int lavaPieces(int[] ids, double[] bounds) {
+        float[] info = bodyInfo;
+        BlockPos o = origin;
+        int n = 0;
+        for (GooEntity goo : LIVE.values()) {
+            if (n >= ids.length) break;
+            if (goo.material() != GooSim.LAVA || goo.isRemoved()) continue;
+            Integer slot = SLOT_OF_ENTITY.get(goo.getId());
+            if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
+            int b = slot * 8;
+            ids[n] = goo.getId();
+            bounds[n * 6] = info[b + 2] + o.getX(); bounds[n * 6 + 1] = info[b + 3] + o.getY(); bounds[n * 6 + 2] = info[b + 4] + o.getZ();
+            bounds[n * 6 + 3] = info[b + 5] + o.getX(); bounds[n * 6 + 4] = info[b + 6] + o.getY(); bounds[n * 6 + 5] = info[b + 7] + o.getZ();
+            n++;
+        }
+        return n;
+    }
+
     /** How much goo the local player is standing in: honey particles in the low 16 bits, slime in the next 16. */
     static int contact() { return probeBox == null ? 0 : probeResult; }
 
@@ -654,6 +698,7 @@ public final class GooClient {
         Vec3 bestPoint = null;
         double bestDistance = limit;
         for (GooEntity goo : LIVE.values()) {
+            if (goo.material() == GooSim.LAVA) continue; // not something to punch or scoop
             Integer slot = SLOT_OF_ENTITY.get(goo.getId());
             if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F || !saneBounds(info, slot * 8)) continue;
             int b = slot * 8;
@@ -675,6 +720,7 @@ public final class GooClient {
         float[] info = bodyInfo;
         BlockPos o = origin;
         for (GooEntity goo : LIVE.values()) {
+            if (goo.material() == GooSim.LAVA) continue;
             Integer slot = SLOT_OF_ENTITY.get(goo.getId());
             if (slot == null || slot * 8 + 8 > info.length || info[slot * 8] != 1.0F) continue;
             int b = slot * 8;
@@ -769,7 +815,7 @@ public final class GooClient {
             int b = slot * 8;
             if (info[b + 4] + o.getZ() > row[1] + 0.5 || info[b + 7] + o.getZ() < row[1] + 0.5) continue;
             int[] stuck = traceStuck;
-            sb.append(String.format(java.util.Locale.ROOT, " body%d(%s%s) x=%.2f..%.2f on blocks=%d", slot, goo.material() == GooSim.SLIME ? "slime" : "honey", info[b + 1] != 0.0F ? "" : ",asleep", info[b + 2] + o.getX(), info[b + 5] + o.getX(), slot < stuck.length ? stuck[slot] : -1));
+            sb.append(String.format(java.util.Locale.ROOT, " body%d(%s%s) x=%.2f..%.2f on blocks=%d", slot, goo.material() == GooSim.SLIME ? "slime" : goo.material() == GooSim.LAVA ? "lava" : "honey", info[b + 1] != 0.0F ? "" : ",asleep", info[b + 2] + o.getX(), info[b + 5] + o.getX(), slot < stuck.length ? stuck[slot] : -1));
         }
         int[] ids = traceIds, counts = traceCounts;
         sb.append(" | held:");
@@ -889,6 +935,7 @@ public final class GooClient {
         long last = System.nanoTime(), speedFrom = 0L;
         int speedSteps = 0;
         boolean dirty = true, hadAwake = false, asParticles = false, slow = false;
+        int asMeshes = 3;
         try {
             while (running) {
                 GooSim s = sim;
@@ -932,13 +979,16 @@ public final class GooClient {
                 }
                 // once more after the last moving body has stopped or gone, or its final state would never be shown
                 boolean particles = wantParticles;
-                boolean changed = awake > 0 || dirty || hadAwake || particles != asParticles;
-                if (particles != asParticles) {
-                    // the other look's data is not kept up from here on: nothing stale must be left to draw
-                    if (particles) synchronized (MESH_LOCK) { meshQuads[0] = 0; meshQuads[1] = 0; meshPartCount[0] = 0; meshPartCount[1] = 0; meshVersion++; }
-                    else synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
+                int meshes = wantMeshes;
+                boolean changed = awake > 0 || dirty || hadAwake || particles != asParticles || meshes != asMeshes;
+                // what is not kept up from here on must not be left to draw
+                if (asParticles && !particles) synchronized (PARTICLE_LOCK) { particleCount = 0; particleVersion++; }
+                if (meshes != asMeshes) synchronized (MESH_LOCK) {
+                    for (int mat = 0; mat < GooSim.MATERIALS; mat++) if ((meshes >> mat & 1) == 0) { meshQuads[mat] = 0; meshPartCount[mat] = 0; }
+                    meshVersion++;
                 }
                 asParticles = particles;
+                asMeshes = meshes;
                 if (watchAmounts) {
                     int[] amounts = new int[Math.max(0, slots)];
                     for (int b = 0; b < amounts.length; b++) amounts[b] = info.length >= (b + 1) * GooSim.BODY_FLOATS && info[b * GooSim.BODY_FLOATS] != 0.0F ? s.count(4, b) : 0;
@@ -955,9 +1005,10 @@ public final class GooClient {
                         particleCount = count;
                         particleVersion++;
                     }
-                    dirty = false;
-                } else if (changed) {
-                    for (int mat = 0; mat < 2; mat++) {
+                }
+                if (changed) {
+                    for (int mat = 0; mat < GooSim.MATERIALS; mat++) {
+                        if ((meshes >> mat & 1) == 0) continue;
                         int quads = s.mesh(mat, meshBuf);
                         if (quads < 0 && quads > -(1 << 26)) { meshBuf = direct(-quads + (1 << 16)); quads = s.mesh(mat, meshBuf); }
                         if (quads < 0) quads = 0;

@@ -12,7 +12,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 pub const ABI_VERSION: jint = 8;
 const ERR: jint = -9999;
 
-struct Handle { world: World, mesh: Vec<f32>, parts: [Vec<f32>; 2] }
+struct Handle { world: World, mesh: Vec<f32>, parts: [Vec<f32>; 3] }
 
 unsafe fn handle<'a>(h: jlong) -> Option<&'a mut Handle> { (h as *mut Handle).as_mut() }
 
@@ -31,7 +31,7 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nVersion(_env: JNIEnv, _c
 #[no_mangle]
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nCreate(_env: JNIEnv, _c: JClass, n: jint, max_bodies: jint) -> jlong {
     // room for a few bodies to begin with; more is made as they are added, up to `max_bodies`
-    catch_unwind(|| Box::into_raw(Box::new(Handle { world: World::with_room(n.max(1) as usize, (max_bodies.max(1) as usize).min(8), max_bodies.max(1) as usize), mesh: Vec::new(), parts: [Vec::new(), Vec::new()] })) as jlong).unwrap_or(0)
+    catch_unwind(|| Box::into_raw(Box::new(Handle { world: World::with_room(n.max(1) as usize, (max_bodies.max(1) as usize).min(8), max_bodies.max(1) as usize), mesh: Vec::new(), parts: [Vec::new(), Vec::new(), Vec::new()] })) as jlong).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -142,7 +142,7 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nMesh(env: JNIEnv, _c: JC
     guard(|| unsafe {
         let (hd, out) = match (handle(h), floats(&env, &buf)) { (Some(a), Some(b)) => (a, b), _ => return ERR };
         hd.mesh.clear();
-        let quads = mesh::build_parts(&hd.world, mat as u8, &mut hd.mesh, &mut hd.parts[mat as usize & 1]);
+        let quads = mesh::build_parts(&hd.world, crate::sim::material(mat as u8), &mut hd.mesh, &mut hd.parts[crate::sim::material(mat as u8) as usize]);
         if hd.mesh.len() > out.len() { return -(hd.mesh.len() as jint); }
         out[..hd.mesh.len()].copy_from_slice(&hd.mesh);
         quads as jint
@@ -156,7 +156,7 @@ pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nMesh(env: JNIEnv, _c: JC
 pub extern "system" fn Java_physicsbruhh_sim_NativeSim_nMeshParts(env: JNIEnv, _c: JClass, h: jlong, mat: jint, buf: JByteBuffer) -> jint {
     guard(|| unsafe {
         let (hd, out) = match (handle(h), floats(&env, &buf)) { (Some(a), Some(b)) => (a, b), _ => return ERR };
-        let parts = &hd.parts[mat as usize & 1];
+        let parts = &hd.parts[crate::sim::material(mat as u8) as usize];
         if parts.len() > out.len() { return -(parts.len() as jint); }
         out[..parts.len()].copy_from_slice(parts);
         (parts.len() / mesh::PART_FLOATS) as jint

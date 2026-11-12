@@ -42,6 +42,10 @@ public class PhysicsBruhh {
     public static final DeferredHolder<EntityType<?>, EntityType<GooEntity>> SLIME_GOO = ENTITIES.registerEntityType(
             "slime_goo", GooEntity::new, MobCategory.MISC, b -> b.sized(0.9F, 0.9F).clientTrackingRange(8).updateInterval(20));
 
+    /** Lava that has left its block and flows as a body, see {@link LavaFlow}. */
+    public static final DeferredHolder<EntityType<?>, EntityType<GooEntity>> LAVA_GOO = ENTITIES.registerEntityType(
+            "lava_goo", GooEntity::new, MobCategory.MISC, b -> b.sized(0.9F, 0.4F).fireImmune().clientTrackingRange(8).updateInterval(20));
+
     public static final DeferredRegister.DataComponents COMPONENTS = DeferredRegister.createDataComponents(Registries.DATA_COMPONENT_TYPE, MODID);
     /** On a block of honey or slime as an item: how thick the goo it turns into will be, see {@link GooThickness}. */
     public static final DeferredHolder<DataComponentType<?>, DataComponentType<Float>> THICKNESS = COMPONENTS.registerComponentType(
@@ -58,11 +62,16 @@ public class PhysicsBruhh {
     /** {@code /gamerule physicsbruhh:physical_gas false} leaves fire and smoke as the game draws them. */
     public static final Supplier<GameRule<Boolean>> PHYSICAL_GAS = () -> physicalGas;
 
+    private static GameRule<Boolean> physicalLava;
+    /** {@code /gamerule physicsbruhh:physical_lava false} leaves lava to flow block by block, as the game has it. */
+    public static final Supplier<GameRule<Boolean>> PHYSICAL_LAVA = () -> physicalLava;
+
     public PhysicsBruhh(IEventBus modBus, ModContainer container) {
         ENTITIES.register(modBus);
         COMPONENTS.register(modBus);
         modBus.addListener((RegisterPayloadHandlersEvent e) -> {
             e.registrar("1").playToServer(GooThickness.Turn.TYPE, GooThickness.Turn.CODEC, GooThickness::handle);
+            e.registrar("1").playToServer(LavaFlow.Report.TYPE, LavaFlow.Report.CODEC, LavaFlow::handle);
             // what the client does with these two is registered by the client (PhysicsBruhhClient)
             e.registrar("1").playToClient(GasRules.State.TYPE, GasRules.State.CODEC);
             e.registrar("1").playToClient(GasRules.Blast.TYPE, GasRules.Blast.CODEC);
@@ -73,6 +82,7 @@ public class PhysicsBruhh {
                 physicalGoo = GameRules.registerBoolean(MODID + ":physical_goo", RULE_CATEGORY, true);
                 clearGoo = GameRules.registerBoolean(MODID + ":clear_goo", RULE_CATEGORY, false);
                 physicalGas = GameRules.registerBoolean(MODID + ":physical_gas", RULE_CATEGORY, true);
+                physicalLava = GameRules.registerBoolean(MODID + ":physical_lava", RULE_CATEGORY, true);
             }
         });
         modBus.addListener((RegisterGameRuleCategoryEvent e) -> e.register(RULE_CATEGORY));

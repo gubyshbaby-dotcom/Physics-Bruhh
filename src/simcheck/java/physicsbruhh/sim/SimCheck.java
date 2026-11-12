@@ -3,6 +3,8 @@ package physicsbruhh.sim;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Stand-alone check (no Minecraft, no test framework): runs the same scenarios through the Java
@@ -43,7 +45,7 @@ public final class SimCheck {
 
     static float[] scenarios(String name, Factory f) {
         System.out.println(name + ":");
-        float[] sig = new float[16];
+        float[] sig = new float[20];
         long t0 = System.nanoTime();
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
@@ -176,6 +178,43 @@ public final class SimCheck {
             check("... and none of it goes through the floor", under == 0, under + " under the floor");
             check("... and it stays around the block", b[5] - b[2] < 3f && b[7] - b[4] < 3f && b[6] < 1.3f, (b[5] - b[2]) + " x " + (b[7] - b[4]) + " wide, " + b[6] + " high");
             sig[14] = b[5] - b[2]; sig[15] = b[6];
+        }
+        // lava let out of a pocket in a wall, two blocks above the floor: it oozes out as one body, pours down and lies as a thick lobe
+        try (GooSim s = f.make(12, 4)) {
+            List<float[]> wall = new ArrayList<>();
+            for (int x = -3; x < 0; x++) for (int y = 0; y < 5; y++) for (int z = -2; z < 3; z++) if (!(x == -1 && y == 2 && z == 0)) wall.add(new float[] { x, y, z, x + 1, y + 1, z + 1, 1 });
+            float[][] boxes = wall.toArray(new float[0][]);
+            s.setStatic(floor(boxes), floorCount(boxes.length));
+            int lava = s.addBody(GooSim.LAVA, -1, 2, 0, 1, 0, 0);
+            ByteBuffer out = buf(GooSim.BLOCK * 4 + 1024);
+            run(s, 1f);
+            int early = s.particles(out), earlyOut = 0;
+            for (int i = 0; i < early; i++) if (out.getFloat(i * 16) > 0.02f) earlyOut++;
+            check("lava does not burst out of its block", early == GooSim.BLOCK && earlyOut < GooSim.BLOCK / 3, earlyOut + " of " + early + " out after a second");
+            for (int k = 0; k < 7 * 60; k++) { if (k % 3 == 0) s.setStatic(floor(boxes), floorCount(boxes.length)); s.step(1f / 60f + 1e-6f); }
+            int n = s.particles(out), outside = 0, marked = 0, hot = 0;
+            for (int i = 0; i < n; i++) {
+                int bits = (int) out.getFloat(i * 16 + 12);
+                if (out.getFloat(i * 16) > 0.02f) outside++;
+                if ((bits & 8) != 0) marked++;
+                if ((bits >> 10 & 63) > 32) hot++;
+            }
+            check("lava oozes out of the pocket", outside > n * 0.4f && outside < n, outside + " of " + n + " out after 8 s");
+            check("its particles say that they are lava, and still hot", marked == n && hot == n, marked + " marked, " + hot + " hot");
+            sig[16] = outside / (float) Math.max(1, n);
+            for (int k = 0; k < 37 * 60; k++) { if (k % 3 == 0) s.setStatic(floor(boxes), floorCount(boxes.length)); s.step(1f / 60f + 1e-6f); }
+            float[] b = body(s, lava);
+            n = s.particles(out); outside = 0; int cooled = 0, under = 0;
+            for (int i = 0; i < n; i++) {
+                if (out.getFloat(i * 16) > 0.02f) outside++;
+                if (out.getFloat(i * 16 + 4) < -0.01f) under++;
+                if (((int) out.getFloat(i * 16 + 12) >> 10 & 63) < 40) cooled++;
+            }
+            check("all of it has come out and lies on the floor", outside == n && n == GooSim.BLOCK && b[6] < 0.9f && under == 0, outside + " of " + n + " out, top " + b[6] + ", " + under + " under the floor");
+            check("as a thick lobe, not a film", b[6] > 0.15f && b[5] - b[2] < 3.4f && b[7] - b[4] < 3.4f, "top " + b[6] + ", " + (b[5] - b[2]) + " x " + (b[7] - b[4]));
+            check("lava has cooled by then, and is not counted as goo", cooled == n && s.probe(-9f, -9f, -9f, 9f, 9f, 9f) == 0, cooled + " cooled, probe " + s.probe(-9f, -9f, -9f, 9f, 9f, 9f));
+            check("lava has a surface of its own", s.mesh(GooSim.LAVA, buf(1 << 20)) > 200 && s.mesh(GooSim.HONEY, buf(1 << 20)) == 0, s.mesh(GooSim.LAVA, buf(1 << 20)) + " quads");
+            sig[17] = b[6]; sig[18] = b[5] - b[2];
         }
         try (GooSim s = f.make(12, 4)) {
             s.setStatic(floor(), floorCount(0));
@@ -405,6 +444,7 @@ public final class SimCheck {
             check("the slime heap lands in the same place", Math.abs(j[8] - r[8]) < 0.5f, j[8] + " vs " + r[8]);
             check("thin and thick honey agree", Math.abs(j[10] - r[10]) < 0.1f && Math.abs(j[11] - r[11]) < 0.15f, "thin " + j[10] + " vs " + r[10] + ", thick " + j[11] + " vs " + r[11]);
             check("honey squeezed out of a block agrees", Math.abs(j[14] - r[14]) < 0.4f && Math.abs(j[15] - r[15]) < 0.2f, "width " + j[14] + " vs " + r[14] + ", top " + j[15] + " vs " + r[15]);
+            check("lava comes out of its pocket alike", Math.abs(j[16] - r[16]) < 0.2f && Math.abs(j[17] - r[17]) < 0.15f && Math.abs(j[18] - r[18]) < 0.6f, "out after 8 s " + j[16] + " vs " + r[16] + ", top " + j[17] + " vs " + r[17] + ", width " + j[18] + " vs " + r[18]);
             check("thin and thick slime agree", Math.abs(j[12] - r[12]) < 0.08f && Math.abs(j[13] - r[13]) < 0.08f, "thin " + j[12] + " vs " + r[12] + ", thick " + j[13] + " vs " + r[13]);
             many();
             gas();

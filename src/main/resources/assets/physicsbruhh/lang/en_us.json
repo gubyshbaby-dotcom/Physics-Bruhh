@@ -35,6 +35,10 @@
   "gamerule.physicsbruhh.physical_gas.description": "Fire, campfires, torches, lava, lit furnaces, burning creatures and explosions make flames and smoke that are simulated as gas: they rise, swirl, go round blocks and gather under ceilings. Each client computes and draws them for itself (/gaslook).",
   "gamerule.physicsbruhh:physical_gas": "Fire and smoke are physical gas",
   "gamerule.physicsbruhh:physical_gas.description": "Fire, campfires, torches, lava, lit furnaces, burning creatures and explosions make flames and smoke that are simulated as gas: they rise, swirl, go round blocks and gather under ceilings. Each client computes and draws them for itself (/gaslook).",
+  "gamerule.physicsbruhh.physical_lava": "Lava flows as a body",
+  "gamerule.physicsbruhh.physical_lava.description": "Near players a block of lava that finds room next to it lets go and flows out as one thick, slow body that pours, spreads, cools and in the end is gone, instead of filling the blocks around it with copies of itself. It is as much lava as the block held. Lava that is already flowing, and lava far from any player, is left as it is.",
+  "gamerule.physicsbruhh:physical_lava": "Lava flows as a body",
+  "gamerule.physicsbruhh:physical_lava.description": "Near players a block of lava that finds room next to it lets go and flows out as one thick, slow body that pours, spreads, cools and in the end is gone, instead of filling the blocks around it with copies of itself. It is as much lava as the block held. Lava that is already flowing, and lava far from any player, is left as it is.",
   "commands.physicsbruhh.gas.box": "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block (%s million cells, about %s MB of the graphics card's memory)",
   "commands.physicsbruhh.gas.off": "Fire and smoke are left as the game draws them on this client",
   "commands.physicsbruhh.gas.set": "Fire and smoke: a box of %s x %s x %s blocks around you, %s cells to the block",
@@ -57,5 +61,6 @@
   "commands.physicsbruhh.lava.unhooked": "The mod's lava could not take the place of the game's in this version of the game (see the log); the game's own lava is drawn",
   "commands.physicsbruhh.lava.pack": "A shader pack is on: it draws the lava its own way, the mod's lava waits until it is off",
   "commands.physicsbruhh.lava.waves.on": "on",
-  "commands.physicsbruhh.lava.waves.off": "off, they did not work on this machine (see the log)"
+  "commands.physicsbruhh.lava.waves.off": "off, they did not work on this machine (see the log)",
+  "commands.physicsbruhh.lava.body": "Lava that flows as a body: %s"
 }

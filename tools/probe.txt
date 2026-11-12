@@ -1,0 +1,1 @@
+grepsrc net/minecraft/world/entity/Entity.java getRemainingFireTicks|public boolean isOnFire

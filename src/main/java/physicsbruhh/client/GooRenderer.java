@@ -99,6 +99,7 @@ public final class GooRenderer {
     static void submit(SubmitCustomGeometryEvent event) {
         ClientLevel level = Minecraft.getInstance().level;
         if (level == null) return;
+        lavaPlain(event);
         // clear goo is normally drawn as a liquid, after the rest of the world (GooFluid); there is no surface mesh then
         if (GooClient.clearLook && GooFluid.inUse()) { quadsInAll = 0; quadsInView = 0; return; }
         // take a private copy of the latest mesh; the draw callbacks below may run later in the frame
@@ -214,6 +215,62 @@ public final class GooRenderer {
                     handoverNanos += System.nanoTime() - began;
                 });
             }
+        } finally {
+            stack.popPose();
+        }
+    }
+
+    private static float[] lava = new float[0];
+    private static int lavaQuads, lavaSeen = -1;
+    /** How often lava was drawn as a plain surface (smoke test). */
+    static volatile int lavaPlainDraws;
+
+    /**
+     * Lava that flows as a body, where it cannot be drawn from its particles ({@link LavaGoo}: a
+     * shader pack that is handed everything, {@code /goolook plain}, a machine the passes do not
+     * work on): its surface as the simulation builds it for goo, plainly glowing, brighter on top.
+     */
+    private static void lavaPlain(SubmitCustomGeometryEvent event) {
+        if (LavaGoo.inUse()) { lavaQuads = 0; lavaSeen = -1; return; }
+        synchronized (GooClient.MESH_LOCK) {
+            if (GooClient.meshVersion != lavaSeen) {
+                lavaSeen = GooClient.meshVersion;
+                lavaQuads = GooClient.meshQuads[GooSim.LAVA];
+                int floats = lavaQuads * GooSim.FLOATS_PER_QUAD;
+                if (lava.length < floats) lava = new float[floats + floats / 2];
+                System.arraycopy(GooClient.meshData[GooSim.LAVA], 0, lava, 0, floats);
+            }
+        }
+        if (lavaQuads == 0) return;
+        final int count = lavaQuads;
+        final float[] data = lava;
+        BlockPos origin = GooClient.origin;
+        Vec3 camera = event.getLevelRenderState().cameraRenderState.pos;
+        PoseStack stack = event.getPoseStack();
+        stack.pushPose();
+        try {
+            stack.translate(origin.getX() - camera.x, origin.getY() - camera.y, origin.getZ() - camera.z);
+            RenderType type = Packs.active ? RenderTypes.entityTranslucent(WHITE) : NeoForgeRenderTypes.getEntityUnlitTranslucent(WHITE);
+            event.getSubmitNodeCollector().submitCustomGeometry(stack, type, (pose, consumer) -> {
+                lavaPlainDraws++;
+                for (int q = 0; q < count; q++) {
+                    int o = q * GooSim.FLOATS_PER_QUAD;
+                    for (int v = 0; v < 4; v++) {
+                        int i = o + v * 6;
+                        float nx = data[i + 3], ny = data[i + 4], nz = data[i + 5];
+                        float inv = 1.0F / Math.max(1.0e-6F, (float) Math.sqrt(nx * nx + ny * ny + nz * nz));
+                        nx *= inv; ny *= inv; nz *= inv;
+                        // orange on the flanks, yellow on top
+                        int green = Math.max(0, Math.min(255, (int) (120.0F + 70.0F * ny)));
+                        consumer.addVertex(pose, data[i], data[i + 1], data[i + 2])
+                                .setColor(0xFF000000 | 0xFF << 16 | green << 8 | 0x1E)
+                                .setUv(0.5F, 0.5F)
+                                .setOverlay(OverlayTexture.NO_OVERLAY)
+                                .setLight(LightCoordsUtil.FULL_BRIGHT)
+                                .setNormal(pose, nx, ny, nz);
+                    }
+                }
+            });
         } finally {
             stack.popPose();
         }

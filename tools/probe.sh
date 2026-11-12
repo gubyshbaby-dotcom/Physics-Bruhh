@@ -3,7 +3,7 @@
 # (The game cannot be compiled against outside CI, so this is how its exact signatures are looked up.)
 # Lines of probe.txt:  src <class path ending in .java> | srcdir <regex over class paths> | grepsrc <path> <regex>
 #                      list <regex> | asset <path> | assetdir <regex> | alist <regex> | javap <class>
-#                      njavap <class> | nlist <regex> | nsrc <class path>   (the same, in NeoForge's own jar)
+#                      njavap <class> | nlist <regex> | nsrc <class path> | nasset <path>   (the same, in NeoForge's own jar)
 # Sources are decompiled on the spot from the classes asked for; nothing is kept.
 set -u
 JAR=$(ls build/moddev/artifacts/*.jar 2>/dev/null | grep -v sources | grep -i patched | head -1)
@@ -58,5 +58,6 @@ while read -r kind a b; do
     javap)   echo "API-BEGIN javap $a"; javap -cp "$JAR" -public "$a" 2>&1 | head -400; echo "API-END" ;;
     njavap)  echo "API-BEGIN javap $a"; javap -cp "$NEO:$JAR" -public "$a" 2>&1 | head -400; echo "API-END" ;;
     nlist)   echo "API-BEGIN list $a"; grep -E "$a" neo-entries.txt || echo "(nothing)"; echo "API-END" ;;
+    nasset)  echo "API-BEGIN asset $a"; unzip -p "$NEO" "$a" 2>/dev/null || echo "(missing)"; echo "API-END" ;;
   esac
 done < tools/probe.txt

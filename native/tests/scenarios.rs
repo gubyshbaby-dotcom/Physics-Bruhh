@@ -901,3 +901,35 @@ fn the_number_of_threads_can_be_changed_while_it_runs_and_changes_nothing() {
     assert_eq!(one, five, "one thread and five must agree to the last bit");
     assert!(set_threads(0) >= 1);
 }
+
+/// Lava let out of a pocket in a wall, two blocks above the floor: it does not burst out, it oozes
+/// out as one body, all of it comes down and lies on the floor as a thick lobe; what it says about
+/// itself (that it is lava, how hot it still is) goes with its particles; and it is not goo.
+#[test]
+fn lava_oozes_out_of_a_pocket() {
+    let mut w = World::new(12, 4);
+    let mut st: Vec<f32> = Vec::new();
+    for x in -5..6 { for z in -3..4 { st.extend_from_slice(&[x as f32, -1.0, z as f32, x as f32 + 1.0, 0.0, z as f32 + 1.0, 1.0]); } }
+    for x in -3..0 { for y in 0..5 { for z in -2..3 { if !(x == -1 && y == 2 && z == 0) { st.extend_from_slice(&[x as f32, y as f32, z as f32, x as f32 + 1.0, y as f32 + 1.0, z as f32 + 1.0, 1.0]); } } } }
+    w.set_static(&st, st.len() / 7);
+    let lava = w.add_body(LAVA, -1.0, 2.0, 0.0, 1.0, 0.0, 0.0) as usize;
+    let mut buf = vec![0.0f32; (w.maxp + PARTICLE_FILLERS) * 4];
+    let out = |w: &World, buf: &mut Vec<f32>| -> (usize, usize) { let n = w.particles(buf).max(0) as usize; (n, (0..n).filter(|&i| buf[i * 4] > 0.02).count()) };
+    for _ in 0..60 { w.step(DT + 1e-6); }
+    let (n, outside) = out(&w, &mut buf);
+    assert!(n == w.nb && outside < n / 3, "after a second {} of {} particles are outside", outside, n);
+    for k in 0..7 * 60 { if k % 3 == 0 { w.set_static(&st, st.len() / 7); } w.step(DT + 1e-6); }
+    let (n, outside) = out(&w, &mut buf);
+    assert!(outside * 10 > n * 4 && outside < n, "after 8 s {} of {} are outside", outside, n);
+    assert!((0..n).all(|i| buf[i * 4 + 3] as u32 & 8 != 0 && (buf[i * 4 + 3] as u32 >> 10) & 63 > 32), "every particle says it is lava, and hot");
+    for k in 0..37 * 60 { if k % 3 == 0 { w.set_static(&st, st.len() / 7); } w.step(DT + 1e-6); }
+    let (n, outside) = out(&w, &mut buf);
+    let bb = w.bodies[lava].bb;
+    assert!(outside == n && n == w.nb, "after 45 s {} of {} are outside", outside, n);
+    assert!((0..n).all(|i| buf[i * 4 + 1] > -0.01), "none of it is under the floor");
+    assert!(bb[4] > 0.15 && bb[4] < 0.9 && bb[3] - bb[0] < 3.4 && bb[5] - bb[2] < 3.4, "it lies as a thick lobe: {:?}", bb);
+    assert!((0..n).all(|i| (buf[i * 4 + 3] as u32 >> 10) & 63 < 40), "it has cooled");
+    assert_eq!(w.probe([-9.0; 3], [9.0; 3]), (0, 0), "lava is not counted as goo");
+    let mut quads = Vec::new();
+    assert!(physicsbruhh_native::mesh::build(&w, LAVA, &mut quads) > 200 && physicsbruhh_native::mesh::build(&w, HONEY, &mut quads) == 0);
+}

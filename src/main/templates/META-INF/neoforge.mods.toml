@@ -8,6 +8,10 @@ description='''
 Honey melts and flows, slime wobbles and stretches, pistons squash and pull both.
 '''
 
+# one hook into the game itself: where lava asks whether it may spread (physicsbruhh.mixin.LavaFluidMixin)
+[[mixins]]
+config="${mod_id}.mixins.json"
+
 [[dependencies.${mod_id}]]
     modId="neoforge"
     type="required"

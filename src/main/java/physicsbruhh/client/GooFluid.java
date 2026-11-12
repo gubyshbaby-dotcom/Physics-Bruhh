@@ -67,9 +67,9 @@ import physicsbruhh.PhysicsBruhh;
  */
 final class GooFluid {
     /** Distance between neighbouring particles at rest, in blocks (the simulation's own number). */
-    private static final float SPACING = 0.97F / 12.0F;
+    static final float SPACING = 0.97F / 12.0F;
     /** Radius a particle is drawn with, in spacings. */
-    private static final float RADIUS = 1.5F;
+    static final float RADIUS = 1.5F;
     /** "No goo here" in the surface texture: red is minus the distance, green is whether there is goo. */
     private static final Vector4f NOTHING = new Vector4f(-1.0e5F, 0.0F, 0.0F, 0.0F), ZERO = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
     /** "No goo over this spot" in the shade texture: no amounts, and the lowest goo infinitely far down (alpha is minus its height). */
@@ -79,7 +79,7 @@ final class GooFluid {
     private static final int SHADE_SIZE = 1024;
     private static final float SHADE_MARGIN = 0.6F;
 
-    private static final BindGroupLayout FRAME = BindGroupLayout.builder().withUniform("GooFrame", UniformType.UNIFORM_BUFFER).build();
+    static final BindGroupLayout FRAME = BindGroupLayout.builder().withUniform("GooFrame", UniformType.UNIFORM_BUFFER).build();
     private static final BindGroupLayout PARTICLES = BindGroupLayout.builder().withUniform("GooParticles", UniformType.TEXEL_BUFFER, GpuFormat.RGBA32_FLOAT).build();
     private static final BindGroupLayout AMOUNTS_IN = BindGroupLayout.builder()
             .withUniform("InSampler", UniformType.COMBINED_IMAGE_SAMPLER)
@@ -117,7 +117,7 @@ final class GooFluid {
                 .withCull(false);
     }
 
-    private static RenderPipeline.Builder screen(String name, String fragment) {
+    static RenderPipeline.Builder screen(String name, String fragment) {
         return RenderPipeline.builder()
                 .withLocation(id("pipeline/" + name))
                 .withVertexShader("core/screenquad")
@@ -150,7 +150,7 @@ final class GooFluid {
             .build();
     /** Rounds of the surface blur: reach in particle spacings, from wide to narrow; the last one also rounds the outline. */
     private static final float[] REACH = { 3.0F, 2.0F, 1.2F };
-    private static final RenderPipeline[] BLUR = new RenderPipeline[REACH.length * 2];
+    static final RenderPipeline[] BLUR = new RenderPipeline[REACH.length * 2];
     private static final RenderPipeline[] SMOOTH = new RenderPipeline[2];
     /** {@code -Dphysicsbruhh.liquid.debug=true}: the last pass shows what the passes before it came up with instead of the goo (see the shader). */
     private static final boolean DEBUG = Boolean.getBoolean("physicsbruhh.liquid.debug");
@@ -213,7 +213,7 @@ final class GooFluid {
     private static MappableRingBuffer frameBuffer, particleBuffer;
     private static int particleCapacity;
     private static float[] staged = new float[0];
-    private static int stagedCount, seenVersion = -1;
+    private static int stagedCount, uploaded, seenVersion = -1;
     private static BlockPos stagedOrigin = BlockPos.ZERO;
     private static final Long2IntOpenHashMap LIGHT = new Long2IntOpenHashMap();
 
@@ -248,8 +248,7 @@ final class GooFluid {
                 stagedOrigin = GooClient.origin;
             }
         }
-        final int count = stagedCount;
-        if (count == 0) return;
+        if (stagedCount == 0) return;
 
         CompiledRenderPipeline surface = compiled(SURFACE), far = compiled(FAR), amount = compiled(AMOUNT), shade = compiled(SHADE), picture = compiled(PICTURE);
         CompiledRenderPipeline[] blur = new CompiledRenderPipeline[BLUR.length], smooth = new CompiledRenderPipeline[SMOOTH.length];
@@ -258,7 +257,10 @@ final class GooFluid {
 
         if (scene == null || scene.width != main.width || scene.height != main.height) targets(main.width, main.height);
         if (shadeTarget == null) shadeTarget = new TextureTarget("Goo: shade on the ground", SHADE_SIZE, SHADE_SIZE, GpuFormat.RGBA16_FLOAT, null);
-        if (fresh || particleBuffer == null) upload(level, count);
+        if (fresh || particleBuffer == null) upload(level, stagedCount);
+        // (lava that flows as a body is among the particles too; it is not goo and is drawn by LavaGoo)
+        final int count = uploaded;
+        if (count == 0) return;
         writeFrame(event);
 
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
@@ -338,7 +340,7 @@ final class GooFluid {
         frames++;
     }
 
-    private static CompiledRenderPipeline compiled(RenderPipeline pipeline) {
+    static CompiledRenderPipeline compiled(RenderPipeline pipeline) {
         CompiledRenderPipeline compiled = RenderSystem.getCompiledPipelineNullable(pipeline);
         if (compiled == null || compiled.isClosed()) throw new IllegalStateException("shader pipeline " + pipeline.getLocation() + " is not available");
         return compiled;
@@ -381,8 +383,10 @@ final class GooFluid {
         try (GpuBufferSlice.MappedView view = particleBuffer.currentBuffer().map(0L, (long) count * 16L, false, true)) {
             FloatBuffer out = view.data().order(ByteOrder.nativeOrder()).asFloatBuffer();
             float[] p = staged;
+            int put = 0;
             for (int i = 0; i < count; i++) {
                 int k = i * 4;
+                if (((int) p[k + 3] & 8) != 0) continue; // lava
                 if (p[k] < minX) minX = p[k];
                 if (p[k] > maxX) maxX = p[k];
                 if (p[k + 2] < minZ) minZ = p[k + 2];
@@ -400,8 +404,10 @@ final class GooFluid {
                     LIGHT.put(key, light);
                 }
                 int bits = Math.round(size * 255.0F) | ((kind >> 1) & 1) << 8 | (light & 15) << 9 | (light >> 4 & 15) << 13 | ((kind >> 2) & 1) << 17;
-                out.put(k, p[k]).put(k + 1, p[k + 1]).put(k + 2, p[k + 2]).put(k + 3, (float) bits);
+                int to = put++ * 4;
+                out.put(to, p[k]).put(to + 1, p[k + 1]).put(to + 2, p[k + 2]).put(to + 3, (float) bits);
             }
+            uploaded = put;
         }
         // the patch of ground under all of it, for the shade
         shadeX = minX - SHADE_MARGIN; shadeZ = minZ - SHADE_MARGIN;

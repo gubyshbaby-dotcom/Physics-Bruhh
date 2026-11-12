@@ -39,6 +39,7 @@ public class PhysicsBruhhClient {
         modBus.addListener((EntityRenderersEvent.RegisterRenderers e) -> {
             e.registerEntityRenderer(PhysicsBruhh.HONEY_GOO.get(), NoopRenderer::new);
             e.registerEntityRenderer(PhysicsBruhh.SLIME_GOO.get(), NoopRenderer::new);
+            e.registerEntityRenderer(PhysicsBruhh.LAVA_GOO.get(), NoopRenderer::new);
         });
         NeoForge.EVENT_BUS.addListener((EntityJoinLevelEvent e) -> {
             if (e.getLevel().isClientSide() && e.getEntity() instanceof GooEntity goo) GooClient.join(goo);
@@ -55,6 +56,7 @@ public class PhysicsBruhhClient {
         NeoForge.EVENT_BUS.addListener(GasHide::screen);
         modBus.addListener(LavaHide::models);
         modBus.addListener(LavaClient::register);
+        modBus.addListener(LavaGoo::register);
         NeoForge.EVENT_BUS.addListener(LavaHide::sections);
         NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.client.event.PrepareRenderBuffersEvent e) -> LavaClient.prepare(e));
         NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterOpaqueBlocks e) -> LavaClient.draw(e));
@@ -63,9 +65,11 @@ public class PhysicsBruhhClient {
             e.register(physicsbruhh.GasRules.Blast.TYPE, (blast, context) -> GasClient.onBlast(blast));
         });
         modBus.addListener((net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent e) -> e.register(SHAKE));
+        // lava that flows as a body goes into the picture before the clear goo, so that it is seen through honey like anything else
+        NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> LavaGoo.render(e));
         NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> GooFluid.render(e));
         NeoForge.EVENT_BUS.addListener((RenderLevelStageEvent.AfterLevel e) -> GasClient.render(e));
-        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { Packs.tick(); GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); shake(Minecraft.getInstance()); GasClient.tick(Minecraft.getInstance()); LavaClient.tick(Minecraft.getInstance()); });
+        NeoForge.EVENT_BUS.addListener((ClientTickEvent.Post e) -> { Packs.tick(); GooClient.tick(); guarded(0, "player contact", () -> GooTouch.tick(Minecraft.getInstance())); shake(Minecraft.getInstance()); GasClient.tick(Minecraft.getInstance()); LavaClient.tick(Minecraft.getInstance()); guarded(3, "lava that flows", () -> LavaGoo.tick(Minecraft.getInstance())); });
         NeoForge.EVENT_BUS.addListener((InputEvent.InteractionKeyMappingTriggered e) -> guarded(1, "click", () -> GooTouch.onClick(e)));
         NeoForge.EVENT_BUS.addListener((InputEvent.MouseScrollingEvent e) -> guarded(1, "wheel", () -> GooWheel.onScroll(e)));
         NeoForge.EVENT_BUS.addListener((ItemTooltipEvent e) -> GooWheel.onTooltip(e));
@@ -75,12 +79,12 @@ public class PhysicsBruhhClient {
         GasClient.load();
         NeoForge.EVENT_BUS.addListener(LavaClient::registerCommand);
         LavaClient.load();
-        NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> { GooClient.reset(); GooClient.failures = 0; java.util.Arrays.fill(FAILED, 0); GasClient.reset(); LavaClient.reset(); });
+        NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> { GooClient.reset(); GooClient.failures = 0; java.util.Arrays.fill(FAILED, 0); GasClient.reset(); LavaClient.reset(); LavaGoo.reset(); });
         NeoForge.EVENT_BUS.addListener((SubmitCustomGeometryEvent e) -> guarded(2, "drawing", () -> GooRenderer.submit(e)));
         ClientSelfTest.register();
     }
 
-    private static final int[] FAILED = new int[3];
+    private static final int[] FAILED = new int[4];
     /** Errors caught by {@link #guarded} since the game started (the smoke test wants none). */
     static volatile int errors;
 

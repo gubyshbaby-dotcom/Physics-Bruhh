@@ -504,15 +504,73 @@ final class ClientSelfTest {
                 else if (into > 300) { lavaProblem = "switched off, the mod still held on to the lava"; LavaClient.chosen = true; step(74); }
             }
             case 72 -> { // and on again
-                if (LavaClient.active && LavaClient.sections > 0 && LavaClient.drawnQuads > 0 && into > 40) { lavaProblem = LavaClient.broken ? "the mod's lava failed (see the log)" : null; step(74); }
+                if (LavaClient.active && LavaClient.sections > 0 && LavaClient.drawnQuads > 0 && into > 40) { lavaProblem = LavaClient.broken ? "the mod's lava failed (see the log)" : null; step(lavaProblem == null ? 75 : 74); }
                 else if (into > 400) { lavaProblem = "switched on again, the mod did not take the lava back"; step(74); }
             }
+            case 75 -> lavaBody(mc, server, into);
             default -> {
                 LavaBubbles.rate = 1.0F;
-                commands(server, "time set noon", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
+                commands(server, "time set noon", "goo clear", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
                 step(9);
             }
         }
+    }
+
+    private static int bodyReleased, bodyPooled, bodyBurnt, bodyFrames, bodyPlain, bodyMostParticles, bodyMostLights, bodyMostQuads;
+
+    /**
+     * Lava that flows as a body. Lava stands shut in behind a wall in two places, two blocks above the floor: one block a
+     * block deep in the wall, and two blocks behind one another. The block in front of each is taken away: the lava has
+     * to let go of its block (the two one after the other), ooze out through the hole, pour down the wall and lie on the
+     * floor as a lobe, drawn from its particles all the way (or, where that is not possible, as a plain surface). A pig
+     * stands where the first comes down and has to burn; under the second there is a pit, which it has to fill and become
+     * a block of lava again.
+     */
+    private static void lavaBody(Minecraft mc, MinecraftServer server, int into) {
+        if (into == 1) {
+            stage("lava that flows as a body: out of a wall, down it, over the floor");
+            bodyReleased = physicsbruhh.LavaFlow.released; bodyPooled = physicsbruhh.LavaFlow.pooled; bodyBurnt = physicsbruhh.LavaFlow.burnt;
+            bodyFrames = LavaGoo.frames; bodyPlain = GooRenderer.lavaPlainDraws; bodyMostParticles = 0; bodyMostLights = 0; bodyMostQuads = 0;
+            commands(server, "goo clear", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "time set midnight",
+                    "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:stone",
+                    "fill 70 200 0 72 204 12 minecraft:stone", "setblock 71 202 3 minecraft:lava",
+                    // (the second: two blocks behind one another, the front one flush with the wall behind a stone that sticks out)
+                    "setblock 73 202 9 minecraft:stone", "setblock 72 202 9 minecraft:lava", "setblock 71 202 9 minecraft:lava",
+                    "setblock 73 199 9 minecraft:air",
+                    "summon minecraft:pig 73.9 200 3.5 {NoAI:1b,Silent:1b}",
+                    "tp @a 76.5 200.6 4.5 105 -8");
+        } else if (into == 40) {
+            // the block in front of each is broken
+            commands(server, "setblock 72 202 3 minecraft:air", "setblock 73 202 9 minecraft:air");
+        } else if (into == 300) {
+            // from the side and above: the rope down the wall, the lobe on the floor
+            commands(server, "tp @a 75.3 202.2 6.6 140 32");
+        } else if (into == 520) {
+            commands(server, "tp @a 76.5 200.6 4.5 105 -8");
+        }
+        bodyMostParticles = Math.max(bodyMostParticles, LavaGoo.drawnParticles);
+        bodyMostLights = Math.max(bodyMostLights, LavaGoo.drawnLights);
+        bodyMostQuads = Math.max(bodyMostQuads, GooClient.quadCount(GooSim.LAVA));
+        int released = physicsbruhh.LavaFlow.released - bodyReleased, pooled = physicsbruhh.LavaFlow.pooled - bodyPooled, burnt = physicsbruhh.LavaFlow.burnt - bodyBurnt;
+        if (into % 100 == 0) PhysicsBruhh.LOGGER.info("CLIENTTEST lava body t={} let go={} pieces={} particles={} lights={} frames={} plain draws={} quads={} burnt={} pooled={} reports={} in use={} broken={}",
+                tick, released, LavaGoo.pieces, LavaGoo.drawnParticles, LavaGoo.drawnLights, LavaGoo.frames - bodyFrames, GooRenderer.lavaPlainDraws - bodyPlain, GooClient.quadCount(GooSim.LAVA), burnt, pooled, LavaGoo.reports, LavaGoo.inUse(), LavaGoo.broken);
+        if (into < 900) return;
+        net.minecraft.client.multiplayer.ClientLevel level = mc.level;
+        boolean block = level != null && level.getFluidState(new BlockPos(73, 199, 9)).isSource();
+        boolean flowed = level != null && (!level.getFluidState(new BlockPos(72, 202, 3)).isEmpty() || !level.getFluidState(new BlockPos(73, 202, 3)).isEmpty() || !level.getFluidState(new BlockPos(73, 201, 3)).isEmpty());
+        boolean drawn = LavaGoo.inUse() ? LavaGoo.frames - bodyFrames > 20 && bodyMostParticles > 1000 && bodyMostLights > 0 : GooRenderer.lavaPlainDraws - bodyPlain > 20 && bodyMostQuads > 200;
+        PhysicsBruhh.LOGGER.info("CLIENTTEST lava body: {} blocks let go, {} particles and {} lights at the most, drawn {} in {} frames; the pig was burnt {} times; the pit {}; told the server {} times",
+                released, bodyMostParticles, bodyMostLights, LavaGoo.inUse() ? "from its particles" : "as a plain surface (" + bodyMostQuads + " faces)",
+                LavaGoo.inUse() ? LavaGoo.frames - bodyFrames : GooRenderer.lavaPlainDraws - bodyPlain, burnt, block ? "is a block of lava again (" + pooled + " pooled)" : "is not a block of lava", LavaGoo.reports);
+        lavaProblem = !physicsbruhh.LavaFlow.asked ? "the game never asked the mod before lava spread (the hook is not in place)"
+                : released != 3 ? "the three blocks of lava behind the wall did not let go when the wall was opened (" + released + " did)"
+                : flowed ? "lava was put into the blocks in front of the hole the game's way"
+                : LavaGoo.broken ? "drawing lava from its particles failed (see the log)"
+                : !drawn ? "the lava that came out of the wall was not drawn (" + bodyMostParticles + " particles, " + bodyMostLights + " lights, " + (LavaGoo.frames - bodyFrames) + " frames, " + (GooRenderer.lavaPlainDraws - bodyPlain) + " plain draws, " + bodyMostQuads + " faces)"
+                : burnt == 0 ? "the pig the lava came down on was not burnt"
+                : !block || pooled == 0 ? "the lava that ran into the pit did not become a block again (" + pooled + " pooled)"
+                : null;
+        step(74);
     }
 
     private static String head(float[] sums) {
