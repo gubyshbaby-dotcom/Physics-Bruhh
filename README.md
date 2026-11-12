@@ -383,7 +383,10 @@ the `physicsbruhh-jar` artifact:
 2. checks that the Java and Rust simulations agree,
 3. builds the mod against NeoForge,
 4. boots a dedicated server and runs real piston contraptions, placement, falls, dispensers,
-   right clicks and `/goo clear` against the hooks,
+   right clicks and `/goo clear` against the hooks, and lava: a block set down in the open has to
+   let go, one that is shut in must not, three in a trench have to follow one another, and what a
+   client reports (a creature in the lava, a piece that has crept on, a hollow that is full) has
+   to be acted on,
 5. opens the world in a real client (software rendering) six times: the default graphics backend,
    "improved transparency" on, the OpenGL backend, clear goo as a surface instead of a liquid, the
    shader-less fallback, and the hand-over to shader packs. Each run drives pistons against honey
@@ -395,7 +398,9 @@ the `physicsbruhh-jar` artifact:
    it and compares it with thin and usual honey and with thin and thick slime, puts slime and
    honey blocks down by hand the way a player builds (in the open, at the feet, against a wall,
    in a pit, next to and on top of other goo) and checks that each stays in one piece, also when
-   the block is made to linger in the client's world after its goo has arrived, and saves
+   the block is made to linger in the client's world after its goo has arrived, opens a wall in
+   front of lava in two places and checks that the lava lets go, is drawn, burns the pig it comes
+   down on and becomes a block again in the pit it runs into, and saves
    screenshots (artifact `clienttest`; a commit message containing `[shots]` also prints them
    into the log as text).
 
