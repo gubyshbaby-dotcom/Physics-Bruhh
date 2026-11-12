@@ -14,7 +14,7 @@ uniform samplerBuffer LavaMesh;
 
 layout(location = 0) out vec3 place;        // where in the world, blocks (started over every 1024), for the patterns
 layout(location = 1) out vec3 facing;       // which way the surface faces
-layout(location = 2) out vec4 look;         // heat 0..1, how far from the edge 0..1, light of the sky 0..1, how lately it moved 0..1
+layout(location = 2) out vec4 look;         // heat 0..1, how far from the edge 0..1 (more than 1: a thin skin, by how much), light of the sky 0..1, how lately it moved 0..1
 layout(location = 3) out vec3 flow;         // which way it runs (x, z) and what kind of face it is
 layout(location = 4) out vec3 fromCamera;   // where it is, seen from the camera, along the world's axes
 layout(location = 5) out vec2 fogDistance;

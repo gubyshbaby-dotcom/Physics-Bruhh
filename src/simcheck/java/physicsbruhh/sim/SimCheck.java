@@ -273,6 +273,113 @@ public final class SimCheck {
         }
     }
 
+    // ---- lava: the surface LavaMesher makes of a small world of stone, glass and lava, two sections wide
+    private static final int LX = 32, LY = 16, LZ = 16;
+    private static final byte[] lavaKind = new byte[LX * LY * LZ];
+    private static final float[] lavaHeight = new float[LX * LY * LZ], lavaFlow = new float[LX * LY * LZ];
+    private static final boolean[] lavaFalls = new boolean[LX * LY * LZ];
+
+    private static int lavaAt(int x, int y, int z) { return (y * LZ + z) * LX + x; }
+
+    private static void lavaFill(int x0, int y0, int z0, int x1, int y1, int z1, byte kind, float height, float flowX, boolean falls) {
+        for (int y = y0; y <= y1; y++) for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) {
+            int c = lavaAt(x, y, z);
+            lavaKind[c] = kind; lavaHeight[c] = height; lavaFlow[c] = flowX; lavaFalls[c] = falls;
+        }
+    }
+
+    private static LavaMesher.Mesh lavaSection(LavaMesher mesher, LavaMesher.Cells cells, int sx) {
+        cells.clear();
+        for (int y = -1; y <= 16; y++) for (int z = -LavaMesher.MARGIN; z < 16 + LavaMesher.MARGIN; z++) for (int x = -LavaMesher.MARGIN; x < 16 + LavaMesher.MARGIN; x++) {
+            int wx = sx * 16 + x, c = LavaMesher.Cells.at(x, y, z);
+            if (wx < 0 || wx >= LX || y < 0 || y >= LY || z < 0 || z >= LZ) { cells.kind[c] = LavaMesher.SOLID; continue; }
+            int w = lavaAt(wx, y, z);
+            if (lavaKind[w] == LavaMesher.LAVA) cells.lava(x, y, z, lavaHeight[w], lavaFalls[w], lavaFlow[w], 0.0F, 15);
+            else cells.kind[c] = lavaKind[w];
+        }
+        return mesher.build(cells);
+    }
+
+    private static String lavaPoint(float x, float y, float z) { return Math.round(x * 4000) + "," + Math.round(y * 4000) + "," + Math.round(z * 4000); }
+
+    private static void lava() {
+        System.out.println("Lava surface:");
+        final float full = 8.0F / 9.0F;
+        // stone up to y = 3; a lake across the border between the two sections, its east bank open; a slope running east;
+        // a column of falling lava into a pool; a pocket of lava behind glass
+        lavaFill(0, 0, 0, LX - 1, LY - 1, LZ - 1, LavaMesher.OPEN, 0, 0, false);
+        lavaFill(0, 0, 0, LX - 1, 3, LZ - 1, LavaMesher.SOLID, 0, 0, false);
+        lavaFill(4, 3, 2, 22, 3, 8, LavaMesher.LAVA, full, 0, false);
+        lavaFill(23, 3, 2, 26, 3, 8, LavaMesher.OPEN, 0, 0, false);
+        for (int x = 2; x <= 9; x++) lavaFill(x, 4, 11, x, 4, 13, LavaMesher.LAVA, (10 - x) / 9.0F, 1.0F, false);
+        lavaFill(12, 4, 11, 14, 4, 13, LavaMesher.LAVA, full, 0, false);
+        lavaFill(13, 5, 12, 13, 9, 12, LavaMesher.LAVA, full, 0, true);
+        lavaFill(18, 4, 10, 22, 5, 14, LavaMesher.WALL, 0, 0, false);
+        lavaFill(19, 4, 11, 21, 5, 13, LavaMesher.LAVA, full, 0, false);
+        lavaFill(18, 5, 10, 22, 5, 14, LavaMesher.OPEN, 0, 0, false);
+
+        LavaMesher mesher = new LavaMesher();
+        LavaMesher.Cells cells = new LavaMesher.Cells();
+        LavaMesher.Mesh[] meshes = { lavaSection(mesher, cells, 0), lavaSection(mesher, cells, 1) };
+        java.util.Map<String, Integer> edges = new java.util.HashMap<>();
+        java.util.Map<String, float[]> corners = new java.util.HashMap<>();
+        java.util.List<float[][]> all = new java.util.ArrayList<>();
+        int faces = 0, tops = 0, sides = 0, unders = 0, bad = 0, torn = 0, calm = 0;
+        float lowest = 9, highest = -9;
+        for (int m = 0; m < 2; m++) {
+            LavaMesher.Mesh mesh = meshes[m];
+            faces += mesh.quads;
+            java.util.Map<Integer, Float> heights = new java.util.HashMap<>();
+            for (int q = 0; q < mesh.quads; q++) {
+                int kind = ((int) mesh.data[q * 32 + 3] >> 8) & 3;
+                if (kind == LavaMesher.TOP) tops++; else if (kind == LavaMesher.UNDER) unders++; else sides++;
+                float[][] p = new float[4][];
+                for (int k = 0; k < 4; k++) {
+                    int v = q * 4 + k, o = v * 8;
+                    for (int i = 0; i < 8; i++) if (Float.isNaN(mesh.data[o + i]) || Float.isInfinite(mesh.data[o + i])) bad++;
+                    p[k] = new float[] { m * 16 + mesh.data[o], mesh.data[o + 1], mesh.data[o + 2] };
+                    lowest = Math.min(lowest, p[k][1]); highest = Math.max(highest, p[k][1]);
+                    if (mesh.key[v] >= 0) {
+                        // one point of the top, one height, whichever face it is a corner of
+                        Float was = heights.put(mesh.key[v], p[k][1]);
+                        if (was != null && was != p[k][1]) torn++;
+                    }
+                    if (kind == LavaMesher.TOP) corners.put(lavaPoint(p[k][0], p[k][1], p[k][2]), p[k]);
+                }
+                if (kind != LavaMesher.TOP) continue;
+                // (a block of the lake's middle: one face, a block wide)
+                if (Math.abs(p[2][0] - p[0][0]) == 1.0F && Math.abs(p[2][2] - p[0][2]) == 1.0F) calm++;
+                for (int k = 0; k < 4; k++) {
+                    float[] a = p[k], b = p[(k + 1) % 4];
+                    String ka = lavaPoint(a[0], a[1], a[2]), kb = lavaPoint(b[0], b[1], b[2]);
+                    if (ka.equals(kb)) continue;
+                    edges.merge(ka.compareTo(kb) < 0 ? ka + "|" + kb : kb + "|" + ka, 1, Integer::sum);
+                    all.add(new float[][] { a, b });
+                }
+            }
+        }
+        int crowded = 0, gaps = 0;
+        for (int n : edges.values()) if (n > 2) crowded++;
+        for (float[][] ab : all) {
+            float[] a = ab[0], b = ab[1];
+            String ka = lavaPoint(a[0], a[1], a[2]), kb = lavaPoint(b[0], b[1], b[2]);
+            if (edges.get(ka.compareTo(kb) < 0 ? ka + "|" + kb : kb + "|" + ka) != 1) continue;
+            float lx = b[0] - a[0], ly = b[1] - a[1], lz = b[2] - a[2], len2 = lx * lx + ly * ly + lz * lz;
+            for (float[] p : corners.values()) {
+                float t = ((p[0] - a[0]) * lx + (p[1] - a[1]) * ly + (p[2] - a[2]) * lz) / len2;
+                if (t < 0.02F || t > 0.98F) continue;
+                float dx = a[0] + lx * t - p[0], dy = a[1] + ly * t - p[1], dz = a[2] + lz * t - p[2];
+                if (dx * dx + dy * dy + dz * dz < 1.0e-8F) { gaps++; break; }
+            }
+        }
+        check("lava has a surface: a top, sides against glass and down a fall, nothing under it", tops > 500 && sides > 20 && unders == 0, faces + " faces: " + tops + " of the top, " + sides + " sides, " + unders + " undersides");
+        check("every number of it is a number", bad == 0, bad + " are not");
+        check("the top is one sheet: no corner in the middle of another face's edge, no edge shared by three", gaps == 0 && crowded == 0, gaps + " corners in the middle of an edge, " + crowded + " edges shared by more than two faces");
+        check("a point of the top has one height, whichever face it belongs to", torn == 0, torn + " differ");
+        check("the middle of a lake is a face a block", calm >= 60, calm + " blocks of one face");
+        check("lava comes down to the floor where it ends in the open and stays under the top of its block", lowest >= 3.0F && lowest < 3.01F && highest <= 10.0F, "from " + lowest + " to " + highest);
+    }
+
     public static void main(String[] args) {
         float[] j = scenarios("Java simulation", JavaSim::new);
         if (NativeSim.available()) {
@@ -293,6 +400,7 @@ public final class SimCheck {
             System.out.println("Rust simulation skipped: " + NativeSim.loadMessage());
             if (args.length > 0 && args[0].equals("--require-native")) { System.out.println("  FAIL  native library required"); failures++; }
         }
+        lava();
         System.out.println(failures == 0 ? "ALL OK" : failures + " FAILED");
         System.exit(failures == 0 ? 0 : 1);
     }

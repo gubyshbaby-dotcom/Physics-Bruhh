@@ -111,9 +111,27 @@ final class LavaClient {
             .withColorTargetState(ColorTargetState.DEFAULT)
             .build();
 
+    /** The same pass and the same pixels for the domes and drops of bubbles; their corners are made by the vertex shader. */
+    private static final RenderPipeline BUBBLES = RenderPipeline.builder()
+            .withLocation(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "pipeline/lava_bubbles"))
+            .withVertexShader(Identifier.fromNamespaceAndPath(PhysicsBruhh.MODID, "core/lava_bubbles"))
+            .withFragmentShader(SHADER)
+            .withBindGroupLayout(BindGroupLayouts.PROJECTION)
+            .withBindGroupLayout(BindGroupLayouts.FOG)
+            .withBindGroupLayout(BindGroupLayouts.GLOBALS)
+            .withBindGroupLayout(BindGroupLayouts.SAMPLER2)
+            .withBindGroupLayout(FRAME)
+            .withBindGroupLayout(BindGroupLayout.builder().withUniform("LavaBubbles", UniformType.TEXEL_BUFFER, GpuFormat.RGBA32_FLOAT).build())
+            .withPrimitiveTopology(PrimitiveTopology.QUADS)
+            .withCull(false)
+            .withDepthStencilState(DepthStencilState.DEFAULT)
+            .withColorTargetState(ColorTargetState.DEFAULT)
+            .build();
+
     static void register(RegisterRenderPipelinesEvent event) {
-        // optional: if it does not compile on some driver the game still starts, with its own lava
+        // optional: if one does not compile on some driver the game still starts, with its own lava
         event.registerOptionalPipeline(PIPELINE);
+        event.registerOptionalPipeline(BUBBLES);
     }
 
     private static boolean available() {
@@ -194,7 +212,8 @@ final class LavaClient {
     static volatile int sections, quads, drawnSections, drawnQuads, frames, uploads;
     static volatile float prepareMillis;
 
-    private static float clock() {
+    /** Seconds since the game started: what heights on the move and bubbles are timed by (the shaders are told the same). */
+    static float clock() {
         return (float) ((System.nanoTime() - EPOCH) / 1.0e9);
     }
 
@@ -229,6 +248,7 @@ final class LavaClient {
         if (level == null || !active) return;
         spread = Math.max(1, Fluids.LAVA.getTickDelay(level)) / 20.0F;
         if (++ticks % 40 == 0) forget(mc, level);
+        if (!SECTIONS.isEmpty() && !mc.isPaused()) LavaBubbles.tick(mc, level, clock());
     }
 
     /** Every section in reach that has lava in it is built afresh by the game: that is when its lava changes hands. */
@@ -279,6 +299,8 @@ final class LavaClient {
 
     private static void clear() {
         ARRIVED.clear();
+        LavaBubbles.clear();
+        LavaWaves.clear();
         for (Section section : SECTIONS.values()) section.close();
         SECTIONS.clear();
         SEEN_EMPTY.clear();
@@ -314,8 +336,10 @@ final class LavaClient {
             if (SECTIONS.isEmpty()) return;
             int most = 0;
             for (Section section : SECTIONS.values()) for (int n : section.partQuads) most = Math.max(most, n);
+            BlockPos eye = event.getLevelRenderState().cameraRenderState.blockPos;
+            LavaBubbles.write(eye.getX() >> 4, eye.getY() >> 4, eye.getZ() >> 4);
             // (asked for here, so that it is not made larger in the middle of the pass)
-            RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(most * 6);
+            RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(Math.max(most, LavaBubbles.MOST * LavaBubbles.FACES) * 6);
             writeFrame(event, now);
             prepared = true;
             prepareMillis += ((System.nanoTime() - began) / 1.0e6F - prepareMillis) * 0.1F;
@@ -435,7 +459,8 @@ final class LavaClient {
             RenderSystem.AutoStorageIndexBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS);
             int most = 0;
             for (Section section : SECTIONS.values()) for (int n : section.partQuads) most = Math.max(most, n);
-            if (most == 0 || !indices.hasStorage(most * 6)) return;
+            most = Math.max(most, LavaBubbles.MOST * LavaBubbles.FACES);
+            if (!indices.hasStorage(most * 6)) return;
             GpuBuffer indexBuffer = indices.getBuffer(most * 6);
             Frustum frustum = event.getLevelRenderState().cameraRenderState.cullFrustum;
             RenderPass pass = event.getRenderPass();
@@ -454,6 +479,17 @@ final class LavaClient {
                 }
                 shown++;
                 faces += section.quads;
+            }
+            int bubbles = LavaBubbles.written();
+            CompiledRenderPipeline bubbly = bubbles > 0 ? RenderSystem.getCompiledPipelineNullable(BUBBLES) : null;
+            if (bubbly != null && !bubbly.isClosed()) {
+                pass.setPipeline(bubbly);
+                pass.setUniform("LavaFrame", frameBuffer.currentBuffer());
+                pass.setUniform("Sampler2", Minecraft.getInstance().gameRenderer.lightmap(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
+                pass.setUniform("LavaBubbles", LavaBubbles.buffer());
+                pass.setVertexBuffer(0, null);
+                pass.setIndexBuffer(indexBuffer, indices.type());
+                pass.drawIndexed(bubbles * LavaBubbles.FACES * 6, 1, 0, 0, 0);
             }
             drawnSections = shown;
             drawnQuads = faces;

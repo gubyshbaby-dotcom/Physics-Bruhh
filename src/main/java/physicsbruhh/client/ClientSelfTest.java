@@ -446,9 +446,11 @@ final class ClientSelfTest {
                 if (into == 1) {
                     stage("lava: a lake, a spring on flat ground, a lava-fall, lava behind glass");
                     lavaFramesBefore = LavaClient.frames;
+                    // (so that the little lake here bubbles within the seconds this takes, as a large one does within minutes)
+                    LavaBubbles.rate = 40.0F;
                     commands(server, "goo clear", "gamemode creative @a", "time set noon",
-                            "fill 60 198 -8 86 199 20 minecraft:stone", "fill 60 200 -8 86 212 20 minecraft:air",
-                            "fill 64 199 1 69 199 6 minecraft:lava",
+                            "fill 60 197 -8 86 199 20 minecraft:stone", "fill 60 200 -8 86 212 20 minecraft:air",
+                            "fill 64 198 1 69 199 6 minecraft:lava",
                             "setblock 75 200 3 minecraft:lava",
                             "fill 76 200 9 78 203 11 minecraft:stone", "setblock 77 204 10 minecraft:lava",
                             "fill 64 200 9 68 201 13 minecraft:glass", "fill 65 200 10 67 201 12 minecraft:lava",
@@ -456,7 +458,7 @@ final class ClientSelfTest {
                             "fill 71 200 -8 71 205 -8 minecraft:stone", "tp @a 71.5 206 -7.5 0 42");
                 }
                 boolean taken = LavaClient.active && LavaClient.sections > 0 && LavaClient.drawnQuads > 0;
-                if (into % 100 == 0) PhysicsBruhh.LOGGER.info("CLIENTTEST lava t={} active={} sections={} faces={} drawn={} of {} frames={} broken={}", tick, LavaClient.active, LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.drawnSections, LavaClient.frames - lavaFramesBefore, LavaClient.broken);
+                if (into % 100 == 0) PhysicsBruhh.LOGGER.info("CLIENTTEST lava t={} active={} sections={} faces={} drawn={} of {} frames={} bubbles={} burst={} broken={}", tick, LavaClient.active, LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.drawnSections, LavaClient.frames - lavaFramesBefore, LavaBubbles.risen, LavaBubbles.popped, LavaClient.broken);
                 if (Packs.active) {
                     // a pack draws the lava its own way: the mod must keep its hands off
                     if (into > 100) {
@@ -471,9 +473,10 @@ final class ClientSelfTest {
                     // by night it is its own light
                     commands(server, "time set midnight", "tp @a 71.5 206 -7.5 0 42");
                 } else if (into >= 520 && taken) {
-                    PhysicsBruhh.LOGGER.info("CLIENTTEST lava: drawn by the mod in {} sections, {} faces ({} in view), in {} frames; taking up what changed costs {} ms a frame; {} buffers sent to the graphics card",
-                            LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.frames - lavaFramesBefore, LavaClient.prepareMillis, LavaClient.uploads);
+                    PhysicsBruhh.LOGGER.info("CLIENTTEST lava: drawn by the mod in {} sections, {} faces ({} in view), in {} frames; taking up what changed costs {} ms a frame; {} buffers sent to the graphics card; {} bubbles came up in the lake, {} have burst",
+                            LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.frames - lavaFramesBefore, LavaClient.prepareMillis, LavaClient.uploads, LavaBubbles.risen, LavaBubbles.popped);
                     if (LavaClient.quads < 200) { lavaProblem = "the lava's surface is only " + LavaClient.quads + " faces"; step(74); }
+                    else if (LavaBubbles.popped == 0) { lavaProblem = "no bubble came up and burst in the lake (" + LavaBubbles.risen + " came up)"; step(74); }
                     else { LavaClient.chosen = false; step(71); }
                 } else if (into > 900 || LavaClient.broken) {
                     lavaProblem = LavaClient.broken ? "the mod's lava failed (see the log)"
@@ -493,7 +496,8 @@ final class ClientSelfTest {
                 else if (into > 400) { lavaProblem = "switched on again, the mod did not take the lava back"; step(74); }
             }
             default -> {
-                commands(server, "time set noon", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 198 -8 86 199 20 minecraft:air");
+                LavaBubbles.rate = 1.0F;
+                commands(server, "time set noon", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
                 step(9);
             }
         }

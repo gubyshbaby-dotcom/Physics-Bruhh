@@ -175,8 +175,8 @@ public final class LavaMesher {
         if ((cells.flags[c] & FALLING) != 0) return 1.0F;
         boolean runs = cells.flowX[c] != 0.0F || cells.flowZ[c] != 0.0F;
         float h = cells.height[c];
-        if (h >= 0.8F) return runs ? 0.6F : 0.4F;
-        return 0.6F + 0.35F * h;
+        if (h >= 0.8F) return runs ? 0.82F : 0.42F;
+        return 0.72F + 0.26F * h;
     }
 
     /**
