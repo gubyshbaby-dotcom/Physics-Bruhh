@@ -633,8 +633,10 @@ final class LavaClient {
                 .then(Commands.literal("info").executes(context -> {
                     Component why = chosen ? whyNot() : Component.translatableWithFallback("commands.physicsbruhh.lava.off", "Lava is left as the game draws it on this client");
                     context.getSource().sendSuccess(() -> why != null ? why : Component.translatableWithFallback("commands.physicsbruhh.lava.info",
-                            "Lava: drawn by the mod in %s sections of the world (%s faces), %s of them in view (%s faces); taking up what changed costs %s ms a frame",
-                            sections, quads, drawnSections, drawnQuads, String.format(Locale.ROOT, "%.2f", prepareMillis)), false);
+                            "Lava: drawn by the mod in %s sections of the world (%s faces), %s of them in view (%s faces); taking up what changed and a step of the waves cost %s ms a frame. Waves: %s (%s columns of lava around you, %s calm blocks cut finer for them); %s bubbles right now",
+                            sections, quads, drawnSections, drawnQuads, String.format(Locale.ROOT, "%.2f", prepareMillis),
+                            LavaWaves.off ? Component.translatableWithFallback("commands.physicsbruhh.lava.waves.off", "off, they did not work on this machine (see the log)") : Component.translatableWithFallback("commands.physicsbruhh.lava.waves.on", "on"),
+                            LavaWaves.lavaColumns, cutQuads, LavaBubbles.alive), false);
                     return 1;
                 })));
     }

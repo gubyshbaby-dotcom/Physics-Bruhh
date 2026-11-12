@@ -219,6 +219,48 @@ time the drawing takes), so it can be compared with other solvers on the same ma
 number of cells. It has only ever been run on software rendering here (see Limits), so there is no
 measured number for a real graphics card in this file.
 
+## Lava
+
+Every block of lava the game would draw, wherever it is, is drawn by the mod instead. The blocks
+themselves are left exactly as they are: lava flows, burns, lights and makes stone the way it
+always did, on a server that knows nothing of this. Only what is seen is the mod's.
+
+**One surface.** Instead of a tilted square per block the top is one smooth sheet through the
+levels of the blocks; where lava ends in the open it ends in a rounded front that comes down to
+the floor, not in a wall; against glass and other things that are not full blocks it stands flush.
+When a level changes the surface travels to its new height, and lava that is new to a block comes
+in from the side it runs from.
+
+**A heavy liquid.** In a square of 64 by 64 blocks around the player (four cells to the block) the
+graphics card keeps how far the surface stands above or below where it rests and how fast it is
+rising, and steps that every frame. Whatever pushes the surface starts a wave: the wave spreads,
+is thrown back by the banks and dies away quickly, as it does in something that thick. A creature
+or a thing that falls in makes a hollow with a rim, and throws up drops if it falls hard; wading
+through lava ploughs it. Where the lava was stirred its crust is torn for a while.
+
+**Bubbles.** Where lava lies in a pool (a block of it with lava all around; the deeper and wider,
+the more and the larger) gas comes up through it now and then: the surface swells into a dome, the
+dome bursts with a pop, its skin flies off as drops that fall back, and a ring runs out from where
+it was. The drops are bodies thrown under gravity, each at a speed of its own.
+
+**How it looks** is taken from photographs of lava. What is worked out for every pixel is how hot
+the surface is there; colour and brightness follow from the heat the way they do for anything
+that glows by being hot. Lava on the run is a bright sheet drawn out into bands and strokes along
+the way it runs, with torn rafts of crust that travel with it, more of them towards its edges and
+where it is thin. Lava that stands still has set into plates with glowing cracks between them,
+with patches where hot lava wells up and the plates have gone under. Falling lava is a bright
+stream with hardly any crust. The crust is dark rock, lit by the sky like rock.
+
+| Command | What it does |
+|---|---|
+| `/lavalook on` | the mod draws the lava (the default) |
+| `/lavalook off` | lava as the game draws it, on this client only |
+| `/lavalook info` | how much lava the mod is drawing, and what it costs |
+
+With a shader pack on, the pack draws the lava its own way and the mod's lava waits until the
+pack is off. If the mod's shaders do not work on a machine, that is said once in the log and the
+game's own lava is back.
+
 ## How it works
 
 | Part | Where | What it does |
@@ -326,6 +368,16 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
 
 ## Limits
 
+- Lava is still the game's lava: what the mod adds is how its surface is drawn and how that
+  surface moves. The waves and the bubbles are worked out on each client and are only something to
+  look at: they do not push, burn or carry anything, and two players see different bubbles in the
+  same lake. The waves exist in a square of 64 blocks around the player; lava further away is drawn
+  at rest. Where several storeys of lava lie above one another inside that square, only the one
+  nearest the player's height has waves. A lava-fall is still a column a block wide. Lava that
+  disappears from a block is gone at once, not drawn sinking away. The lava has been run on the
+  software renderers of the build machines (Vulkan and OpenGL) and, its shaders alone, in a
+  browser's WebGL; on a real graphics card nobody has run it yet, so there is no number here for
+  what it costs there.
 - Smoke and fire exist in a box around each player and nowhere else: a fire further away than
   that is drawn the vanilla way, and a column of smoke ends at the top of the box. The box is 24
   blocks wide unless `/gaslook range` says otherwise, 96 at most (an explosion is then gas up to

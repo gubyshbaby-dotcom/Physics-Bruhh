@@ -109,7 +109,9 @@ final class LavaBubbles {
                 while (run < 3 && lava(level, bx + sx * (run + 1), by, bz + sz * (run + 1))) run++;
                 wide = Math.min(wide, run);
             }
-            if (RANDOM.nextFloat() > 0.012F * rate * (1.0F + 0.5F * deep)) continue;
+            // a pool is never quite still: what turns over underneath heaves its surface a little, here and there
+            if (RANDOM.nextFloat() < 0.35F) LavaWaves.push(bx + RANDOM.nextDouble(), bz + RANDOM.nextDouble(), 1.2F + 1.6F * RANDOM.nextFloat(), (RANDOM.nextFloat() - 0.5F) * (0.5F + 0.15F * deep));
+            if (RANDOM.nextFloat() > 0.005F * rate * (1.0F + 0.5F * deep)) continue;
             float r = RANDOM.nextFloat();
             float size = Math.max(0.16F, Math.min(0.85F, (0.2F + 0.5F * r * r) * (0.6F + 0.2F * deep) * (0.5F + 0.25F * wide)));
             double cx = bx + 0.2 + 0.6 * RANDOM.nextDouble(), cz = bz + 0.2 + 0.6 * RANDOM.nextDouble(), cy = by + fluid.getOwnHeight();
