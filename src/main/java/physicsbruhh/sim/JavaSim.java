@@ -13,7 +13,7 @@ public final class JavaSim implements GooSim {
     static final float DT = 1f / 60f;
 
     static final class Material {
-        float meltTime, dampFresh, dampMelted, springK0, springK1, plast0, plast1, yield;
+        float meltTime, dampFresh, dampMelted, springK0, springK1, plast0, plast1, yield, yieldCold;
         boolean dynamicSprings;
         float breakStrain, springMaxL, shockK, shockPlast, shockDecay, shockBreak, shockMaxL, threadSag;
         float cohK, cohLim, xsph, adhK, adhCreep, adhBreak, setAfter, setRate, tip, sleepV;
@@ -23,7 +23,7 @@ public final class JavaSim implements GooSim {
             d = Float.isFinite(d) && d > 0f ? Math.max(THICK_MIN, Math.min(THICK_MAX, d)) : 1f;
             if (d == 1f) return this;
             Material m = new Material();
-            m.meltTime = meltTime; m.dampFresh = dampFresh; m.dampMelted = dampMelted; m.springK0 = springK0; m.springK1 = springK1; m.plast0 = plast0; m.plast1 = plast1; m.yield = yield;
+            m.meltTime = meltTime; m.dampFresh = dampFresh; m.dampMelted = dampMelted; m.springK0 = springK0; m.springK1 = springK1; m.plast0 = plast0; m.plast1 = plast1; m.yield = yield; m.yieldCold = yieldCold;
             m.dynamicSprings = dynamicSprings; m.breakStrain = breakStrain; m.springMaxL = springMaxL; m.shockK = shockK; m.shockPlast = shockPlast; m.shockDecay = shockDecay; m.shockBreak = shockBreak; m.shockMaxL = shockMaxL; m.threadSag = threadSag;
             m.cohK = cohK; m.cohLim = cohLim; m.xsph = xsph; m.adhK = adhK; m.adhCreep = adhCreep; m.adhBreak = adhBreak; m.setAfter = setAfter; m.setRate = setRate; m.tip = tip; m.sleepV = sleepV;
             float root = (float) Math.sqrt(d);
@@ -64,7 +64,7 @@ public final class JavaSim implements GooSim {
         static Material lava() {
             Material m = new Material();
             m.meltTime = 1f; m.dampFresh = 3f; m.dampMelted = 12f;
-            m.springK0 = 0.3f; m.springK1 = 0.12f; m.plast0 = 6f; m.plast1 = 3f; m.yield = 0f;
+            m.springK0 = 0.3f; m.springK1 = 0.12f; m.plast0 = 6f; m.plast1 = 3f; m.yield = 0f; m.yieldCold = 0.03f;
             m.dynamicSprings = true; m.breakStrain = 4f; m.springMaxL = 0.21f; m.shockK = 0.42f; m.shockPlast = 0.6f; m.shockDecay = 1.1f; m.shockBreak = 16f; m.shockMaxL = 1.7f; m.threadSag = 0.16f;
             m.cohK = 0.45f; m.cohLim = 0.35f; m.xsph = 0.45f;
             m.adhK = 0f; m.adhCreep = 30f; m.adhBreak = 0.01f;
@@ -87,7 +87,7 @@ public final class JavaSim implements GooSim {
     static final class Body {
         int state, mat, calm, count, anchored;
         boolean awake, quiet, fresh;
-        float age, born, fade, melt, kd, kSpring, plast, brk, maxL, shock, soft;
+        float age, born, fade, melt, kd, kSpring, plast, yld, brk, maxL, shock, soft;
         final float[] bb = new float[6];
         /** A stream still on its way: particles left to come out, where from, how fast, how far the last layer has got. */
         int pending; float emitAcc; final float[] emitPos = new float[3], emitVel = new float[3];
@@ -775,6 +775,7 @@ public final class JavaSim implements GooSim {
             bd.kSpring = k + Math.max(0f, m.shockK - k) * sh;
             float pl = m.plast0 + (m.plast1 - m.plast0) * bd.melt;
             bd.plast = pl + Math.min(0f, m.shockPlast - pl) * sh;
+            bd.yld = m.yieldCold > 0f ? m.yield + m.yieldCold * lavaSet(bd.age) : m.yield;
             bd.brk = m.breakStrain + Math.max(0f, m.shockBreak - m.breakStrain) * sh;
             bd.maxL = m.springMaxL + Math.max(0f, m.shockMaxL - m.springMaxL) * sh;
             bd.shock = sh < 0.01f ? 0f : sh * (float) Math.exp(-dt / m.shockDecay);
@@ -955,7 +956,7 @@ public final class JavaSim implements GooSim {
                 float ex = q[o] - q[oj], ey = q[o + 1] - q[oj + 1], ez = q[o + 2] - q[oj + 2];
                 float r = (float) Math.sqrt(ex * ex + ey * ey + ez * ez);
                 if (bd.plast > 0f) {
-                    float dl = r - l, y = m.yield * l;
+                    float dl = r - l, y = bd.yld * l;
                     if (Math.abs(dl) > y) { l += (1f - (float) Math.exp(-bd.plast * dt)) * (dl - y * Math.signum(dl)); sprL[si] = l; }
                 }
                 // honey drawn out to a single file of particles: the thread snaps, and what hung on it simply falls
@@ -1285,6 +1286,9 @@ public final class JavaSim implements GooSim {
         int v0 = flip ? d : a, v1 = flip ? c : b, v2 = flip ? b : c, v3 = flip ? a : d;
         for (int vtx : new int[] { v0, v1, v2, v3 }) { int o = vtx * 6; emit(verts[o], verts[o + 1], verts[o + 2], verts[o + 3], verts[o + 4], verts[o + 5]); }
     }
+
+    /** How far lava of this age has stiffened, 0 to 1; mirrors {@code lava_set} of the native core. */
+    static float lavaSet(float age) { return smooth((age - 12f) * (1f / 30f)); }
 
     /** How far lava of this age has cooled, 0 to 1; mirrors {@code lava_cold} of the native core. */
     static float lavaCold(float age) { return 0.35f * smooth((age - 1f) * 0.1f) + 0.65f * smooth((age - 10f) * (1f / 70f)); }

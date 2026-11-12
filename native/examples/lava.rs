@@ -21,7 +21,7 @@ fn main() {
             match k {
                 "melt_time" => m.melt_time = v, "damp_fresh" => m.damp_fresh = v, "damp_melted" => m.damp_melted = v,
                 "spring_k0" => m.spring_k0 = v, "spring_k1" => m.spring_k1 = v, "plast0" => m.plast0 = v, "plast1" => m.plast1 = v,
-                "yield" => m.yield_ = v, "coh_k" => m.coh_k = v, "coh_lim" => m.coh_lim = v, "xsph" => m.xsph = v,
+                "yield" => m.yield_ = v, "yield_cold" => m.yield_cold = v, "coh_k" => m.coh_k = v, "coh_lim" => m.coh_lim = v, "xsph" => m.xsph = v,
                 "adh_creep" => m.adh_creep = v, "adh_break" => m.adh_break = v, "adh_k" => m.adh_k = v, "set_after" => m.set_after = v, "set_rate" => m.set_rate = v,
                 "sleep_v" => m.sleep_v = v, "break_strain" => m.break_strain = v, "spring_max_l" => m.spring_max_l = v,
                 _ => println!("unknown: {}", k),

@@ -281,7 +281,7 @@ out as one body.
 - Break the block in front of lava, or pour a bucket of it out in the open: a second and a half
   later (the time lava always took to start moving) the block is gone and its lava bulges out of
   the hole, hangs over the edge as a thick tongue, pours down the wall as a rope and creeps over
-  the floor as a lobe a quarter of a block thick with a rounded front. It is slow: a block of lava
+  the floor as a lobe a third of a block thick with a rounded front. It is slow: a block of lava
   takes ten to twenty seconds to come out of a hole and half a minute to come to rest.
 - **It is as much lava as the block held.** One block gives one block's worth; it does not go on
   coming. A layer of it stays behind wherever it has been (in the hole too).
@@ -290,7 +290,9 @@ out as one body.
   hole, then its neighbours. At most six pieces are let go around one place within twenty
   seconds, and sixteen may lie there at all (each is seventeen hundred particles to simulate);
   further blocks hold until there is room again.
-- **It cools.** For a few seconds it is all yellow. Then a crust of dark rock takes it over in
+- **It cools, and stiffens as it does.** Fresh lava has no strength of its own and runs for as
+  long as it is thick enough to push itself along; from twelve seconds on the cold gets into it,
+  and half a minute later it holds its shape. For a few seconds it is all yellow. Then a crust of dark rock takes it over in
   patches: on top before the flanks, later where it is still on the move, last along its edges and
   wherever one looks along its skin. The patches belong to the lava: they travel with it and are
   drawn out and torn where it stretches. After a minute and a half it is a dull crust with a few
@@ -439,7 +441,10 @@ cargo run --release --example gas_pressure -- camp 4           # how far off the
   not real light: it shows on the screen, it does not keep monsters from spawning, and it passes
   through walls thinner than its reach (three and a half blocks). The lava's own material numbers
   were set by eye against one video of the look that was asked for, not measured against real
-  lava. Its shaders have been run on the software renderers of the build machines and in a
+  lava. What is built on lava flowing for ever out of one block stops working near players: a
+  cobblestone generator, a lava-fall made with a bucket, lava poured as a moat (the rule
+  `physicsbruhh:physical_lava` switches it all back). A bucket cannot take a piece of lava up
+  again. Its shaders have been run on the software renderers of the build machines and in a
   browser's WebGL only.
 - Lava that stands is still the game's lava: what the mod adds is how its surface is drawn and how that
   surface moves. The waves and the bubbles are worked out on each client and are only something to

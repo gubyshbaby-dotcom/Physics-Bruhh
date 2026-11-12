@@ -53,6 +53,18 @@ vec3 glow(float heat) {
     return colour * exp(8.0 * (heat - 0.55));
 }
 
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
 void main() {
     ivec2 here = ivec2(gl_FragCoord.xy);
     vec2 surface = texelFetch(FluidSampler, here, 0).rg;
@@ -158,6 +170,19 @@ void main() {
     float heat = skin.b > 1.0e-3 ? skin.g / skin.b : 1.0;
     float grain = skin.a;
 
+    // The fine drawing of the surface: streaks drawn out along the way the lava runs down its own
+    // slope. They stand still in the world; running along the motion, they do not seem to slide.
+    // Where the lava lies flat there is no such way, and the drawing is a plain fine mottling.
+    vec3 place = toWorld * P - GooOffset.xyz;
+    vec3 downhill = vec3(N.x * N.y, N.y * N.y - 1.0, N.z * N.y);
+    float slope = length(downhill);
+    vec3 run = downhill / max(slope, 1.0e-3);
+    vec3 across = cross(N, run);
+    vec2 drawn = vec2(dot(place, across) * 19.0, dot(place, run) * 2.2);
+    float streaks = 0.6 * noise(drawn) + 0.4 * noise(drawn * vec2(2.3, 1.6) + 7.1);
+    float mottle = 0.6 * noise(place.xz * 11.0) + 0.4 * noise(place.xz * 23.0 + 3.7);
+    float fine = mix(mottle, streaks, smoothstep(0.10, 0.40, slope));
+
     // How much of the surface the crust has taken: more of it the cooler the lava, on top before the
     // flanks; where one looks along the skin, the glow of what is under it wins.
     float cool = 1.0 - heat;
@@ -165,17 +190,19 @@ void main() {
     // The pattern says where: a spot is crust if its number is under the level. (The pattern's
     // numbers crowd around a half, so the level runs from below them all to above them all.)
     float level = mix(0.20, 0.84, crusted);
-    float edge = pattern + 0.07 * (grain - 0.5) - level;
-    float crust = 1.0 - smoothstep(-0.025, 0.025, edge);
+    float edge = pattern + 0.07 * (grain - 0.5) + 0.06 * (fine - 0.5) - level;
+    float crust = 1.0 - smoothstep(-0.04, 0.04, edge);
 
-    // the melt: yellow where it has just come out, orange as it cools; brighter where one looks along it
-    float hot = 0.65 + 0.10 * heat + 0.05 * rim + 0.02 * (grain - 0.4) + 0.07 * smoothstep(0.0, 0.3, edge);
+    // the melt: yellow where it has just come out and where it faces up, orange on its flanks and
+    // as it cools, deeper underneath; brighter where one looks along it
+    float lift = 0.5 + 0.5 * N.y;
+    float hot = 0.615 + 0.09 * heat + 0.075 * lift + 0.05 * rim + 0.02 * (grain - 0.4) + 0.05 * (fine - 0.5) + 0.05 * smoothstep(0.0, 0.3, edge);
     // the crust: dark rock in grains; it glows dully where it is thin, at its edge and between its grains
-    float thin = smoothstep(-0.14, 0.0, edge);
+    float thin = smoothstep(-0.16, 0.0, edge);
     float seam = 1.0 - smoothstep(0.10, 0.45, grain);
-    float under = 0.20 + 0.36 * thin * thin + (0.16 + 0.14 * heat) * seam + 0.07 * rim;
-    // (dark rock: next to black where only its own glow lights it, a dull grey-brown by daylight)
-    vec3 rock = vec3(0.075, 0.055, 0.048) * (0.35 + 1.1 * grain) * (0.55 + 0.45 * top) * (1.0 + 2.6 * LavaLightSet.w);
+    float under = 0.20 + 0.38 * thin * thin + (0.12 + 0.10 * heat) * seam + 0.07 * rim + 0.05 * (fine - 0.5);
+    // (dark brown rock: next to black where only its own glow lights it, a dull grey-brown by daylight)
+    vec3 rock = vec3(0.115, 0.066, 0.044) * (0.45 + 0.8 * grain) * (0.6 + 0.8 * fine) * (0.55 + 0.45 * top) * (1.0 + 2.6 * LavaLightSet.w);
     vec3 light = mix(glow(hot), glow(under), crust);
     vec3 colour = rock * crust + (1.0 - exp(-light * 1.0));
 

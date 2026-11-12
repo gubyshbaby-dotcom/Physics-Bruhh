@@ -767,7 +767,7 @@ final class ClientSelfTest {
             } else if (tick > 0 && tick % 20 == 0 && step < 9) {
                 PhysicsBruhh.LOGGER.info("CLIENTTEST t={} {} band={} clear={} shader={} drawCalls={} liquid={} frames={} particles={} pack={} packDraws={}", tick, GooClient.describe(), slime(), GooClient.clearLook, GooRenderer.shader, GooRenderer.drawCalls,
                         GooFluid.inUse(), GooFluid.frames, GooClient.particleCount(), Packs.active, GooRenderer.packDraws);
-            } else if (step == 9 && tick == stepTick + 45) {
+            } else if (step == 9 && tick == stepTick + 110) { // (lava that is cleared away takes three seconds to crumble)
                 String state = GooClient.describe() + " restingWidth=" + restingWidth + " band=" + bandLeft + ".." + bandRight + " shader=" + GooRenderer.shader + " drawCalls=" + GooRenderer.drawCalls
                         + " liquid=" + GooFluid.inUse() + " liquidFrames=" + GooFluid.frames + " uses=" + GooTouch.uses;
                 String problem = null;

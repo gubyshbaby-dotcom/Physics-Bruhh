@@ -36,6 +36,7 @@ pub struct Material {
     pub plast0: f32,         // plastic creep of spring rest length, 1/s, fresh -> melted
     pub plast1: f32,
     pub yield_: f32,         // strain below which springs stay elastic
+    pub yield_cold: f32,     // ... and what is added to it as the body cools (lava: it stiffens as the cold gets into it), see `lava_set`
     pub dynamic_springs: bool, // new springs form between neighbours (fluid) or only at spawn (solid)
     pub break_strain: f32,   // spring snaps when length > break_strain * rest
     pub spring_max_l: f32,   // dynamic springs dissolve once their rest length creeps past this (blocks)
@@ -93,7 +94,7 @@ impl Material {
     pub fn honey() -> Material {
         Material {
             melt_time: 3.5, damp_fresh: 1.2, damp_melted: 11.0,
-            spring_k0: 0.5, spring_k1: 0.03, plast0: 0.7, plast1: 20.0, yield_: 0.03,
+            spring_k0: 0.5, spring_k1: 0.03, plast0: 0.7, plast1: 20.0, yield_: 0.03, yield_cold: 0.0,
             dynamic_springs: true, break_strain: 4.0, spring_max_l: 0.21, shock_k: 0.42, shock_plast: 0.6, shock_decay: 1.1, shock_break: 16.0, shock_max_l: 1.7, thread_sag: 0.16,
             coh_k: 0.25, coh_lim: 0.35, xsph: 0.35,
             adh_k: 0.9, adh_creep: 9.0, adh_break: 0.30,
@@ -102,12 +103,13 @@ impl Material {
     }
     /// Lava: liquid from the moment its block lets go, but thick and heavy. It creeps rather than
     /// runs, keeps a rounded front a good part of a block high, pours as a rope and lies down as a lobe.
-    /// It has no strength of its own (no strain it holds for good), so it creeps on for as long as it
-    /// is thick enough to push itself along; a layer of it stays behind wherever it has been.
+    /// Fresh, it has no strength of its own (no strain it holds for good), so it creeps on for as long
+    /// as it is thick enough to push itself along; a layer of it stays behind wherever it has been.
+    /// As the cold gets into it, it stiffens and comes to rest as a lobe a third of a block high.
     pub fn lava() -> Material {
         Material {
             melt_time: 1.0, damp_fresh: 3.0, damp_melted: 12.0,
-            spring_k0: 0.3, spring_k1: 0.12, plast0: 6.0, plast1: 3.0, yield_: 0.0,
+            spring_k0: 0.3, spring_k1: 0.12, plast0: 6.0, plast1: 3.0, yield_: 0.0, yield_cold: 0.03,
             dynamic_springs: true, break_strain: 4.0, spring_max_l: 0.21, shock_k: 0.42, shock_plast: 0.6, shock_decay: 1.1, shock_break: 16.0, shock_max_l: 1.7, thread_sag: 0.16,
             coh_k: 0.45, coh_lim: 0.35, xsph: 0.45,
             // it does not cling: what holds lava back is its own thickness, not the wall
@@ -118,7 +120,7 @@ impl Material {
     pub fn slime() -> Material {
         Material {
             melt_time: 0.0, damp_fresh: 2.2, damp_melted: 2.2,
-            spring_k0: 0.45, spring_k1: 0.45, plast0: 0.0, plast1: 0.0, yield_: 0.0,
+            spring_k0: 0.45, spring_k1: 0.45, plast0: 0.0, plast1: 0.0, yield_: 0.0, yield_cold: 0.0,
             dynamic_springs: false, break_strain: 8.0, spring_max_l: 9.0, shock_k: 0.45, shock_plast: 0.0, shock_decay: 0.3, shock_break: 12.0, shock_max_l: 9.0, thread_sag: 0.03,
             coh_k: 0.15, coh_lim: 0.3, xsph: 0.25,
             adh_k: 0.9, adh_creep: 0.0, adh_break: 0.16,
@@ -139,6 +141,8 @@ pub struct Body {
     pub kd: f32,
     pub k_spring: f32,
     pub plast: f32,
+    /// The strain its springs hold for good right now.
+    pub yld: f32,
     pub brk: f32,
     pub max_l: f32,
     pub calm: u32,
@@ -792,6 +796,10 @@ unsafe fn relax(q: Shared<f32>, p: &[f32], i: usize, j: usize, l: f32, ksp: f32,
     h ^= h >> 15; h = h.wrapping_mul(0x2C1B_3C6D); h ^= h >> 12;
     (h & 0xff) as f32 * (1.0 / 255.0)
 }
+
+/// How far lava of this age has stiffened, 0 to 1: not at all while it is fresh (it runs out of its
+/// hole and down the wall freely), then over half a minute, as the cold gets into it.
+#[inline] pub fn lava_set(age: f32) -> f32 { smooth((age - 12.0) * (1.0 / 30.0)) }
 
 /// What a particle of lava says about itself besides where it is, added to its size: 8 (lava),
 /// 16 times a pattern (0..63) and 1024 times its heat (0..63).
@@ -1459,6 +1467,7 @@ impl World {
             bd.k_spring = k + (m.shock_k - k).max(0.0) * sh;
             let pl = m.plast0 + (m.plast1 - m.plast0) * bd.melt;
             bd.plast = pl + (m.shock_plast - pl).min(0.0) * sh;
+            bd.yld = if m.yield_cold > 0.0 { m.yield_ + m.yield_cold * lava_set(bd.age) } else { m.yield_ };
             bd.brk = m.break_strain + (m.shock_break - m.break_strain).max(0.0) * sh;
             bd.max_l = m.spring_max_l + (m.shock_max_l - m.spring_max_l).max(0.0) * sh;
             bd.shock = if sh < 0.01 { 0.0 } else { sh * (-dt / m.shock_decay).exp() };
@@ -1914,7 +1923,7 @@ impl World {
                     let (ex, ey, ez) = (q[o] - q[oj], q[o + 1] - q[oj + 1], q[o + 2] - q[oj + 2]);
                     let r = (ex * ex + ey * ey + ez * ez).sqrt();
                     if bd.plast > 0.0 {
-                        let dl = r - l; let y = m.yield_ * l;
+                        let dl = r - l; let y = bd.yld * l;
                         if dl.abs() > y { l += (1.0 - (-bd.plast * dt).exp()) * (dl - y * dl.signum()); *spr_l.at(si) = l; }
                     }
                     // honey drawn out to a single file of particles: the thread snaps, and what hung on it simply falls
