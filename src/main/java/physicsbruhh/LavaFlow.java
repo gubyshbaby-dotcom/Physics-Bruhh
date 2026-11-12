@@ -53,7 +53,7 @@ public final class LavaFlow {
     /** Pieces that have left their block within this many ticks count as still on the move. */
     private static final int YOUNG = 400;
     /** How many pieces may be on the move around one place at a time, and how many there may be there at all: more lava waits in its blocks. */
-    private static final int MOST_YOUNG = 12, MOST = 40;
+    private static final int MOST_YOUNG = 6, MOST = 16;
     private static final double AROUND = 40.0;
     /** A piece has cooled to a crust after this many ticks, and is gone after this many (give or take). */
     static final int COOLED = 1600, LIFE = 2400;

@@ -746,10 +746,12 @@ public final class JavaSim implements GooSim {
             if (bd.state == 0 || !bd.awake) continue;
             if (bd.state == 2) {
                 // being removed: no physics any more, it just shrinks into the middle of its base and is gone
+                // (lava that has cooled does not draw together: it crumbles away where it lies, and takes longer about it)
                 float before = bd.fade;
-                bd.fade -= dt / FADE_TIME;
+                boolean lava = bd.mat == LAVA;
+                bd.fade -= dt / (lava ? LAVA_FADE_TIME : FADE_TIME);
                 if (bd.fade <= 0f) { freeBody(b); continue; }
-                float k = bd.fade / before;
+                float k = lava ? 1f : bd.fade / before;
                 float c0 = (bd.bb[0] + bd.bb[3]) * 0.5f, c1 = bd.bb[1], c2 = (bd.bb[2] + bd.bb[5]) * 0.5f;
                 bd.bb[0] = c0 + (bd.bb[0] - c0) * k; bd.bb[3] = c0 + (bd.bb[3] - c0) * k;
                 bd.bb[1] = c1 + (bd.bb[1] - c1) * k; bd.bb[4] = c1 + (bd.bb[4] - c1) * k;
@@ -1120,7 +1122,7 @@ public final class JavaSim implements GooSim {
     private static final int[][] CO = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 }, { 1, 1, 1 } };
     private static final int[][] ED = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
 
-    private static final float FADE_TIME = 0.45f, SOFT_TIME = 0.9f;
+    private static final float FADE_TIME = 0.45f, LAVA_FADE_TIME = 3f, SOFT_TIME = 0.9f;
     /** Seconds a freshly emitted slime particle keeps bonding; seconds after which nothing counts as in flight any more; particles per layer of a stream. */
     private static final float YOUNG = 2f, FLIGHT_MAX = 4f;
     private static final int STREAM_LAYER = 7;

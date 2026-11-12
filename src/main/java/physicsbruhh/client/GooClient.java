@@ -213,8 +213,8 @@ public final class GooClient {
         }
         clearLook = clear;
         lavaPresent = lava;
-        // (a piece that has just gone shrinks away for a moment yet: its particles are wanted that long)
-        if (lava) lavaLinger = 20; else if (lavaLinger > 0) lavaLinger--;
+        // (a piece that has just gone crumbles away for three seconds yet: its particles are wanted that long)
+        if (lava) lavaLinger = 80; else if (lavaLinger > 0) lavaLinger--;
         boolean liquid = clear && GooFluid.inUse();
         wantParticles = liquid || lava || lavaLinger > 0;
         wantMeshes = (liquid ? 0 : 3) | (lava && !LavaGoo.inUse() ? 4 : 0);

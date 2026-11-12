@@ -174,7 +174,8 @@ void main() {
     float thin = smoothstep(-0.14, 0.0, edge);
     float seam = 1.0 - smoothstep(0.10, 0.45, grain);
     float under = 0.20 + 0.36 * thin * thin + (0.16 + 0.14 * heat) * seam + 0.07 * rim;
-    vec3 rock = vec3(0.075, 0.055, 0.048) * (0.35 + 1.1 * grain) * (0.55 + 0.45 * top);
+    // (dark rock: next to black where only its own glow lights it, a dull grey-brown by daylight)
+    vec3 rock = vec3(0.075, 0.055, 0.048) * (0.35 + 1.1 * grain) * (0.55 + 0.45 * top) * (1.0 + 2.6 * LavaLightSet.w);
     vec3 light = mix(glow(hot), glow(under), crust);
     vec3 colour = rock * crust + (1.0 - exp(-light * 1.0));
 

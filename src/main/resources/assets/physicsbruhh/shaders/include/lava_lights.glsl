@@ -8,7 +8,7 @@ const int LAVA_LIGHTS = 24;
 
 layout(std140) uniform LavaLights {
     vec4 LavaLight[LAVA_LIGHTS];   // xyz: where (in the particles' coordinates), w: how strong
-    vec4 LavaLightSet;             // x: how many of them are in use, y: how far a light reaches (blocks), z: how bright the glow is on the whole
+    vec4 LavaLightSet;             // x: how many of them are in use, y: how far a light reaches (blocks), z: how bright the glow is on the whole, w: how much daylight falls on the lava (0..1)
 };
 
 #endif

@@ -64,6 +64,7 @@ public final class SelfTest {
     }
 
     private static int blastsBefore, lavaBefore;
+    private static final int[] trenchWent = new int[3];
 
     private static void run(MinecraftServer server, String... commands) {
         for (String command : commands) server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command);
@@ -100,6 +101,13 @@ public final class SelfTest {
         ServerLevel level = server.overworld();
         tick++;
         try {
+            if (tick > 258 && tick < 430) {
+                // when the lava in the trench lets go, block by block
+                for (int k = 0; k < 3; k++) if (trenchWent[k] == 0 && level.getBlockState(new BlockPos(30 + k, Y, 6)).isAir()) {
+                    trenchWent[k] = tick;
+                    PhysicsBruhh.LOGGER.info("SELFTEST lava: the block at {} in the trench let go at tick {} ({} let go in all, {} times a block was told to wait)", 30 + k, tick, LavaFlow.released - lavaBefore, LavaFlow.waiting);
+                }
+            }
             if (tick == 1) {
                 level.setChunkForced(0, 0, true);
                 level.setChunkForced(-1, 0, true);
@@ -345,15 +353,17 @@ public final class SelfTest {
                 expect("N: lava shut in on all sides stays a block", LavaFlow.isLavaSource(level.getBlockState(new BlockPos(26, Y, 2))) && level.getEntities(PhysicsBruhh.LAVA_GOO.get(), new AABB(new BlockPos(26, Y, 2)), e -> true).isEmpty());
                 expect("N: of lava in a trench the block at the open end goes first (" + level.getBlockState(new BlockPos(30, Y, 6)) + ", " + level.getBlockState(new BlockPos(31, Y, 6)) + ")",
                         level.getBlockState(new BlockPos(30, Y, 6)).isAir() && LavaFlow.isLavaSource(level.getBlockState(new BlockPos(31, Y, 6))) && LavaFlow.isLavaSource(level.getBlockState(new BlockPos(32, Y, 6))));
-            } else if (tick == 362) {
-                expect("N: ... and the blocks behind it follow, one after the other (" + (LavaFlow.released - lavaBefore) + " let go in all)",
-                        level.getBlockState(new BlockPos(31, Y, 6)).isAir() && level.getBlockState(new BlockPos(32, Y, 6)).isAir() && LavaFlow.released - lavaBefore == 4);
+            } else if (tick == 430) {
+                // (when each of the three went, in ticks after it was set down: one after the other, the game's own pace for lava between them)
+                expect("N: ... and the blocks behind it follow, one after the other (" + (LavaFlow.released - lavaBefore) + " let go in all; the three went " + (trenchWent[0] - 258) + ", " + (trenchWent[1] - 258) + " and " + (trenchWent[2] - 258) + " ticks after they were set down)",
+                        level.getBlockState(new BlockPos(31, Y, 6)).isAir() && level.getBlockState(new BlockPos(32, Y, 6)).isAir() && LavaFlow.released - lavaBefore == 4
+                                && trenchWent[0] > 0 && trenchWent[1] >= trenchWent[0] + 20 && trenchWent[2] >= trenchWent[1] + 20);
                 GooEntity lava = nearest(level, PhysicsBruhh.LAVA_GOO.get(), 22.5, 2.5);
                 expect("N: a body of lava is not something to hit or scoop", lava != null && !lava.isPickable() && !lava.hurtServer(level, level.damageSources().generic(), 1.0F) && !lava.isRemoved() && lava.fireImmune());
                 // with the rule off lava is the game's own again
                 run(server, "gamerule physicsbruhh:physical_lava false");
                 level.setBlock(new BlockPos(22, Y, 8), Blocks.LAVA.defaultBlockState(), 3);
-            } else if (tick == 398) {
+            } else if (tick == 466) {
                 boolean spread = false;
                 for (Direction side : Direction.Plane.HORIZONTAL) spread |= !level.getFluidState(new BlockPos(22, Y, 8).relative(side)).isEmpty();
                 expect("N: with the rule off lava flows block by block as ever", LavaFlow.isLavaSource(level.getBlockState(new BlockPos(22, Y, 8))) && spread && LavaFlow.released - lavaBefore == 4);
@@ -364,7 +374,7 @@ public final class SelfTest {
                 LavaFlow.release(level, new BlockPos(36, Y, 2), Direction.EAST);
                 LavaFlow.release(level, new BlockPos(34, Y, 8), Direction.EAST);
                 run(server, "setblock 37 " + (Y - 1) + " 2 minecraft:air", "summon minecraft:pig 36.5 " + Y + " 3.5 {NoAI:1b,Silent:1b}");
-            } else if (tick == 402) {
+            } else if (tick == 470) {
                 GooEntity first = nearest(level, PhysicsBruhh.LAVA_GOO.get(), 36.5, 2.5), second = nearest(level, PhysicsBruhh.LAVA_GOO.get(), 34.5, 8.5);
                 Entity pig = null;
                 for (Entity e : level.getEntities((Entity) null, new AABB(34, Y - 1, 1, 39, Y + 2, 6), e -> e instanceof LivingEntity && EntityType.getKey(e.getType()).getPath().equals("pig"))) pig = e;
@@ -387,10 +397,10 @@ public final class SelfTest {
                     LavaFlow.report(player, level, new LavaFlow.Report(new int[0], new int[] { second.getId() }, new float[] { 38.5F, Y, 8.5F }, new long[0]));
                     expect("N: ... but not on the word of a player who is nowhere near", second.getX() == before);
                 }
-            } else if (tick == 404) {
+            } else if (tick == 472) {
                 LavaFlow.anywhere = false;
                 run(server, "kill @e[type=minecraft:pig]", "goo clear", "kill @e[type=minecraft:item]", "fill 18 " + (Y - 2) + " -3 40 " + (Y + 2) + " 9 minecraft:air");
-            } else if (tick == 406) {
+            } else if (tick == 474) {
                 finish(server);
             }
         } catch (Throwable t) {

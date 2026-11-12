@@ -37,6 +37,7 @@ import net.minecraft.client.renderer.MappableRingBuffer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.RegisterRenderPipelinesEvent;
@@ -147,6 +148,7 @@ final class LavaGoo {
     private static float[] staged = new float[0];
     private static final float[] lights = new float[LIGHTS * 4];
     private static int stagedCount, lightCount, seenVersion = -1;
+    private static float underSky;
     private static BlockPos stagedOrigin = BlockPos.ZERO;
     private static final Long2IntOpenHashMap LIGHT_SLOT = new Long2IntOpenHashMap();
     private static float[] gathered = new float[0];
@@ -164,7 +166,7 @@ final class LavaGoo {
     }
 
     /** The lava among the simulation's latest particles, packed for the shader; and where it is, as lights. */
-    private static boolean stage() {
+    private static boolean stage(ClientLevel level) {
         synchronized (GooClient.PARTICLE_LOCK) {
             if (GooClient.particleVersion == seenVersion) return false;
             seenVersion = GooClient.particleVersion;
@@ -220,11 +222,21 @@ final class LavaGoo {
             count++;
         }
         lightCount = count;
+        // how open to the sky the lava lies, on the whole: its crust is lit by the day
+        float open = 0.0F;
+        int looked = 0;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int c = 0; c < count; c++) {
+            pos.set(stagedOrigin.getX() + (int) Math.floor(lights[c * 4]), stagedOrigin.getY() + (int) Math.floor(lights[c * 4 + 1] + 0.3F), stagedOrigin.getZ() + (int) Math.floor(lights[c * 4 + 2]));
+            open += level.getBrightness(LightLayer.SKY, pos) / 15.0F;
+            looked++;
+        }
+        underSky = looked == 0 ? 0.0F : open / looked;
         return true;
     }
 
     private static void draw(Minecraft mc, RenderLevelStageEvent.AfterLevel event) {
-        boolean fresh = stage();
+        boolean fresh = stage(mc.level);
         final int count = stagedCount;
         drawnParticles = count;
         drawnLights = lightCount;
@@ -335,7 +347,7 @@ final class LavaGoo {
         try (GpuBufferSlice.MappedView view = lightBuffer.currentBuffer().map(false, true)) {
             FloatBuffer out = view.data().order(ByteOrder.nativeOrder()).asFloatBuffer();
             out.put(0, lights, 0, LIGHTS * 4);
-            out.put(LIGHTS * 4, lightCount).put(LIGHTS * 4 + 1, LIGHT_REACH).put(LIGHTS * 4 + 2, 1.0F).put(LIGHTS * 4 + 3, 0.0F);
+            out.put(LIGHTS * 4, lightCount).put(LIGHTS * 4 + 1, LIGHT_REACH).put(LIGHTS * 4 + 2, 1.0F).put(LIGHTS * 4 + 3, underSky * GooFluid.daylight(event));
         }
     }
 

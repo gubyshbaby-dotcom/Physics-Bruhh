@@ -131,7 +131,8 @@ jobs:
           if ! grep -q "SELFTEST PASS" selftest.log; then
             # say why: the end of the server's own crash report, if it wrote one
             for f in run/selftest/crash-reports/*.txt; do [ -e "$f" ] && sed -n 1,60p "$f"; done
-            exit 1
+            # the client test still runs (a run of this job takes half an hour: it should say all it can); the job fails at its end
+            echo "SELFTEST did not pass" > selftest.failed
           fi
       - uses: actions/upload-artifact@v4
         if: always()
@@ -248,3 +249,7 @@ jobs:
             shots/
           retention-days: 7
           if-no-files-found: ignore
+      - name: Verdict of the server self test
+        if: always()
+        run: |
+          if [ -e selftest.failed ]; then echo "The in-game self test on the dedicated server failed: see that step."; exit 1; fi

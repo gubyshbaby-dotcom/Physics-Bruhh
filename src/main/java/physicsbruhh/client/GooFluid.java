@@ -460,6 +460,14 @@ final class GooFluid {
         }
     }
 
+    /** How much daylight there is, 0 (night, or a world without a sky) to 1 (a clear day). */
+    static float daylight(RenderLevelStageEvent.AfterLevel event) {
+        SkyRenderState sky = event.getLevelRenderState().skyRenderState;
+        String skybox = String.valueOf(sky.skybox);
+        if ("NONE".equals(skybox) || "END".equals(skybox)) return 0.0F;
+        return smooth(-0.12F, 0.25F, (float) Math.cos(sky.sunAngle)) * (0.35F + 0.65F * Math.max(0.0F, Math.min(1.0F, sky.rainBrightness)));
+    }
+
     private static float smooth(float from, float to, float x) {
         float t = Math.max(0.0F, Math.min(1.0F, (x - from) / (to - from)));
         return t * t * (3.0F - 2.0F * t);

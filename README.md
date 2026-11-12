@@ -287,13 +287,14 @@ out as one body.
   coming. A layer of it stays behind wherever it has been (in the hole too).
 - **A lake drains block by block.** When a block has let go, the blocks of lava next to the gap
   it left have room in their turn and follow, a second and a half apart: first the one behind the
-  hole, then its neighbours. At most a dozen pieces are let go around one place within twenty
-  seconds, and forty may lie there at all; further blocks hold until there is room again.
+  hole, then its neighbours. At most six pieces are let go around one place within twenty
+  seconds, and sixteen may lie there at all (each is seventeen hundred particles to simulate);
+  further blocks hold until there is room again.
 - **It cools.** For a few seconds it is all yellow. Then a crust of dark rock takes it over in
   patches: on top before the flanks, later where it is still on the move, last along its edges and
   wherever one looks along its skin. The patches belong to the lava: they travel with it and are
   drawn out and torn where it stretches. After a minute and a half it is a dull crust with a few
-  glowing seams, and after two minutes it is gone.
+  glowing seams, and after two minutes it crumbles away where it lies.
 - **It lights what is around it.** The game's light knows nothing of lava that is not a block (and
   the block that gave light is gone), so the glow on the walls and the floor is drawn by the mod.
 - **It burns.** A creature, a player or a dropped thing the lava touches is set alight and hurt

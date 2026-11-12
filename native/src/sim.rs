@@ -330,6 +330,7 @@ const LANES: usize = 8;
 const CALM_STEPS: u32 = 60;
 /// Seconds a removed body takes to shrink away.
 const FADE_TIME: f32 = 0.45;
+const LAVA_FADE_TIME: f32 = 3.0;
 /// Seconds goo that was let go by a box that stopped holding it stays unable to stick to anything.
 const LET_GO: f32 = 0.6;
 /// A thread of honey one particle thick holds nothing. Both ends of a spring count as that thin below
@@ -1429,11 +1430,13 @@ impl World {
             self.bodies[b].rev = self.rev;
             if self.bodies[b].state == 2 {
                 // being removed: no physics any more, it just shrinks into the middle of its base and is gone
+                // (lava that has cooled does not draw together: it crumbles away where it lies, and takes longer about it)
                 let bd = &mut self.bodies[b];
                 let before = bd.fade;
-                bd.fade -= dt / FADE_TIME;
+                let lava = bd.mat == LAVA;
+                bd.fade -= dt / if lava { LAVA_FADE_TIME } else { FADE_TIME };
                 if bd.fade <= 0.0 { self.free_body(b); continue; }
-                let k = bd.fade / before;
+                let k = if lava { 1.0 } else { bd.fade / before };
                 let c = [(bd.bb[0] + bd.bb[3]) * 0.5, bd.bb[1], (bd.bb[2] + bd.bb[5]) * 0.5];
                 for a in 0..3 { bd.bb[a] = c[a] + (bd.bb[a] - c[a]) * k; bd.bb[a + 3] = c[a] + (bd.bb[a + 3] - c[a]) * k; }
                 let fade = bd.fade;
