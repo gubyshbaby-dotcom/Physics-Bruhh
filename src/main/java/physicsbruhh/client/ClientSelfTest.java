@@ -469,13 +469,18 @@ final class ClientSelfTest {
                 } else if (into == 200 && taken) {
                     // something heavy falls into the lake
                     commands(server, "summon minecraft:falling_block 66.5 206 3.5 {BlockState:{Name:\"minecraft:anvil\"},Time:1,DropItem:0b}", "summon minecraft:pig 67.5 205 4.5 {NoAI:0b,Silent:1b}");
-                } else if (into == 260 && taken) {
+                } else if (into == 250 && taken) {
+                    // from the bank of the lake, looking across it: the bubbles and what the surface does
+                    commands(server, "tp @a 71.5 200 3.5 90 14");
+                } else if (into == 350 && taken) {
                     // from close by and low down: the front of the flow and the fall
-                    commands(server, "tp @a 71.5 201.2 -1.5 -35 12");
-                } else if (into == 420 && taken) {
+                    commands(server, "tp @a 71.5 200 -1.5 -35 12");
+                } else if (into == 430 && taken) {
                     // by night it is its own light
-                    commands(server, "time set midnight", "tp @a 71.5 206 -7.5 0 42");
-                } else if (into >= 520 && taken) {
+                    commands(server, "time set midnight", "tp @a 71.5 200 3.5 90 14");
+                } else if (into == 500 && taken) {
+                    commands(server, "tp @a 71.5 206 -7.5 0 42");
+                } else if (into >= 560 && taken) {
                     PhysicsBruhh.LOGGER.info("CLIENTTEST lava: drawn by the mod in {} sections, {} faces ({} in view), in {} frames; taking up what changed costs {} ms a frame; {} buffers sent to the graphics card; {} bubbles came up in the lake, {} have burst",
                             LavaClient.sections, LavaClient.quads, LavaClient.drawnQuads, LavaClient.frames - lavaFramesBefore, LavaClient.prepareMillis, LavaClient.uploads, LavaBubbles.risen, LavaBubbles.popped);
                     PhysicsBruhh.LOGGER.info("CLIENTTEST lava waves: {} steps over {} columns of lava, pushed {} times, {} calm blocks cut finer for them, {} splashes{}",
