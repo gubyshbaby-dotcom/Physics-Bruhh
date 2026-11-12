@@ -336,6 +336,9 @@ public final class SelfTest {
                 // N: lava. A block of it that finds room next to it lets go and becomes a body; one that is shut in stays a block.
                 run(server, "goo clear", "fill 18 " + (Y - 2) + " -3 40 " + (Y - 1) + " 9 minecraft:stone", "fill 18 " + Y + " -3 40 " + (Y + 2) + " 9 minecraft:air");
                 LavaFlow.anywhere = true; // no player is here
+                // (and nothing keeps these chunks going: lava only moves where the world ticks)
+                level.setChunkForced(1, 0, true);
+                level.setChunkForced(2, 0, true);
                 lavaBefore = LavaFlow.released;
                 level.setBlock(new BlockPos(22, Y, 2), Blocks.LAVA.defaultBlockState(), 3);
                 for (BlockPos wall : new BlockPos[] { new BlockPos(25, Y, 2), new BlockPos(27, Y, 2), new BlockPos(26, Y, 1), new BlockPos(26, Y, 3) }) level.setBlock(wall, Blocks.STONE.defaultBlockState(), 3);
@@ -399,6 +402,8 @@ public final class SelfTest {
                 }
             } else if (tick == 472) {
                 LavaFlow.anywhere = false;
+                level.setChunkForced(1, 0, false);
+                level.setChunkForced(2, 0, false);
                 run(server, "kill @e[type=minecraft:pig]", "goo clear", "kill @e[type=minecraft:item]", "fill 18 " + (Y - 2) + " -3 40 " + (Y + 2) + " 9 minecraft:air");
             } else if (tick == 474) {
                 finish(server);

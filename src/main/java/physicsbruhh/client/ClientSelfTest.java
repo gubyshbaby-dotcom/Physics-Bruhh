@@ -448,7 +448,8 @@ final class ClientSelfTest {
                     lavaFramesBefore = LavaClient.frames;
                     // (so that the little lake here bubbles within the seconds this takes, as a large one does within minutes)
                     LavaBubbles.rate = 40.0F;
-                    commands(server, "goo clear", "gamemode creative @a", "time set noon",
+                    // (this part is about lava that flows the game's way, block by block: a spring and a lava-fall; lava that lets go of its block comes after it)
+                    commands(server, "gamerule physicsbruhh:physical_lava false", "goo clear", "gamemode creative @a", "time set noon",
                             "fill 60 197 -8 86 199 20 minecraft:stone", "fill 60 200 -8 86 212 20 minecraft:air",
                             "fill 64 198 1 69 199 6 minecraft:lava",
                             "setblock 75 200 3 minecraft:lava",
@@ -464,7 +465,7 @@ final class ClientSelfTest {
                     if (into > 100) {
                         lavaProblem = LavaClient.active || LavaClient.sections != 0 ? "with a shader pack on, the mod still drew the lava" : null;
                         PhysicsBruhh.LOGGER.info("CLIENTTEST lava: left to the shader pack");
-                        step(74);
+                        step(lavaProblem == null ? 75 : 74);
                     }
                 } else if (into == 200 && taken) {
                     // something heavy falls into the lake
@@ -510,7 +511,7 @@ final class ClientSelfTest {
             case 75 -> lavaBody(mc, server, into);
             default -> {
                 LavaBubbles.rate = 1.0F;
-                commands(server, "time set noon", "goo clear", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
+                commands(server, "gamerule physicsbruhh:physical_lava true", "time set noon", "goo clear", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:air");
                 step(9);
             }
         }
@@ -531,7 +532,7 @@ final class ClientSelfTest {
             stage("lava that flows as a body: out of a wall, down it, over the floor");
             bodyReleased = physicsbruhh.LavaFlow.released; bodyPooled = physicsbruhh.LavaFlow.pooled; bodyBurnt = physicsbruhh.LavaFlow.burnt;
             bodyFrames = LavaGoo.frames; bodyPlain = GooRenderer.lavaPlainDraws; bodyMostParticles = 0; bodyMostLights = 0; bodyMostQuads = 0;
-            commands(server, "goo clear", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "time set midnight",
+            commands(server, "gamerule physicsbruhh:physical_lava true", "goo clear", "kill @e[type=minecraft:pig]", "kill @e[type=minecraft:item]", "kill @e[type=minecraft:falling_block]", "time set midnight",
                     "fill 60 200 -8 86 212 20 minecraft:air", "fill 60 197 -8 86 199 20 minecraft:stone",
                     "fill 70 200 0 72 204 12 minecraft:stone", "setblock 71 202 3 minecraft:lava",
                     // (the second: two blocks behind one another, the front one flush with the wall behind a stone that sticks out)

@@ -197,7 +197,7 @@ jobs:
             kill $SHOTS 2> /dev/null || true
             for f in shots/$name/*.xwd; do [ -e "$f" ] || continue; convert "xwd:$f" -quality 88 "${f%.xwd}.jpg" 2> /dev/null || true; rm -f "$f"; done
             echo "=== client test: $name"
-            grep -E "CLIENTTEST (stage|trace|in honey|bounced|dispensers|bottle|honey bottle|slime ball|wheel|thickness|by hand|gas|lava|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo .*(stopped|failed|error)|Gas: |Lava: |physicsbruhh.*(rror|ailed)|pipeline/[gl]|core/[gl]|shader pack|Iris is here" "$log" | cut -c1-900 | head -190 || true
+            grep -E "CLIENTTEST (stage|trace|in honey|bounced|dispensers|bottle|honey bottle|slime ball|wheel|thickness|by hand|gas|lava|final|PASS|FAIL)|Using the|graphics backend|Failed to create backend|Goo .*(stopped|failed|error)|Gas: |Lava: |physicsbruhh.*(rror|ailed)|pipeline/[gl]|core/[gl]|shader pack|Iris is here" "$log" | cut -c1-900 | head -260 || true
             grep -A 14 "liquid look of the goo failed" "$log" | head -40 || true
             echo "screenshots: $(ls shots/$name | wc -l)"
           }
