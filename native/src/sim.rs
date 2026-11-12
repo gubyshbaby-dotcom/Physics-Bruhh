@@ -184,6 +184,8 @@ pub struct World {
     act: Vec<u32>,
     c_start: Vec<u32>, c_fill: Vec<u32>, sorted: Vec<u32>, pkey: Vec<u32>, pbkt: Vec<u32>, cell: Vec<i32>,
     /// Neighbour lists: particle `i` owns entries `nbr_lo[i]..nbr_hi[i]` of `nbr` (the neighbour), `nw` (kernel value) and `ngx`, `ngy`, `ngz` (kernel gradient).
+    /// For each place of the cell order: whether a cell's run of particles starts there.
+    first: Vec<u8>,
     nbr: Vec<u32>, nbr_lo: Vec<u32>, nbr_hi: Vec<u32>, nw: Vec<f32>, ngx: Vec<f32>, ngy: Vec<f32>, ngz: Vec<f32>,
     /// Where the particles were when the density was taken (only kept where the wide registers are used: [`correct_wide`]).
     was: Vec<f32>,
@@ -802,7 +804,7 @@ impl World {
             born: Vec::new(), fly: Vec::new(), land: Vec::new(),
             act: Vec::new(),
             c_start: Vec::new(), c_fill: Vec::new(), sorted: Vec::new(), pkey: Vec::new(), pbkt: Vec::new(), cell: Vec::new(),
-            nbr: Vec::new(), nbr_lo: Vec::new(), nbr_hi: Vec::new(), nw: Vec::new(), ngx: Vec::new(), ngy: Vec::new(), ngz: Vec::new(), was: Vec::new(), sp: Vec::new(), runs: Vec::new(),
+            first: Vec::new(), nbr: Vec::new(), nbr_lo: Vec::new(), nbr_hi: Vec::new(), nw: Vec::new(), ngx: Vec::new(), ngy: Vec::new(), ngz: Vec::new(), was: Vec::new(), sp: Vec::new(), runs: Vec::new(),
             kp, ks, w0, rho0, wq,
             bodies: Vec::new(),
             st: Vec::new(), st_cells: Cells::default(),
@@ -1481,13 +1483,17 @@ impl World {
         let mask = (table - 1) as u32;
         self.c_start.clear(); self.c_start.resize(table + 1, 0);
         self.c_fill.resize(table, 0);
-        for a in 0..n_act {
-            let i = self.act[a] as usize; let o = i * 3;
-            let (ix, iy, iz) = ((self.q[o] * ih).floor() as i32 + 512, (self.q[o + 1] * ih).floor() as i32 + 512, (self.q[o + 2] * ih).floor() as i32 + 512);
-            self.cell[o] = ix; self.cell[o + 1] = iy; self.cell[o + 2] = iz;
-            self.pkey[i] = key3(ix, iy, iz);
-            let bk = hash3(ix, iy, iz, mask); self.pbkt[i] = bk; self.c_start[bk as usize + 1] += 1;
+        {
+            // (which cell a particle is in is its own business: side by side; counting them into the table is not)
+            let q = &self.q[..];
+            let (cell, pkey, pbkt) = (Shared::of(&mut self.cell), Shared::of(&mut self.pkey), Shared::of(&mut self.pbkt));
+            self.act.par_chunks(CHUNK * 4).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3;
+                let (ix, iy, iz) = ((q[o] * ih).floor() as i32 + 512, (q[o + 1] * ih).floor() as i32 + 512, (q[o + 2] * ih).floor() as i32 + 512);
+                // Safety: particle i is this thread's alone
+                unsafe { *cell.at(o) = ix; *cell.at(o + 1) = iy; *cell.at(o + 2) = iz; *pkey.at(i) = key3(ix, iy, iz); *pbkt.at(i) = hash3(ix, iy, iz, mask); }
+            } });
         }
+        for a in 0..n_act { let bk = self.pbkt[self.act[a] as usize]; self.c_start[bk as usize + 1] += 1; }
         for c in 0..table { self.c_start[c + 1] += self.c_start[c]; self.c_fill[c] = self.c_start[c]; }
         for a in 0..n_act { let i = self.act[a]; let b = self.pbkt[i as usize] as usize; self.sorted[self.c_fill[b] as usize] = i; self.c_fill[b] += 1; }
         // within a bucket, keep each cell's particles together (two cells rarely share a bucket; when they do, order them by cell)
@@ -1501,11 +1507,20 @@ impl World {
         // positions in that order, and where each cell's run of particles starts and ends
         self.sp.resize(n_act * 3 + LANES, 0.0); // (room to read eight candidates from anywhere)
         self.runs.clear();
-        for k in 0..n_act {
-            let i = self.sorted[k] as usize;
-            self.sp[k] = self.q[i * 3]; self.sp[n_act + k] = self.q[i * 3 + 1]; self.sp[2 * n_act + k] = self.q[i * 3 + 2];
-            if k == 0 || self.pkey[i] != self.pkey[self.sorted[k - 1] as usize] || self.pbkt[i] != self.pbkt[self.sorted[k - 1] as usize] { self.runs.push(k as u32); }
+        self.first.clear(); self.first.resize(n_act, 0);
+        {
+            let (q, sorted, pkey, pbkt) = (&self.q[..], &self.sorted[..], &self.pkey[..], &self.pbkt[..]);
+            let (sp, first) = (Shared::of(&mut self.sp), Shared::of(&mut self.first));
+            (0..n_act).into_par_iter().with_min_len(CHUNK * 4).for_each(|k| {
+                let i = sorted[k] as usize;
+                // Safety: place k of the order is written by nobody else
+                unsafe {
+                    *sp.at(k) = q[i * 3]; *sp.at(n_act + k) = q[i * 3 + 1]; *sp.at(2 * n_act + k) = q[i * 3 + 2];
+                    *first.at(k) = (k == 0 || pkey[i] != pkey[sorted[k - 1] as usize] || pbkt[i] != pbkt[sorted[k - 1] as usize]) as u8;
+                }
+            });
         }
+        for k in 0..n_act { if self.first[k] != 0 { self.runs.push(k as u32); } }
         self.runs.push(n_act as u32);
         // one cell at a time: the particles of the 27 cells around it are looked up once and then tried against each of its own
         const RUNS: usize = 48;
@@ -1895,11 +1910,15 @@ impl World {
                     unsafe { *dpx.at(i) = x; *dpy.at(i) = y; *dpz.at(i) = z; *sup_n.at(i) = held; }
                 } });
             }
-            for a in 0..n_act {
-                let i = self.act[a] as usize; let o = i * 3;
-                self.v[o] += self.dpx[i]; self.v[o + 1] += self.dpy[i]; self.v[o + 2] += self.dpz[i];
-                self.sup[i] = self.sup_n[i];
-                if self.land[i] != 0 { self.land[i] = 0; self.fly[i] = 0; }
+            {
+                let (dpx, dpy, dpz, sup_n) = (&self.dpx[..], &self.dpy[..], &self.dpz[..], &self.sup_n[..]);
+                let (v, sup, land, fly) = (Shared::of(&mut self.v), Shared::of(&mut self.sup), Shared::of(&mut self.land), Shared::of(&mut self.fly));
+                // Safety: particle i is this thread's alone
+                self.act.par_chunks(CHUNK * 4).for_each(|chunk| { for &iu in chunk { let i = iu as usize; let o = i * 3; unsafe {
+                    *v.at(o) += dpx[i]; *v.at(o + 1) += dpy[i]; *v.at(o + 2) += dpz[i];
+                    *sup.at(i) = sup_n[i];
+                    if *land.at(i) != 0 { *land.at(i) = 0; *fly.at(i) = 0; }
+                } } });
             }
         }
         let kill_y = self.kill_y;
@@ -1907,15 +1926,30 @@ impl World {
         // only bodies that were simulated this step get their bounds rebuilt; one that is shrinking away keeps its own
         let old_bb: Vec<[f32; 6]> = self.bodies.iter().map(|b| b.bb).collect();
         for b in 0..slots { if self.bodies[b].state == 1 && self.bodies[b].awake { self.bodies[b].bb = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]; self.bodies[b].anchored = 0; } }
-        for a in 0..n_act {
-            let i = self.act[a] as usize; let o = i * 3; let b = i / nb;
-            let mut sp = 0.0;
-            for c in 0..3 { self.p[o + c] = self.q[o + c]; sp += self.v[o + c] * self.v[o + c]; }
-            if self.p[o + 1] < kill_y || !sp.is_finite() { self.alive[i] = 0; self.scale[i] = 0.0; self.spr_n[i] = 0; self.anc_kind[i] = 0; continue; }
-            vsum[b] += sp;
-            let bd = &mut self.bodies[b];
-            for c in 0..3 { bd.bb[c] = bd.bb[c].min(self.p[o + c]); bd.bb[c + 3] = bd.bb[c + 3].max(self.p[o + c]); }
-            if self.anc_kind[i] != 0 { bd.anchored += 1; }
+        {
+            // every body takes its particles' new places, and adds up its own speed and bounds in the order of its particles
+            let (q, v) = (&self.q[..], &self.v[..]);
+            let (p, alive, scale, spr_n, anc_kind) = (Shared::of(&mut self.p), Shared::of(&mut self.alive), Shared::of(&mut self.scale), Shared::of(&mut self.spr_n), Shared::of(&mut self.anc_kind));
+            let done: Vec<(f32, [f32; 6], u32)> = awake.par_iter().map(|&bu| {
+                let b = bu as usize;
+                let (mut speed, mut bb, mut anchored) = (0.0f32, [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN], 0u32);
+                // Safety: the particles of body b are this thread's alone
+                for i in b * nb..(b + 1) * nb { unsafe {
+                    if *alive.at(i) == 0 { continue; }
+                    let o = i * 3;
+                    let mut sp = 0.0;
+                    for c in 0..3 { *p.at(o + c) = q[o + c]; sp += v[o + c] * v[o + c]; }
+                    if *p.at(o + 1) < kill_y || !sp.is_finite() { *alive.at(i) = 0; *scale.at(i) = 0.0; *spr_n.at(i) = 0; *anc_kind.at(i) = 0; continue; }
+                    speed += sp;
+                    for c in 0..3 { bb[c] = bb[c].min(*p.at(o + c)); bb[c + 3] = bb[c + 3].max(*p.at(o + c)); }
+                    if *anc_kind.at(i) != 0 { anchored += 1; }
+                } }
+                (speed, bb, anchored)
+            }).collect();
+            for (&bu, (speed, bb, anchored)) in awake.iter().zip(done) {
+                let b = bu as usize;
+                vsum[b] = speed; self.bodies[b].bb = bb; self.bodies[b].anchored = anchored;
+            }
         }
         // a body that lost its last particle this step is freed on the next one; until then its bounds stay real numbers
         for b in 0..slots { if self.bodies[b].bb[0] > self.bodies[b].bb[3] { self.bodies[b].bb = old_bb[b]; } }
